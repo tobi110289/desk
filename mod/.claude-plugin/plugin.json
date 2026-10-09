@@ -1,0 +1,6 @@
+{
+  "name": "desk",
+  "version": "0.1.0",
+  "description": "Live desk pane, sitting band and rule guards for the /desk workflow",
+  "types": "./types/index.d.ts"
+}

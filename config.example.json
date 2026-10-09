@@ -1,0 +1,13 @@
+{
+  "plainWorkspace": "w_YOUR_PLAIN_WORKSPACE_ID",
+  "repo": "your-org/your-app",
+  "botRepo": "your-org/your-support-bot",
+  "a2aHub": "https://a2a.example.com",
+  "notionTasks": "collection://00000000-0000-0000-0000-000000000000",
+  "notionUser": "00000000-0000-0000-0000-000000000000",
+  "sendHost": "your-ssh-host-alias",
+  "sendEnvFile": "/srv/your-adapter/.env",
+  "askPattern": "Pat|Lee |human gates|policy|prioritis",
+  "people": ["Pat", "Lee", "Kim"],
+  "ticketOwner": "Lee"
+}
