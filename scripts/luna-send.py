@@ -9,7 +9,8 @@ answer routes into the adapter's luna_followup job instead of a fresh triage. Sp
 The adapter listens on 127.0.0.1:8787 on the VPS only; every call goes `ssh <sendHost> curl …`. The bearer token lives in
 the adapter's .env on the box (config.json sendEnvFile, ORBOT_OPERATOR_API_TOKEN) and never leaves the box: the curl reads it there.
 Exit 0 = sent and verified; 3 = refused before queueing (guard 422, flag off, auth) → fall back per CARDS.md; 4 = queued
-but not sent within --wait (poll again with --status); 5 = failed / needs_human_recovery / max_turns_reached.
+but not sent within --wait (poll again with --status); 5 = failed / needs_human_recovery / max_turns_reached /
+not_sent (the adapter refused the send, e.g. draft score) / superseded (another operator reply took its place).
 """
 import json, sys, os, subprocess, time, shlex, re
 
@@ -74,7 +75,7 @@ def main(argv):
                 print(f"sent as Luna · verification {s.get('verificationStatus')} · turn {turn}/4 · action {aid}")
                 if '--json' in argv: print(json.dumps(s, indent=1, ensure_ascii=False))
                 return 0
-            if s.get('status') in ('failed', 'needs_human_recovery', 'max_turns_reached'):
+            if s.get('status') in ('failed', 'needs_human_recovery', 'max_turns_reached', 'not_sent', 'superseded'):
                 print(f"NOT sent: {s.get('status')} · {s.get('reason') or s.get('lastError')} · action {aid}")
                 return 5
         print(f"still {(last or {}).get('status', 'pending')} after {wait}s · poll: luna-send.py --status {aid}")
