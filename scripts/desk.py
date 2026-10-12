@@ -999,9 +999,14 @@ if not SCOPE:
         for f in files:
             nn=os.path.basename(f)[:2]; st,head=heads[nn]
             kind=st.split()[0].lower() if st else ''
-            if kind not in ('needs-triage','ready-for-agent'): continue
-            if re.search(r'^(PR|Fix):\s*#\d+',head,re.M) or re.search(r'^Worker:\s*\S',head,re.M): continue
-            if re.search(r'decision \d',(re.search(r'^Owner:\s*(.+)$',head,re.M) or [None,''])[1],re.I): continue
+            if kind not in ('needs-triage','ready-for-agent','ready-for-human'): continue
+            human=kind=='ready-for-human'
+            # ready-for-human with a PR is the normal state (a person merges or checks it), so the PR is a hint on
+            # that card, not a reason to skip; for the other two kinds a PR means the loop or HORST owns the file.
+            prs=sorted({int(n) for n in re.findall(r'#(\d+)',st+' '+' '.join(re.findall(r'^(?:PR|Fix):\s*(.+)$',head,re.M)))})
+            if not human and (re.search(r'^(PR|Fix):\s*#\d+',head,re.M) or re.search(r'^Worker:\s*\S',head,re.M)): continue
+            owner=(re.search(r'^Owner:\s*(.+)$',head,re.M) or [None,''])[1].strip()
+            if re.search(r'decision \d',owner,re.I): continue
             deps=[t for v in re.findall(r'^(?:Depends on|Blocked by):\s*(.+)$',head,re.M) for t in re.split(r'[\s,]+',v) if re.match(r'^\d{2}$',t)]
             if any(d!=nn and d in heads and not LOCAL_DONE.match(heads[d][0] or '') for d in deps): continue   # a blocking ticket is still open
             title=re.sub(r'^\d{2}\s*[—–-]?\s*','',(re.search(r'^#\s*(.+)$',head,re.M) or [None,os.path.basename(f)])[1])
@@ -1015,12 +1020,17 @@ if not SCOPE:
             tref=('T-'+_tm.group(1)) if _tm else (re.search(r'^Plain:\s*(T-\d+)',head,re.M) or [None,None])[1]
             if tref and state.get(tref,{}).get('phase') in ('handoff-running','pr-open'): continue   # a worker is on the thread already
             call=kind=='needs-triage'
-            add({'id':f"local:{feat}:{nn}",'ref':f"{feat}/{nn}",'lane':'TICKET','mins':2 if call else 1,'impact':lvl,'age':age,'waits':'person' if call else 'nobody',
-                 'pr':None,'task':None,'thread':None,'url':None,'kind':'local-call' if call else 'local-agent',
-                 'status':f"{'your call' if call else 'brief ready'} · {st[:60]}"+(f" · from {tref}" if tref else ''),
+            kind_key='local-call' if call else ('local-human' if human else 'local-agent')
+            head_word={'local-call':'your call','local-human':'needs a person','local-agent':'brief ready'}[kind_key]
+            if call: act=f"{feat} ticket {nn} ({title[:60]}): your call. Read the file and set its Status (ready-for-agent, ready-for-human, wontfix), or defer it"
+            elif human and prs: act=f"{feat} ticket {nn} ({title[:60]}) names PR {', '.join('#'+str(p) for p in prs)}: check the PR landed and what the file still asks of a person, then set Status: done (or say what stays open)"
+            elif human: act=f"{feat} ticket {nn} ({title[:60]}) waits for a person{' (owner: '+owner+')' if owner else ''}: do it, defer it with a trigger, or hand it to a worker if a brief would do"
+            else: act=f"{feat} ticket {nn} ({title[:60]}) has a brief and no worker: hand it to a worker, ticket it in Notion, or drop it"
+            add({'id':f"local:{feat}:{nn}",'ref':f"{feat}/{nn}",'lane':'TICKET','mins':1 if kind_key=='local-agent' else 2,'impact':lvl,'age':age,'waits':'nobody' if kind_key=='local-agent' else 'person',
+                 'pr':(prs[-1] if human and prs else None),'task':None,'thread':None,'url':None,'kind':kind_key,
+                 'status':f"{head_word} · {st[:60]}"+(f" · from {tref}" if tref else '')+(f" · owner: {owner[:30]}" if human and owner else ''),
                  'note':title[:200],
-                 'act':(f"{feat} ticket {nn} ({title[:60]}): your call. Read the file and set its Status (ready-for-agent, ready-for-human, wontfix), or defer it" if call
-                        else f"{feat} ticket {nn} ({title[:60]}) has a brief and no worker: hand it to a worker, ticket it in Notion, or drop it")+f" · {f.replace(HOME,'~')}",
+                 'act':act+f" · {f.replace(HOME,'~')}",
                  'score':round((IMPACT.get(lvl,1)+1+min(age/14,3))/3*10,1)})
 
 # ---------------------------------------------------------------- source 9b: Notion follow-up tickets we created (Tobias, 2026-10-06)
@@ -1154,6 +1164,7 @@ batch('SEND',act='Go through the {n} lines you typed but never sent: send / edit
 batch('TICKET',act='Work through the {n} follow-up tickets we filed that nobody moves: push, hand to an agent, or archive each',mins_each=1,waits='nobody',pred=lambda c:not c.get('kind'))
 batch('TICKET',key=lambda c:'local-agent',act='Hand the {n} local tickets with a ready brief to workers, ticket them in Notion, or drop them',mins_each=1,waits='nobody',pred=lambda c:c.get('kind')=='local-agent')
 batch('TICKET',key=lambda c:'local-call',act='Your call on {n} local tickets filed needs-triage: read each file and set its Status, or defer it',mins_each=2,waits='person',pred=lambda c:c.get('kind')=='local-call')
+batch('TICKET',key=lambda c:'local-human',act='Clear the {n} local tickets that wait for a person: close the ones whose PR landed, do or defer the rest',mins_each=2,waits='person',pred=lambda c:c.get('kind')=='local-human')
 batch('STALE',act='Sweep {n} loop entries with no caption: keep (write the caption) or drop each',mins_each=1,waits='nobody',pred=lambda c:not (c.get('status') or '').strip())   # 2026-09-16: captioned entries stay single cards; the batch hid 13 live rows behind one 'drop'
 live=[c for c in cards if c['score']>=0]
 live.sort(key=lambda c:(-c['score'],c['ref']))
