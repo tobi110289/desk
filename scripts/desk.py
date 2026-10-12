@@ -976,6 +976,53 @@ for r in (_runs[-1:] if _runs else []):
              'act':f"Sweep ticket {nn} from {r['date']} has no owner and no PR: hand it to a worker, ticket it in Notion, or drop it",
              'score':round((IMPACT['P2']+1+min(age,6))/2*10,1)})
 
+# ---------------------------------------------------------------- source 9c: local ticket files (2026-10-12)
+# The to-tickets / triage skills file tickets as ~/orbit-scratch/<feature>/issues/NN-<slug>.md with a `Status:` line.
+# Only the newest sweep's folder was read (above); about 150 open files in 60 other folders sat where no card saw them.
+# Every open file with no PR, no worker and no unfinished `Depends on:` / `Blocked by:` ticket in its folder is one TICKET
+# member, in two batches that read differently: `batch:TICKET:local-agent` (ready-for-agent: a brief waits for a worker)
+# and `batch:TICKET:local-call` (needs-triage: a person has to look at the file; this is the skill's sense of the word,
+# NOT the Plain-thread sense "bot stalled" that source 7c uses). The member status carries no age, so a closed batch
+# only comes back when a file's Status line changes or a new file appears.
+LOCAL_DONE=re.compile(r'^(done|closed|merged|wontfix|resolved|fixed|filed|folded|implemented|in review|in-progress)',re.I)
+def local_ticket_head(f):
+    try: head=open(f).read(3000)
+    except Exception: return '',''
+    m=re.search(r'^Status:\s*(.+)$',head,re.M); return (m.group(1).strip() if m else ''),head
+if not SCOPE:
+    _newest_sweep=f"sentry-sweep-{_runs[-1]['date']}" if _runs else None
+    for tdir in sorted(glob.glob(f'{HOME}/orbit-scratch/*/issues')):
+        feat=os.path.basename(os.path.dirname(tdir))
+        if feat==_newest_sweep: continue
+        files=sorted(glob.glob(f'{tdir}/*.md'))
+        heads={os.path.basename(f)[:2]:local_ticket_head(f) for f in files}
+        for f in files:
+            nn=os.path.basename(f)[:2]; st,head=heads[nn]
+            kind=st.split()[0].lower() if st else ''
+            if kind not in ('needs-triage','ready-for-agent'): continue
+            if re.search(r'^(PR|Fix):\s*#\d+',head,re.M) or re.search(r'^Worker:\s*\S',head,re.M): continue
+            if re.search(r'decision \d',(re.search(r'^Owner:\s*(.+)$',head,re.M) or [None,''])[1],re.I): continue
+            deps=[t for v in re.findall(r'^(?:Depends on|Blocked by):\s*(.+)$',head,re.M) for t in re.split(r'[\s,]+',v) if re.match(r'^\d{2}$',t)]
+            if any(d!=nn and d in heads and not LOCAL_DONE.match(heads[d][0] or '') for d in deps): continue   # a blocking ticket is still open
+            title=re.sub(r'^\d{2}\s*[—–-]?\s*','',(re.search(r'^#\s*(.+)$',head,re.M) or [None,os.path.basename(f)])[1])
+            created=(re.search(r'^Created:\s*(\d{4}-\d{2}-\d{2})',head,re.M) or [None,None])[1]
+            if not created:
+                try: created=datetime.datetime.fromtimestamp(os.stat(f).st_birthtime,datetime.timezone.utc).strftime('%Y-%m-%d')
+                except Exception: created=today
+            age=age_days(created+'T00:00:00Z')
+            lvl=(re.search(r'^(?:Impact|Severity|Priority):\s*(P[0-2])',head,re.M) or [None,'P2'])[1]
+            _tm=re.match(r'^t-(\d+)',feat)
+            tref=('T-'+_tm.group(1)) if _tm else (re.search(r'^Plain:\s*(T-\d+)',head,re.M) or [None,None])[1]
+            if tref and state.get(tref,{}).get('phase') in ('handoff-running','pr-open'): continue   # a worker is on the thread already
+            call=kind=='needs-triage'
+            add({'id':f"local:{feat}:{nn}",'ref':f"{feat}/{nn}",'lane':'TICKET','mins':2 if call else 1,'impact':lvl,'age':age,'waits':'person' if call else 'nobody',
+                 'pr':None,'task':None,'thread':None,'url':None,'kind':'local-call' if call else 'local-agent',
+                 'status':f"{'your call' if call else 'brief ready'} · {st[:60]}"+(f" · from {tref}" if tref else ''),
+                 'note':title[:200],
+                 'act':(f"{feat} ticket {nn} ({title[:60]}): your call. Read the file and set its Status (ready-for-agent, ready-for-human, wontfix), or defer it" if call
+                        else f"{feat} ticket {nn} ({title[:60]}) has a brief and no worker: hand it to a worker, ticket it in Notion, or drop it")+f" · {f.replace(HOME,'~')}",
+                 'score':round((IMPACT.get(lvl,1)+1+min(age/14,3))/3*10,1)})
+
 # ---------------------------------------------------------------- source 9b: Notion follow-up tickets we created (Tobias, 2026-10-06)
 # tickets.py reads ~/orbit-scratch/desk/notion-tickets.json (the desk mod writes it through the Notion MCP) and links
 # each ticket to Plain threads (notion_ticket field, ORB-<id> in loop notes). Two cards: one TICKET batch of the idle
@@ -1104,7 +1151,9 @@ for _i,_cid in enumerate(desk.get('top',[])):
     for c in cards:
         if c['id']==_cid and c['score']>=0: c['score']=2000-_i
 batch('SEND',act='Go through the {n} lines you typed but never sent: send / edit / drop each',mins_each=1,waits='agent')
-batch('TICKET',act='Work through the {n} follow-up tickets we filed that nobody moves: push, hand to an agent, or archive each',mins_each=1,waits='nobody')
+batch('TICKET',act='Work through the {n} follow-up tickets we filed that nobody moves: push, hand to an agent, or archive each',mins_each=1,waits='nobody',pred=lambda c:not c.get('kind'))
+batch('TICKET',key=lambda c:'local-agent',act='Hand the {n} local tickets with a ready brief to workers, ticket them in Notion, or drop them',mins_each=1,waits='nobody',pred=lambda c:c.get('kind')=='local-agent')
+batch('TICKET',key=lambda c:'local-call',act='Your call on {n} local tickets filed needs-triage: read each file and set its Status, or defer it',mins_each=2,waits='person',pred=lambda c:c.get('kind')=='local-call')
 batch('STALE',act='Sweep {n} loop entries with no caption: keep (write the caption) or drop each',mins_each=1,waits='nobody',pred=lambda c:not (c.get('status') or '').strip())   # 2026-09-16: captioned entries stay single cards; the batch hid 13 live rows behind one 'drop'
 live=[c for c in cards if c['score']>=0]
 live.sort(key=lambda c:(-c['score'],c['ref']))
