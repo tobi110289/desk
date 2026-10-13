@@ -122,6 +122,8 @@ declare module "claude-code" {
       picked: string;
       /** True while desk.py runs in the background. */
       isGathering: boolean;
+      /** True from turn.start to the main loop's turn.complete: Claude is working, the pane hides "Work this card". */
+      isBusy: boolean;
       hasReplyPass: boolean;
       captioned: string[];
       isPlainOpen: boolean;

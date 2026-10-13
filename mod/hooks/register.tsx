@@ -212,6 +212,9 @@ const isGathering = atom(
   { plugin: "desk", key: "isGathering" } as const,
   false,
 );
+// True from turn.start to the main loop's turn.complete: the pane shows it and hides the "Work this card" button,
+// so the next card is not started while Claude still works the current one (asked for 2026-10-13).
+const isBusy = atom({ plugin: "desk", key: "isBusy" } as const, false);
 const hasReplyPass = atom(
   { plugin: "desk", key: "hasReplyPass" } as const,
   false,
@@ -350,6 +353,15 @@ async function isPaneOpen($: EngineInterface) {
   }
 }
 
+// The status line: the open count, and "working" while a turn runs.
+async function showStatus($: EngineInterface) {
+  const desk = await read($, view);
+  const open = desk.cards.filter((card) => card.verb === null).length;
+  const busy = await read($, isBusy);
+  const text = `${open > 0 ? `${open} waiting` : ""}${busy ? `${open > 0 ? " · " : ""}working` : ""}`;
+  $.ui.status(text === "" ? undefined : text);
+}
+
 async function loadConfig($: EngineInterface) {
   if (isConfigLoaded) {
     return;
@@ -405,8 +417,7 @@ async function refresh($: EngineInterface, isForced = false) {
     await update($, working, (id) => (isOpen(id) ? id : null));
     await update($, brief, (b) => (isOpen(b?.cardId) ? b : null));
 
-    const open = fresh.cards.filter((card) => card.verb === null).length;
-    $.ui.status(open > 0 ? `${open} waiting` : undefined);
+    await showStatus($);
 
     const statsJson = await $.fs.read(statsPath).catch(() => "");
     if (statsJson !== "") {
@@ -883,6 +894,8 @@ export const register: Register = (on) => {
       answeredCard = pendingAnswer;
       pendingAnswer = null;
     }
+    await update($, isBusy, () => true);
+    await showStatus($);
 
     return next(e);
   });
@@ -978,6 +991,9 @@ export const register: Register = (on) => {
     if (e.agentId) {
       return r;
     }
+    // every end counts (answer, abort, error): the desk is free for the next card
+    await update($, isBusy, () => false);
+    await showStatus($);
     const worked = answeredCard;
     answeredCard = null;
     if (e.reason !== "answer" || e.answer.trim() === "") {
@@ -1016,6 +1032,11 @@ export const register: Register = (on) => {
         <Text dimColor>
           {waiting} waiting · closed today {desk.closedToday}
         </Text>
+        {(await read($, isBusy)) && (
+          <Text bold color="yellow">
+            ● working
+          </Text>
+        )}
         <Button
           key="leave"
           label="Leave card"
@@ -1035,6 +1056,7 @@ export const register: Register = (on) => {
     const index = rowOf(desk, await read($, picked));
     const card = desk.cards[index];
     const isRunning = await read($, isGathering);
+    const busy = await read($, isBusy);
     const stats = await read($, plain);
     const isOpen = await read($, isPlainOpen);
     const shown = await read($, brief);
@@ -1061,6 +1083,11 @@ export const register: Register = (on) => {
             {desk.scope !== "" && <Text color="yellow"> · {desk.scope}</Text>}
           </Text>
           <Box gap={1}>
+            {busy && (
+              <Text bold color="yellow">
+                ● CLAUDE WORKING
+              </Text>
+            )}
             <Text dimColor>
               {isRunning ? "ranking… " : ""}
               {desk.generatedAt.slice(11, 16)}Z
@@ -1167,7 +1194,13 @@ export const register: Register = (on) => {
               </Box>
             )}
             <Box marginTop={1} gap={1} alignItems="center">
-              {card.verb === null && current === null && (
+              {busy && card.verb === null && current === null && (
+                <Text color="yellow">
+                  Claude is working, wait for the turn to end before the next
+                  card
+                </Text>
+              )}
+              {!busy && card.verb === null && current === null && (
                 <Button
                   key="work"
                   variant="primary"
