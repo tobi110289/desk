@@ -1,6 +1,7 @@
 {
   "plainWorkspace": "w_YOUR_PLAIN_WORKSPACE_ID",
   "repo": "your-org/your-app",
+  "projects": ["~/your-app", "~/worktrees/your-app"],
   "botRepo": "your-org/your-support-bot",
   "a2aHub": "https://a2a.example.com",
   "notionTasks": "collection://00000000-0000-0000-0000-000000000000",

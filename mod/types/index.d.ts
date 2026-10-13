@@ -141,6 +141,8 @@ declare module "claude-code" {
       isPlainOpen: boolean;
       /** False while the open-cards list is folded to its header line (`l`). */
       isListOpen: boolean;
+      /** null until checked; then whether the session root lies inside a desk project (config `projects` or `repo`). */
+      isHome: boolean | null;
       plain: PlainStats | null;
       brief: DeskBrief | null;
       /** One line per card, where it stands after the last reply (a small model writes it). */

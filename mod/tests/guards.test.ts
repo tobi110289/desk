@@ -17,15 +17,21 @@ const CARDS = JSON.stringify({
   parked: [],
 });
 const DESK = JSON.stringify({ cards: {}, log: [] });
+const CONFIG = JSON.stringify({ projects: ["~/app"] });
 
-const world = (on: On) => {
+const world = (on: On, root = "/home/t/app") => {
   mock.env(on, { HOME: "/home/t" });
   mock.clock(on, { now: Date.parse("2026-10-02T10:00:00Z") });
+  on("session.root", () => ({ value: root }));
   on("fs.stat", () => ({
     value: { kind: "file" as const, size: 1, mtimeMs: 1, isLink: false },
   }));
   on("fs.read", (_$, e) => ({
-    value: e.path.endsWith("cards.json") ? CARDS : DESK,
+    value: e.path.endsWith("cards.json")
+      ? CARDS
+      : e.path.endsWith("config.json")
+        ? CONFIG
+        : DESK,
   }));
   const ran: string[] = [];
   on("tool.call", (_$, e) => {
@@ -68,6 +74,18 @@ test("a Plain reply needs the one-call pass", async ($, on) => {
   await $.command.run({ command: "desk-reply-once" } as never);
   expect((await $.tool.call(reply)).deny).toBeUndefined();
   expect((await $.tool.call(reply)).deny).toBeDefined();
+  expect(ran).toEqual(["mcp__plain__reply_to_thread"]);
+});
+
+test("outside a desk project the mod steps aside: no guard, no commands", async ($, on) => {
+  const { ran } = world(on, "/home/t/elsewhere");
+  const reply = {
+    tool: "mcp__plain__reply_to_thread" as const,
+    threadId: "th_1",
+    text: "hi",
+  } as never;
+
+  expect((await $.tool.call(reply)).deny).toBeUndefined();
   expect(ran).toEqual(["mcp__plain__reply_to_thread"]);
 });
 

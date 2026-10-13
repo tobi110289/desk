@@ -33,6 +33,45 @@ const config = {
   notionUser: "",
 };
 let isConfigLoaded = false;
+// Directory prefixes (config.json `projects`, `~` allowed) where the desk belongs; empty means "any checkout of `repo`".
+let projectRoots: string[] = [];
+// null until the first hook asked; then whether this session sits inside a desk project. Outside, every hook steps aside.
+const isHome = atom({ plugin: "desk", key: "isHome" } as const, null as boolean | null);
+
+/** Once per session: the root sits under a configured project prefix, or its origin remote is the configured repo. */
+async function atHome($: EngineInterface): Promise<boolean> {
+  const known = await read($, isHome);
+  if (known !== null) {
+    return known;
+  }
+  await loadConfig($);
+  const is = await findHome($);
+  await update($, isHome, () => is);
+  return is;
+}
+
+async function findHome($: EngineInterface) {
+  const home = (await $.env.get("HOME")) ?? "";
+  const root = await $.session.root().catch(() => "");
+  if (root === "") {
+    return false;
+  }
+  for (const prefix of projectRoots) {
+    const dir = prefix.replace(/^~/, home).replace(/\/$/, "");
+    if (root === dir || root.startsWith(`${dir}/`)) {
+      return true;
+    }
+  }
+  if (config.repo === "") {
+    return false;
+  }
+  const ran = await $.process
+    .run(["git", "-C", root, "remote", "get-url", "origin"], {
+      timeoutMs: 5_000,
+    })
+    .catch(() => null);
+  return ran !== null && ran.exitCode === 0 && ran.stdout.includes(config.repo);
+}
 // Tickets we file: the Notion user in config only. An integration bot that files for the team stays out
 // (Tobias, 2026-10-06).
 const ticketsSql = () =>
@@ -411,6 +450,9 @@ async function loadConfig($: EngineInterface) {
     for (const key of Object.keys(config) as (keyof typeof config)[]) {
       config[key] = text(file[key]);
     }
+    projectRoots = Array.isArray(file.projects)
+      ? file.projects.map((one) => text(one)).filter((one) => one !== "")
+      : [];
     isConfigLoaded = true;
   } catch {
     // No config yet: links carry no workspace and the ticket sync stays off.
@@ -819,6 +861,10 @@ async function summarize($: EngineInterface, card: DeskCard, answer: string) {
 
 export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
+    if (!(await atHome($))) {
+      // Another project: no commands, no tools, no pollers, no pane. The other hooks check isHome.
+      return next(e);
+    }
     await Promise.all([
       $.command.register({
         name: "desk-pane",
@@ -902,6 +948,9 @@ export const register: Register = (on) => {
   }));
 
   on("tool.call", async ($, e, next) => {
+    if (!(await atHome($))) {
+      return next(e);
+    }
     const tool = String(e.tool);
 
     if (REPLY_TOOLS.includes(tool)) {
@@ -971,6 +1020,9 @@ export const register: Register = (on) => {
   });
 
   on("turn.start", async ($, e, next) => {
+    if (!(await atHome($))) {
+      return next(e);
+    }
     isSentThisTurn = false;
     isClosedThisTurn = false;
     if (pendingAnswer !== null) {
@@ -987,6 +1039,9 @@ export const register: Register = (on) => {
   // tells Claude which tools record the work.
   on("prompt.context", async ($, e, next) => {
     const r = await next(e);
+    if (!(await atHome($))) {
+      return r;
+    }
     const id = await read($, working);
     const open = await read($, brief);
     if (id === null && open === null && !(await isPaneOpen($))) {
@@ -1044,7 +1099,7 @@ export const register: Register = (on) => {
   // Two claims send Claude back once: a message "sent" with no send this turn, and an answered card with no verb.
   on("classic.Stop", async ($, e, next) => {
     const r = await next(e);
-    if (e.agent_id || e.stop_hook_active || r.block) {
+    if (e.agent_id || e.stop_hook_active || r.block || !(await atHome($))) {
       return r;
     }
     const reply = e.last_assistant_message ?? "";
@@ -1079,7 +1134,7 @@ export const register: Register = (on) => {
 
   on("turn.complete", async ($, e, next) => {
     const r = await next(e);
-    if (e.agentId) {
+    if (e.agentId || !(await atHome($))) {
       return r;
     }
     // every end counts (answer, abort, error): the desk is free for the next card
@@ -1102,6 +1157,9 @@ export const register: Register = (on) => {
 
   // The band names the card being worked; with none, the status line's count is enough.
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
+    if (!(await atHome($))) {
+      return next(e);
+    }
     const id = await read($, working);
     const desk = await read($, view);
     const card = desk.cards.find((one) => one.id === id);
