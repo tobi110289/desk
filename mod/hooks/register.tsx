@@ -1155,16 +1155,24 @@ export const register: Register = (on) => {
     const current = card && shown?.cardId === card.id ? shown : null;
     const summary = card ? (await read($, summaries))[card.id] : undefined;
     const open = desk.cards.filter((one) => one.verb === null).length;
-    const width = Math.max(20, e.props.bodyColumns - 2);
+    // The engine's own frame has one color; this border is the one the eye finds when the desk holds the keyboard.
+    const focused = e.props.isFocused;
+    const width = Math.max(20, e.props.bodyColumns - 4);
     const rule = "─".repeat(width);
     const refWidth = Math.max(5, ...desk.cards.map((one) => one.ref.length));
 
     return (
-      <Box flexDirection="column" paddingX={1}>
+      <Box
+        flexDirection="column"
+        paddingX={1}
+        borderStyle={focused ? "double" : "round"}
+        borderColor={focused ? "cyan" : "gray"}
+        borderDimColor={!focused}
+      >
         <Box justifyContent="space-between">
           <Text wrap="wrap">
-            <Text bold color="cyan">
-              DESK
+            <Text bold color="cyan" inverse={focused}>
+              {focused ? " DESK " : "DESK"}
             </Text>{" "}
             <Text bold>{open}</Text>
             <Text dimColor> waiting · </Text>
