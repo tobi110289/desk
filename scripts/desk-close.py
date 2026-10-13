@@ -40,6 +40,10 @@ else:
                 thr[ref]['status']=cap
                 thr[ref]['note']=((thr[ref].get('note') or '')+f" | desk {today}: "+' '.join(sys.argv[3:])).strip(' |')
                 json.dump(st,open(sp,'w'),indent=2,ensure_ascii=False)
+                # 2026-10-13: a caption that says done ends the entry. one entry sat 18 days as a STALE card: validated as
+                # 'blocked' (already shipped), the desk captioned it 'done; …' twice, but the reaper only reads running
+                # entries and the archive only moves phase done, so nothing ever flipped the phase.
+                if re.match(r'done\b',cap.strip(),re.I) and thr[ref].get('phase') in ('blocked','pr-open'): thr[ref]['phase']='done'
                 status=cap if cid.startswith('loop:') else ('loop done, thread TODO: '+cap if cid.startswith('gap:') else status)
         except Exception as e: print('caption not written:',e)
     c['closed']={'verb':verb,'date':today,'note':' '.join(sys.argv[3:]),'members':members,'status':status}
