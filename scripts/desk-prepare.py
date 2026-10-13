@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""desk-prepare.py — prepare the top cards ahead of time, so pressing `w` shows the options at once.
+
+The slow part of a card is the push-right step: reading the thread, the memory block, the PR, then drafting.
+This script does that for the top N open cards in the background, right after a gather: it collects the raw
+material per card (scripts only, no LLM), hands one headless `claude -p` per card a self-contained context, and
+writes the answer to briefs/<card id>.json. The desk mod shows a prepared card with a marker and tells Claude to
+start from the brief; Claude only checks the brief is still current before it calls desk_card.
+
+A brief is bound to the card's caption (status + act). When the caption changes the brief is stale and the next
+pass writes a new one. Batch cards and lanes that take the session over are never prepared.
+
+  desk-prepare.py [--top N] [--force] [--dry] [<card id> …]
+
+Env: PLAIN_API_KEY (thread reads), DESK_PREPARE_MODEL (default sonnet), DESK_PREPARE_TOP (default 5).
+Never runs inside a prepare child (DESK_PREPARE=1) so a child cannot start children.
+"""
+import datetime
+import glob
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+HOME = os.path.expanduser('~')
+DESK = f'{HOME}/orbit-scratch/desk'
+BRIEFS = f'{DESK}/briefs'
+SKILL = os.path.expanduser('~/.claude/skills/desk')
+LOCK_S = 5 * 60
+MODEL = os.environ.get('DESK_PREPARE_MODEL', 'sonnet')
+# lanes whose recipe has a prepare step that scripts can feed; SEND/STALE/TICKET are batches, SWEEP runs and sweep tickets take the session over
+LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST', 'REVIEW', 'RUN', 'INBOX', 'TASK', 'SWEEP'}
+SKIP_ID = re.compile(r'^(batch:|sweep:|sweep-ticket:|prh:|memory:)')
+# the fixed option sets per lane (CARDS.md lanes table); the model picks the order, never the set
+OPTIONS = {
+    'REPLY': ['Send it', 'I sent it already', 'Edit then send', 'Defer until a trigger', 'Drop'],
+    'NOTIFY': ['Send it', 'I sent it already', 'Edit then send', 'Nobody to tell (mark done)', 'Defer'],
+    'PROMISE': ['Reply with a status', 'I sent it already', 'Close the loop (nothing owed)', 'Hand to a worker / ticket', 'Defer', 'Drop'],
+    'FAST': ['Claim + validate now', 'Draft the reply', 'I sent it already', 'Hand to a worker', 'Defer', 'Drop (unpin)'],
+    'REVIEW': ['Hand the rework to its agent', 'Review it now', 'Close the PR', 'Defer'],
+    'RUN': ['Go (agent runs it now)', 'Show me the command first', 'Defer', 'Drop'],
+    'INBOX': ['Answer now', 'Defer', 'Drop (reply as human: declined)', 'Close as read', 'Reply with a note'],
+    'TASK': ['Start it now', 'Hand it to agents', 'Defer', 'Drop'],
+    'SWEEP': ['Answer', 'Defer', 'Drop (accepted risk, recorded)'],
+}
+VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'delegate', 'Defer': 'defer', 'Defer until a trigger': 'defer',
+         'Drop': 'drop', 'Drop (unpin)': 'drop', 'Nobody to tell (mark done)': 'do', 'Reply with a status': 'delegate',
+         'Close the loop (nothing owed)': 'do', 'Hand to a worker / ticket': 'delegate', 'Claim + validate now': 'do',
+         'Draft the reply': 'delegate', 'Hand to a worker': 'delegate', 'Hand the rework to its agent': 'delegate',
+         'Review it now': 'do', 'Close the PR': 'drop', 'Go (agent runs it now)': 'do', 'Show me the command first': 'decide',
+         'Answer now': 'decide', 'Drop (reply as human: declined)': 'drop', 'Close as read': 'do', 'Reply with a note': 'delegate',
+         'Start it now': 'do', 'Hand it to agents': 'delegate', 'Answer': 'decide', 'Drop (accepted risk, recorded)': 'drop'}
+SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'fact': {'type': 'string', 'description': 'the single fact that decides this card, one sentence'},
+        'draft': {'type': 'string', 'description': 'the drafted consequence: the customer text, the reply, the command, or the decision; empty when nothing is drafted'},
+        'options': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'why': {'type': 'string'}}, 'required': ['label', 'why']},
+                    'description': "the lane's fixed options, recommended first"},
+        'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence line in the context that backs it'},
+        'openChecks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'claims the draft needs that the context does not back; Claude verifies these live before desk_card'},
+        'resolved': {'type': 'boolean', 'description': 'true when the context shows the card is already resolved (reply sent, PR merged, line submitted)'},
+    },
+    'required': ['fact', 'draft', 'options', 'checks', 'openChecks', 'resolved'],
+}
+log_lock = threading.Lock()
+
+
+def log(msg):
+    with log_lock:
+        with open(f'{BRIEFS}/prepare.log', 'a') as f:
+            f.write(f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')} {msg}\n")
+
+
+def sh(argv, timeout=60, env=None):
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env={**os.environ, **(env or {})})
+        return (r.stdout or '') + (('\n[stderr] ' + r.stderr.strip()) if r.returncode and r.stderr.strip() else '')
+    except Exception as e:
+        return f'[failed: {e}]'
+
+
+PLAIN_Q = '''query($id: ID!, $n: Int!){ thread(threadId:$id){ ref title status statusDetail{ __typename } threadFields{ key stringValue }
+ customer{ fullName email{ email } } timelineEntries(first: $n){ edges{ node{ timestamp{ iso8601 }
+ actor{ __typename ... on UserActor{ user{ fullName } } ... on MachineUserActor{ machineUser{ fullName } } ... on CustomerActor{ customer{ fullName } } }
+ entry{ __typename ... on NoteEntry{ noteText: text } ... on EmailEntry{ subject textContent } ... on ChatEntry{ chatText: text }
+ ... on SlackMessageEntry{ slackText: text } ... on SlackReplyEntry{ slackReplyText: text } ... on ThreadStatusTransitionedEntry{ nextStatus } } } } } } }'''
+
+
+def plain_timeline(thread_id, n=14, width=2500):
+    """The thread's head and its newest n timeline entries, notes and mails in full (plain-tl.sh cuts them at 160 chars,
+    which loses the Hermes brief and the validation note the draft depends on). Read-only, one request."""
+    key = os.environ.get('PLAIN_API_KEY')
+    if not key:
+        return '(no PLAIN_API_KEY: thread not read)'
+    import urllib.request
+    body = json.dumps({'query': PLAIN_Q, 'variables': {'id': thread_id, 'n': n}}).encode()
+    req = urllib.request.Request('https://core-api.uk.plain.com/graphql/v1', data=body, headers={
+        'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'User-Agent': 'desk-prepare/1 (+python-urllib)'})
+    try:
+        with urllib.request.urlopen(req, timeout=40) as r:
+            t = json.load(r)['data']['thread']
+    except Exception as e:
+        return f'(thread read failed: {e})'
+    if not t:
+        return '(thread not found)'
+    lines = [f"{t['ref']} {t['status']}/{(t.get('statusDetail') or {}).get('__typename')} · {t['title']} · customer {t['customer']['fullName']} <{(t['customer'].get('email') or {}).get('email')}>",
+             '; '.join(f"{f['key']}={f['stringValue']}" for f in t.get('threadFields') or [])]
+    for e in t['timelineEntries']['edges']:
+        n_ = e['node']; a = n_.get('actor') or {}; en = n_.get('entry') or {}
+        who = ((a.get('user') or {}).get('fullName') or (a.get('machineUser') or {}).get('fullName') or (a.get('customer') or {}).get('fullName') or a.get('__typename'))
+        text = en.get('noteText') or en.get('textContent') or en.get('chatText') or en.get('slackText') or en.get('slackReplyText') or en.get('nextStatus') or ''
+        if en.get('subject') and en.get('textContent'):
+            text = f"[{en['subject']}] {text}"
+        text = re.sub(r'\n{3,}', '\n\n', text or '').strip()
+        lines.append(f"\n--- {n_['timestamp']['iso8601'][:16]} {en.get('__typename', '').replace('Entry', '')} {who}\n{text[:width]}{'…' if len(text) > width else ''}")
+    return '\n'.join(lines)
+
+
+def fingerprint(card):
+    return hashlib.sha1(f"{card.get('status') or ''}|{card.get('act') or ''}".encode()).hexdigest()[:12]
+
+
+def brief_path(cid):
+    return f"{BRIEFS}/{re.sub(r'[^A-Za-z0-9._-]', '_', cid)}.json"
+
+
+def fresh(card):
+    try:
+        b = json.load(open(brief_path(card['id'])))
+    except Exception:
+        return False
+    return b.get('fingerprint') == fingerprint(card) and not b.get('error')
+
+
+def recipe(lane, cid):
+    """The lane's recipe section from CARDS.md (plus the memory and Luna sections for customer-text lanes)."""
+    try:
+        md = open(f'{SKILL}/CARDS.md').read()
+    except Exception:
+        return ''
+    want = {lane}
+    if cid.startswith('notion:'):
+        want.add('RUN `notion:<ref>`')
+    out = []
+    for m in re.finditer(r'^### (.+?)$(.*?)(?=^##+ |\Z)', md, re.S | re.M):
+        head = m.group(1)
+        if any(head.startswith(w) for w in want) or (lane in ('REPLY', 'NOTIFY', 'PROMISE', 'FAST') and (head.startswith('Support memory') or head.startswith('Sending as Luna'))):
+            out.append(f'### {head}\n{m.group(2).strip()}\n')
+    return '\n'.join(out)[:9000]
+
+
+def material(card):
+    """Raw inputs per card, collected by scripts: the thread timeline, the memory block, the PR, the local file."""
+    parts = []
+    ref = card.get('ref') or ''
+    thread = card.get('thread')
+    if thread:
+        parts.append('## Plain thread (newest 14 timeline entries, newest last)\n' + plain_timeline(thread)[:30000])
+    if card.get('memory') and (card['memory'].get('tenant') or card['memory'].get('customer')):
+        parts.append('## Support memory block (memory.py show)\n' + sh(['python3', f'{DESK}/memory.py', 'show', ref], 60)[:8000])
+    elif thread:
+        parts.append('## Support memory block\nnone: company unmapped (the checks must say so; never guess from the domain)')
+    pr = card.get('pr')
+    if pr:
+        # repo names live in config.json (deskconfig.py), never here
+        sys.path.insert(0, DESK)
+        import deskconfig
+        repo = deskconfig.BOT_REPO if ref.startswith('orbot#') else deskconfig.REPO
+        if repo:
+            parts.append(f'## PR #{pr} ({repo})\n' + sh(['gh', 'pr', 'view', str(pr), '--repo', repo, '--json',
+                                                     'title,state,url,isDraft,reviewDecision,mergeable,labels,statusCheckRollup,updatedAt,headRefName,baseRefName,body'], 40)[:6000])
+            parts.append('## PR: newest comments\n' + sh(['gh', 'pr', 'view', str(pr), '--repo', repo, '--json', 'comments', '--jq',
+                                                        '.comments[-6:][] | "\\(.createdAt[0:16]) \\(.author.login): \\(.body[0:900])\\n"'], 40)[:7000])
+    for m in re.finditer(r'(~|/Users/[^/\s]+)(/orbit-scratch/[^\s"`]+\.md)', (card.get('act') or '') + ' ' + (card.get('note') or '')):
+        p = HOME + m.group(2)
+        try:
+            parts.append(f'## File {m.group(1)}{m.group(2)}\n' + open(p).read()[:6000])
+        except Exception:
+            pass
+    return '\n\n'.join(parts) if parts else '(no raw material: work from the card alone)'
+
+
+def prompt(card, ctx):
+    opts = OPTIONS.get(card['lane'], [])
+    return f"""You prepare ONE card of a support desk for the person who runs it. You cannot use tools: everything you may rely on is in this message. Answer with the JSON the schema asks for.
+
+The desk's rules for a card (from its skill):
+- A brief, not a draft: the deciding fact on top, the consequence already drafted. The person confirms or edits, never composes.
+- The options are this lane's fixed set, in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use these labels verbatim.
+- Customer text: German "du" unless the customer wrote "Sie"; warm and short; sign as Luna (never with the person's name); it never quotes memory, tenant ids, sources or inferred facts. Address form, greeting and sign-off habits come from the memory block.
+- Every claim in a customer text must be backed by a line in the context. Put each claim and its evidence into `checks`. A claim you need but cannot back goes into `openChecks` and NOT into the draft; the person's agent verifies it live.
+- When the context shows the card is already resolved (reply already sent, PR merged, line already submitted), say so in `fact`, set `resolved` true and leave `draft` empty.
+- When the card is a REVIEW card, `draft` is the recommended move and the one-line reason; when it is a RUN card, `draft` is the exact command or action.
+- `draft` holds only the text that would go out (or the command, or the decision). No remarks about the draft inside it: those belong in `fact` or `openChecks`.
+- Keep `fact` to one sentence. Keep `draft` under 1200 characters.
+
+## The card
+{json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'mins', 'waits', 'age', 'status', 'note', 'act', 'pr', 'url')}, ensure_ascii=False, indent=1)}
+
+## The lane recipe (CARDS.md)
+{recipe(card['lane'], card['id']) or '(no recipe section; work from the act line)'}
+
+## Raw material
+{ctx}
+"""
+
+
+def prepare(card, dry=False):
+    cid = card['id']
+    t0 = datetime.datetime.now()
+    ctx = material(card)
+    p = prompt(card, ctx)
+    ctx_path = brief_path(cid).replace('.json', '.ctx.md')
+    with open(ctx_path, 'w') as f:
+        f.write(p)
+    if dry:
+        log(f'{cid}: dry, context {len(p)} chars at {ctx_path}')
+        return
+    env = {k: v for k, v in os.environ.items() if k != 'CLAUDE_CODE_PLUGIN_DIRS'}
+    env['DESK_PREPARE'] = '1'
+    try:
+        r = subprocess.run(['claude', '-p', '--model', MODEL, '--effort', 'low', '--no-session-persistence', '--tools', '',
+                            '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'json',
+                            '--json-schema', json.dumps(SCHEMA), p],
+                           capture_output=True, text=True, timeout=240, env=env, cwd=DESK)
+        out = json.loads(r.stdout)
+    except Exception as e:
+        log(f'{cid}: runner failed: {e}')
+        json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(e)[:300], 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
+        return
+    if out.get('is_error') or not out.get('structured_output'):
+        log(f"{cid}: model error: {str(out.get('result'))[:200]}")
+        json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(out.get('result'))[:300], 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
+        return
+    so = out['structured_output']
+    allowed = OPTIONS.get(card['lane'], [])
+    options = [{'label': o['label'], 'verb': VERBS.get(o['label'], 'do'), 'why': o.get('why', '')} for o in so.get('options', []) if o.get('label') in allowed]
+    for label in allowed:  # the fixed set stays complete, recommended ones first
+        if all(o['label'] != label for o in options):
+            options.append({'label': label, 'verb': VERBS.get(label, 'do'), 'why': ''})
+    brief = {
+        'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'fingerprint': fingerprint(card),
+        'status': card.get('status'), 'act': card.get('act'),
+        'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options,
+        'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),
+        'preparedAt': now_iso(), 'model': MODEL, 'costUsd': out.get('total_cost_usd'), 'ms': out.get('duration_ms'),
+        'context': ctx_path,
+    }
+    json.dump(brief, open(brief_path(cid), 'w'), ensure_ascii=False, indent=1)
+    log(f"{cid}: prepared in {(datetime.datetime.now() - t0).seconds}s, {len(brief['openChecks'])} open checks, ${out.get('total_cost_usd', 0):.3f}")
+
+
+def now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def main():
+    if os.environ.get('DESK_PREPARE'):
+        return 0
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    top = int(os.environ.get('DESK_PREPARE_TOP', '5'))
+    if '--top' in sys.argv:
+        top = int(sys.argv[sys.argv.index('--top') + 1]); args = [a for a in args if a != str(top)]
+    force = '--force' in sys.argv
+    dry = '--dry' in sys.argv
+    os.makedirs(BRIEFS, exist_ok=True)
+    lock = f'{BRIEFS}/.prepare.lock'
+    try:
+        if (datetime.datetime.now().timestamp() - os.stat(lock).st_mtime) < LOCK_S and not force:
+            print('prepare: a pass is in flight', file=sys.stderr); return 75
+    except FileNotFoundError:
+        pass
+    open(lock, 'w').write(now_iso())
+    try:
+        cache = json.load(open(f'{DESK}/cards.json'))
+        cards = [c for c in cache.get('cards', []) if c.get('lane') in LANES and not SKIP_ID.match(c.get('id', ''))]
+        if args:
+            cards = [c for c in cards if c['id'] in args or c.get('ref') in args]
+        else:
+            cards = cards[:top]
+        todo = [c for c in cards if force or not fresh(c)]
+        # briefs of cards that left the desk go away with their context
+        live = {brief_path(c['id']) for c in cache.get('cards', [])}
+        for f in glob.glob(f'{BRIEFS}/*.json'):
+            if f not in live:
+                for g in (f, f.replace('.json', '.ctx.md')):
+                    try: os.remove(g)
+                    except FileNotFoundError: pass
+        if not todo:
+            print(f'prepare: {len(cards)} candidates, all fresh'); return 0
+        log(f"pass: {', '.join(c['id'] for c in todo)}")
+        with ThreadPoolExecutor(max_workers=min(5, len(todo))) as ex:
+            list(ex.map(lambda c: prepare(c, dry), todo))
+        print(f"prepare: {len(todo)} prepared, {len(cards) - len(todo)} fresh")
+        return 0
+    finally:
+        try: os.remove(lock)
+        except FileNotFoundError: pass
+
+
+if __name__ == '__main__':
+    sys.exit(main() or 0)

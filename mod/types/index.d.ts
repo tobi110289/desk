@@ -1,5 +1,16 @@
 export type DeskLink = { label: string; href: string };
 
+/** A brief desk-prepare.py wrote ahead of time for this card (briefs/<id>.json), shown only while its caption still matches. */
+export type PreparedBrief = {
+  file: string;
+  at: string;
+  fact: string;
+  draft: string;
+  options: DeskOption[];
+  openChecks: string[];
+  resolved: boolean;
+};
+
 export type DeskCard = {
   id: string;
   ref: string;
@@ -16,6 +27,7 @@ export type DeskCard = {
   members: string[];
   /** The verb the card got today, or null while it is open. */
   verb: string | null;
+  prepared: PreparedBrief | null;
 };
 
 export type DeskView = {

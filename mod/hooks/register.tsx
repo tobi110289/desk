@@ -8,6 +8,7 @@ import type {
   DeskOption,
   DeskView,
   PlainStats,
+  PreparedBrief,
 } from "../types";
 
 const PANE = "desk";
@@ -268,10 +269,40 @@ const verbOf = (entry: Raw | undefined, today: string): string | null => {
   return defer?.since === today ? "defer" : null;
 };
 
+// A prepared brief counts only while the card's caption (status + act) is the one it was written for.
+const preparedOf = (
+  card: Raw,
+  briefs: Record<string, Raw>,
+): PreparedBrief | null => {
+  const b = briefs[text(card.id)];
+  if (
+    b === undefined ||
+    b.error !== undefined ||
+    text(b.status) !== text(card.status) ||
+    text(b.act) !== text(card.act)
+  ) {
+    return null;
+  }
+
+  return {
+    file: text(b.file),
+    at: text(b.preparedAt),
+    fact: text(b.fact),
+    draft: text(b.draft),
+    options: ((b.options ?? []) as Raw[]).map((o) => ({
+      label: text(o.label),
+      verb: text(o.verb),
+    })),
+    openChecks: ((b.openChecks ?? []) as unknown[]).map(text),
+    resolved: b.resolved === true,
+  };
+};
+
 const toView = (
   cardsJson: string,
   deskJson: string,
   today: string,
+  briefs: Record<string, Raw> = {},
 ): DeskView => {
   const cache = JSON.parse(cardsJson) as Raw;
   const desk = JSON.parse(deskJson) as Raw;
@@ -286,6 +317,7 @@ const toView = (
     );
 
     return {
+      prepared: preparedOf(card, briefs),
       id,
       ref: text(card.ref),
       lane: text(card.lane),
@@ -344,6 +376,8 @@ let isSentThisTurn = false;
 let isClosedThisTurn = false;
 // The desk.py run in flight, so two timers never start two.
 let gatherRun: Promise<void> | null = null;
+// The desk-prepare.py pass in flight.
+let prepareRun: Promise<void> | null = null;
 
 async function isPaneOpen($: EngineInterface) {
   try {
@@ -398,7 +432,13 @@ async function refresh($: EngineInterface, isForced = false) {
       (stat) => stat.mtimeMs,
       () => 0,
     );
-    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${berlinDate(time)}`;
+    // briefs/<id>.json, written by desk-prepare.py; the newest file's mtime is part of the stamp
+    const briefsDir = `${home}/orbit-scratch/desk/briefs`;
+    const briefFiles = (await $.fs.list(briefsDir).catch(() => [])).filter(
+      (entry) => entry.kind === "file" && entry.name.endsWith(".json"),
+    );
+    const briefsAt = Math.max(0, ...briefFiles.map((entry) => entry.mtimeMs));
+    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${briefsAt}:${berlinDate(time)}`;
 
     if (next === stamp && !isForced) {
       return;
@@ -408,7 +448,17 @@ async function refresh($: EngineInterface, isForced = false) {
       $.fs.read(cardsPath),
       $.fs.read(deskPath),
     ]);
-    const fresh = toView(cardsJson, deskJson, berlinDate(time));
+    const briefs: Record<string, Raw> = {};
+    for (const entry of briefFiles) {
+      const file = `${briefsDir}/${entry.name}`;
+      try {
+        const b = JSON.parse(await $.fs.read(file)) as Raw;
+        briefs[text(b.cardId)] = { ...b, file };
+      } catch {
+        // a half-written brief: the next refresh reads it
+      }
+    }
+    const fresh = toView(cardsJson, deskJson, berlinDate(time), briefs);
     stamp = next;
     await update($, view, () => fresh);
     // A card that left the desk, or got its verb elsewhere, is no longer worked and keeps no brief.
@@ -576,7 +626,38 @@ async function runGather($: EngineInterface, when: "due" | "now") {
     await $.fs.write(marker, "").catch(() => undefined);
     await update($, isGathering, () => false);
     await refresh($, true);
+    prepare($);
   }
+}
+
+// After every gather: desk-prepare.py drafts the top cards in the background (one headless sonnet run per card,
+// scripts collect the raw material), so `w` shows the options at once. Fire and forget; the briefs land in
+// briefs/<id>.json and refresh() picks them up. A child never starts children (DESK_PREPARE=1 is set inside).
+function prepare($: EngineInterface) {
+  if (prepareRun !== null) {
+    return;
+  }
+  prepareRun = (async () => {
+    const home = (await $.env.get("HOME")) ?? "";
+    const key = await $.env.get("PLAIN_API_KEY");
+    await $.process.run(
+      ["python3", `${home}/orbit-scratch/desk/desk-prepare.py`],
+      { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 6 * 60_000 },
+    );
+    await refresh($, true);
+  })()
+    .catch((error: unknown) => {
+      try {
+        $.ui.log(`prepare failed: ${String(error)}`.slice(0, 200), {
+          to: "debug",
+        });
+      } catch {
+        // the next gather runs it again
+      }
+    })
+    .finally(() => {
+      prepareRun = null;
+    });
 }
 
 // desk_card: the brief goes on the pane, the card becomes the one being worked, and the reply tells Claude to wait.
@@ -921,6 +1002,14 @@ export const register: Register = (on) => {
         `Working card ${card.id} (${card.lane} ${card.ref}, ${card.mins} min, waits on ${card.waits || "you"}): ${card.act}` +
           (card.status !== "" ? ` Status: ${card.status}.` : ""),
       );
+      if (card.prepared !== null) {
+        lines.push(
+          `A prepared brief for this card waits at ${card.prepared.file} (desk-prepare.py, ${card.prepared.at}, caption unchanged since). ` +
+            "Read it and start from it: verify each of its openChecks live, confirm no customer-visible message is newer than preparedAt, " +
+            "then call desk_card with its fact, draft and options (edit what the checks changed). Skip the raw reads the brief already did; " +
+            "its context file (.ctx.md beside it) holds what it saw.",
+        );
+      }
     }
     if (open !== null) {
       lines.push(
@@ -1135,6 +1224,26 @@ export const register: Register = (on) => {
                 {card.act}
               </Text>
             </Box>
+            {card.prepared !== null && current === null && (
+              <Box marginTop={1} flexDirection="column">
+                <Text dimColor>
+                  PREPARED {card.prepared.at.slice(11, 16)}Z ·{" "}
+                  {card.prepared.openChecks.length} open checks ·
+                  {card.prepared.resolved ? " already resolved" : ""} first:{" "}
+                  {card.prepared.options[0]?.label ?? "?"}
+                </Text>
+                <Text wrap="wrap" bold color="yellow">
+                  {card.prepared.fact}
+                </Text>
+                {card.prepared.draft !== "" && (
+                  <Text wrap="wrap" dimColor>
+                    {card.prepared.draft.length > 600
+                      ? `${card.prepared.draft.slice(0, 600)}…`
+                      : card.prepared.draft}
+                  </Text>
+                )}
+              </Box>
+            )}
             {card.status !== "" && (
               <Box marginTop={1} flexDirection="column">
                 <Text dimColor>STATUS</Text>
@@ -1237,6 +1346,13 @@ export const register: Register = (on) => {
             <Box key={`row-${row}`} gap={1}>
               <Text color={isSelected ? "cyan" : undefined}>
                 {isSelected ? "▌" : " "}
+              </Text>
+              {/* ◆ = a prepared brief waits for this card; · = not prepared */}
+              <Text
+                color={one.prepared !== null && !isDone ? "green" : undefined}
+                dimColor={one.prepared === null || isDone}
+              >
+                {one.prepared !== null && !isDone ? "◆" : "·"}
               </Text>
               <Button
                 key={`pick-${row}`}
