@@ -222,6 +222,8 @@ const hasReplyPass = atom(
 );
 const plain = atom({ plugin: "desk", key: "plain" } as const, null);
 const isPlainOpen = atom({ plugin: "desk", key: "isPlainOpen" } as const, true);
+/** The open-cards list folds to its header line with `l`, like the Plain drawer with `p`. */
+const isListOpen = atom({ plugin: "desk", key: "isListOpen" } as const, true);
 const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
 const brief = atom({ plugin: "desk", key: "brief" } as const, null);
 const summaries = atom({ plugin: "desk", key: "summaries" } as const, {});
@@ -1148,6 +1150,7 @@ export const register: Register = (on) => {
     const busy = await read($, isBusy);
     const stats = await read($, plain);
     const isOpen = await read($, isPlainOpen);
+    const listOpen = await read($, isListOpen);
     const shown = await read($, brief);
     const current = card && shown?.cardId === card.id ? shown : null;
     const summary = card ? (await read($, summaries))[card.id] : undefined;
@@ -1321,7 +1324,10 @@ export const register: Register = (on) => {
                     await $.prompt.submit({
                       text:
                         `Work desk card ${card.id} now. Follow Step 3 of ` +
-                        `${SKILL}/SKILL.md and the lane recipe in CARDS.md for this one card.`,
+                        `${SKILL}/SKILL.md and the lane recipe in CARDS.md for this one card.` +
+                        (card.prepared !== null
+                          ? ` A prepared brief waits at ${card.prepared.file}: read it first, verify its openChecks live, then desk_card.`
+                          : ""),
                     });
                   }}
                 />
@@ -1333,51 +1339,75 @@ export const register: Register = (on) => {
           </Box>
         )}
         <Text dimColor>{rule}</Text>
-        {desk.cards.length === 0 && (
+        <Box gap={1}>
+          <Button
+            key="list-toggle"
+            plain
+            hotkey="l"
+            label={listOpen ? "▾ CARDS" : "▸ CARDS"}
+            onPress={() => update($, isListOpen, (isUp) => !isUp)}
+          />
+          <Text wrap="wrap">
+            <Text bold>{open}</Text>
+            <Text dimColor> open · </Text>
+            <Text color="green">
+              {
+                desk.cards.filter(
+                  (one) => one.prepared !== null && one.verb === null,
+                ).length
+              }
+            </Text>
+            <Text dimColor> ◆ prepared · </Text>
+            {desk.cards.length - open}
+            <Text dimColor> done</Text>
+          </Text>
+        </Box>
+        {listOpen && desk.cards.length === 0 && (
           <Box marginY={1}>
             <Text dimColor>Nothing waits on you.</Text>
           </Box>
         )}
-        {desk.cards.map((one, row) => {
-          const isSelected = row === index;
-          const isDone = one.verb !== null;
+        {listOpen &&
+          desk.cards.map((one, row) => {
+            const isSelected = row === index;
+            const isDone = one.verb !== null;
 
-          return (
-            <Box key={`row-${row}`} gap={1}>
-              <Text color={isSelected ? "cyan" : undefined}>
-                {isSelected ? "▌" : " "}
-              </Text>
-              {/* ◆ = a prepared brief waits for this card; · = not prepared */}
-              <Text
-                color={one.prepared !== null && !isDone ? "green" : undefined}
-                dimColor={one.prepared === null || isDone}
-              >
-                {one.prepared !== null && !isDone ? "◆" : "·"}
-              </Text>
-              <Button
-                key={`pick-${row}`}
-                plain
-                hotkey={row < 9 ? String(row + 1) : undefined}
-                dimColor={isDone}
-                label={`${row < 9 ? "" : "   "}${one.lane.padEnd(7)} ${one.ref.padEnd(refWidth)}`}
-                onPress={() => update($, picked, () => one.id)}
-              />
-              <Text
-                wrap="truncate-end"
-                bold={isSelected && !isDone}
-                dimColor={isDone}
-                color={isDone ? undefined : laneColor(one.lane)}
-              >
-                {isDone ? (
-                  <Text color="green">✓ {one.verb} · </Text>
-                ) : (
-                  <Text dimColor>{one.mins}m · </Text>
-                )}
-                {stats?.titles[one.ref] ?? (one.note || one.act)}
-              </Text>
-            </Box>
-          );
-        })}
+            return (
+              <Box key={`row-${row}`} gap={1}>
+                <Text color={isSelected ? "cyan" : undefined}>
+                  {isSelected ? "▌" : " "}
+                </Text>
+                {/* ◆ = a prepared brief waits for this card; · = not prepared */}
+                <Text
+                  color={one.prepared !== null && !isDone ? "green" : undefined}
+                  dimColor={one.prepared === null || isDone}
+                >
+                  {one.prepared !== null && !isDone ? "◆" : "·"}
+                </Text>
+                <Button
+                  key={`pick-${row}`}
+                  plain
+                  hotkey={row < 9 ? String(row + 1) : undefined}
+                  dimColor={isDone}
+                  label={`${row < 9 ? "" : "   "}${one.lane.padEnd(7)} ${one.ref.padEnd(refWidth)}`}
+                  onPress={() => update($, picked, () => one.id)}
+                />
+                <Text
+                  wrap="truncate-end"
+                  bold={isSelected && !isDone}
+                  dimColor={isDone}
+                  color={isDone ? undefined : laneColor(one.lane)}
+                >
+                  {isDone ? (
+                    <Text color="green">✓ {one.verb} · </Text>
+                  ) : (
+                    <Text dimColor>{one.mins}m · </Text>
+                  )}
+                  {stats?.titles[one.ref] ?? (one.note || one.act)}
+                </Text>
+              </Box>
+            );
+          })}
         <Text dimColor>{rule}</Text>
         {stats && (
           <Box flexDirection="column" marginTop={0}>

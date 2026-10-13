@@ -139,6 +139,8 @@ declare module "claude-code" {
       hasReplyPass: boolean;
       captioned: string[];
       isPlainOpen: boolean;
+      /** False while the open-cards list is folded to its header line (`l`). */
+      isListOpen: boolean;
       plain: PlainStats | null;
       brief: DeskBrief | null;
       /** One line per card, where it stands after the last reply (a small model writes it). */
