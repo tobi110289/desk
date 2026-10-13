@@ -136,6 +136,8 @@ declare module "claude-code" {
       isGathering: boolean;
       /** True from turn.start to the main loop's turn.complete: Claude is working, the pane hides "Work this card". */
       isBusy: boolean;
+      /** Counts up ten times a second while Claude works; drives the wave next to WORKING. */
+      tick: number;
       hasReplyPass: boolean;
       captioned: string[];
       isPlainOpen: boolean;

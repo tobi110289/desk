@@ -36,7 +36,10 @@ let isConfigLoaded = false;
 // Directory prefixes (config.json `projects`, `~` allowed) where the desk belongs; empty means "any checkout of `repo`".
 let projectRoots: string[] = [];
 // null until the first hook asked; then whether this session sits inside a desk project. Outside, every hook steps aside.
-const isHome = atom({ plugin: "desk", key: "isHome" } as const, null as boolean | null);
+const isHome = atom(
+  { plugin: "desk", key: "isHome" } as const,
+  null as boolean | null,
+);
 
 /** Once per session: the root sits under a configured project prefix, or its origin remote is the configured repo. */
 async function atHome($: EngineInterface): Promise<boolean> {
@@ -255,6 +258,20 @@ const isGathering = atom(
 // True from turn.start to the main loop's turn.complete: the pane shows it and hides the "Work this card" button,
 // so the next card is not started while Claude still works the current one (asked for 2026-10-13).
 const isBusy = atom({ plugin: "desk", key: "isBusy" } as const, false);
+// Counts up every WAVE_MS while Claude works; the pane and the band draw one wave frame per count.
+const tick = atom({ plugin: "desk", key: "tick" } as const, 0);
+// braillewave (unicode-animations, MIT): one dot runs down and across four cells.
+const WAVE = ["⠁⠂⠄⡀", "⠂⠄⡀⢀", "⠄⡀⢀⠠", "⡀⢀⠠⠐", "⢀⠠⠐⠈", "⠠⠐⠈⠁", "⠐⠈⠁⠂", "⠈⠁⠂⠄"];
+const WAVE_MS = 100;
+let ticker: ReturnType<EngineInterface["clock"]["every"]> | null = null;
+
+/** The wave frame for a count, dimmed on every second cycle so the eye also sees a slow 1.6 s beat. */
+function wave(count: number) {
+  return {
+    frame: WAVE[count % WAVE.length],
+    isDim: count % (WAVE.length * 2) >= WAVE.length,
+  };
+}
 const hasReplyPass = atom(
   { plugin: "desk", key: "hasReplyPass" } as const,
   false,
@@ -1030,6 +1047,10 @@ export const register: Register = (on) => {
       pendingAnswer = null;
     }
     await update($, isBusy, () => true);
+    ticker ??= $.clock.every(
+      WAVE_MS,
+      () => void update($, tick, (count) => count + 1),
+    );
     await showStatus($);
 
     return next(e);
@@ -1139,6 +1160,8 @@ export const register: Register = (on) => {
     }
     // every end counts (answer, abort, error): the desk is free for the next card
     await update($, isBusy, () => false);
+    ticker?.cancel();
+    ticker = null;
     await showStatus($);
     const worked = answeredCard;
     answeredCard = null;
@@ -1183,7 +1206,10 @@ export const register: Register = (on) => {
         </Text>
         {(await read($, isBusy)) && (
           <Text bold color="yellow">
-            ● working
+            <Text dimColor={wave(await read($, tick)).isDim}>
+              {wave(await read($, tick)).frame}
+            </Text>{" "}
+            working
           </Text>
         )}
         <Button
@@ -1206,6 +1232,7 @@ export const register: Register = (on) => {
     const card = desk.cards[index];
     const isRunning = await read($, isGathering);
     const busy = await read($, isBusy);
+    const beat = wave(await read($, tick));
     const stats = await read($, plain);
     const isOpen = await read($, isPlainOpen);
     const listOpen = await read($, isListOpen);
@@ -1243,7 +1270,7 @@ export const register: Register = (on) => {
           <Box gap={1}>
             {busy && (
               <Text bold color="yellow">
-                ● CLAUDE WORKING
+                <Text dimColor={beat.isDim}>{beat.frame}</Text> CLAUDE WORKING
               </Text>
             )}
             <Text dimColor>
