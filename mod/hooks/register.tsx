@@ -1084,47 +1084,8 @@ export const register: Register = (on) => {
             due: {desk.due.join(" · ")}
           </Text>
         )}
-        {desk.cards.length === 0 && (
-          <Box marginY={1}>
-            <Text dimColor>Nothing waits on you.</Text>
-          </Box>
-        )}
-        {desk.cards.map((one, row) => {
-          const isSelected = row === index;
-          const isDone = one.verb !== null;
-
-          return (
-            <Box key={`row-${row}`} gap={1}>
-              <Text color={isSelected ? "cyan" : undefined}>
-                {isSelected ? "▌" : " "}
-              </Text>
-              <Button
-                key={`pick-${row}`}
-                plain
-                hotkey={row < 9 ? String(row + 1) : undefined}
-                dimColor={isDone}
-                label={`${row < 9 ? "" : "   "}${one.lane.padEnd(7)} ${one.ref.padEnd(refWidth)}`}
-                onPress={() => update($, picked, () => one.id)}
-              />
-              <Text
-                wrap="truncate-end"
-                bold={isSelected && !isDone}
-                dimColor={isDone}
-                color={isDone ? undefined : laneColor(one.lane)}
-              >
-                {isDone ? (
-                  <Text color="green">✓ {one.verb} · </Text>
-                ) : (
-                  <Text dimColor>{one.mins}m · </Text>
-                )}
-                {stats?.titles[one.ref] ?? (one.note || one.act)}
-              </Text>
-            </Box>
-          );
-        })}
         {card && (
-          <Box flexDirection="column">
-            <Text dimColor>{rule}</Text>
+          <Box flexDirection="column" marginBottom={1}>
             <Box gap={1}>
               <Text bold color={laneColor(card.lane)}>
                 {card.lane}
@@ -1229,6 +1190,45 @@ export const register: Register = (on) => {
             </Box>
           </Box>
         )}
+        <Text dimColor>{rule}</Text>
+        {desk.cards.length === 0 && (
+          <Box marginY={1}>
+            <Text dimColor>Nothing waits on you.</Text>
+          </Box>
+        )}
+        {desk.cards.map((one, row) => {
+          const isSelected = row === index;
+          const isDone = one.verb !== null;
+
+          return (
+            <Box key={`row-${row}`} gap={1}>
+              <Text color={isSelected ? "cyan" : undefined}>
+                {isSelected ? "▌" : " "}
+              </Text>
+              <Button
+                key={`pick-${row}`}
+                plain
+                hotkey={row < 9 ? String(row + 1) : undefined}
+                dimColor={isDone}
+                label={`${row < 9 ? "" : "   "}${one.lane.padEnd(7)} ${one.ref.padEnd(refWidth)}`}
+                onPress={() => update($, picked, () => one.id)}
+              />
+              <Text
+                wrap="truncate-end"
+                bold={isSelected && !isDone}
+                dimColor={isDone}
+                color={isDone ? undefined : laneColor(one.lane)}
+              >
+                {isDone ? (
+                  <Text color="green">✓ {one.verb} · </Text>
+                ) : (
+                  <Text dimColor>{one.mins}m · </Text>
+                )}
+                {stats?.titles[one.ref] ?? (one.note || one.act)}
+              </Text>
+            </Box>
+          );
+        })}
         <Text dimColor>{rule}</Text>
         {stats && (
           <Box flexDirection="column" marginTop={0}>
