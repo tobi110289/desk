@@ -446,36 +446,32 @@ async function isPaneOpen($: EngineInterface) {
 }
 
 // The status line: the open count, and "working" while a turn runs.
-/** The status line under the prompt: the count, what is ready, the next card, and the wave while Claude works. */
+/** The status line under the prompt: the open count and, while Claude works, the wave. */
 async function showStatus($: EngineInterface) {
   if (!(await atHome($))) {
     $.ui.status(undefined);
     return;
   }
   const desk = await read($, view);
-  const waiting = desk.cards.filter((card) => card.verb === null);
-  const ready = waiting.filter((card) => card.prepared !== null).length;
-  const top = waiting[0];
-  const titles = (await read($, plain))?.titles ?? {};
+  const open = desk.cards.filter((card) => card.verb === null).length;
   const parts: string[] = [];
-  if (waiting.length > 0) {
-    parts.push(
-      `${waiting.length} open${ready > 0 ? ` · ${ready} ◆ ready` : ""}`,
-    );
-  }
-  if (top !== undefined) {
-    const title = (titles[top.ref] ?? top.note ?? "").trim();
-    parts.push(
-      `next ${top.lane} ${top.ref}${title === "" ? "" : ` ${title.length > 36 ? `${title.slice(0, 35)}…` : title}`}`,
-    );
-  }
-  if (desk.closedToday > 0) {
-    parts.push(`${desk.closedToday} done today`);
+  if (open > 0) {
+    parts.push(`${open} open`);
   }
   if (await read($, isBusy)) {
+    startTicker($);
     parts.push(`${wave(await read($, tick)).frame} working`);
   }
-  $.ui.status(parts.length === 0 ? undefined : parts.join("  ·  "));
+  $.ui.status(parts.length === 0 ? undefined : parts.join(" · "));
+}
+
+/** The wave clock, started once per busy stretch; a hot reload drops the old timer, so a later call restarts it. */
+function startTicker($: EngineInterface) {
+  ticker ??= $.clock.every(
+    WAVE_MS,
+    () =>
+      void update($, tick, (count) => count + 1).then(() => showStatus($)),
+  );
 }
 
 async function loadConfig($: EngineInterface) {
@@ -1071,11 +1067,7 @@ export const register: Register = (on) => {
       pendingAnswer = null;
     }
     await update($, isBusy, () => true);
-    ticker ??= $.clock.every(
-      WAVE_MS,
-      () =>
-        void update($, tick, (count) => count + 1).then(() => showStatus($)),
-    );
+    startTicker($);
     await showStatus($);
 
     return next(e);
@@ -1258,6 +1250,9 @@ export const register: Register = (on) => {
     const isRunning = await read($, isGathering);
     const busy = await read($, isBusy);
     const beat = wave(await read($, tick));
+    if (busy) {
+      startTicker($);
+    }
     const stats = await read($, plain);
     const isOpen = await read($, isPlainOpen);
     const listOpen = await read($, isListOpen);
