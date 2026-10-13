@@ -1168,6 +1168,11 @@ batch('TICKET',key=lambda c:'local-human',act='Clear the {n} local tickets that 
 batch('STALE',act='Sweep {n} loop entries with no caption: keep (write the caption) or drop each',mins_each=1,waits='nobody',pred=lambda c:not (c.get('status') or '').strip())   # 2026-09-16: captioned entries stay single cards; the batch hid 13 live rows behind one 'drop'
 live=[c for c in cards if c['score']>=0]
 live.sort(key=lambda c:(-c['score'],c['ref']))
+# 2026-10-13: a queue of many small decisions of one kind feeds the desk one task at a time (task-drip.py beside task.py,
+# local like tasks.json): the next item follows only after the open one has its verb and the queue's pace allows.
+try:
+    if os.path.exists(f'{DESK}/task-drip.py'): subprocess.run(['python3',f'{DESK}/task-drip.py'],capture_output=True,timeout=20)
+except Exception: pass
 parked=[c for c in cards if c['score']<0]
 
 # every card that ends in customer text (the ranked six plus the pins) carries its support memory: who the requester is,
