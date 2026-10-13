@@ -280,6 +280,8 @@ const plain = atom({ plugin: "desk", key: "plain" } as const, null);
 const isPlainOpen = atom({ plugin: "desk", key: "isPlainOpen" } as const, true);
 /** The open-cards list folds to its header line with `l`, like the Plain drawer with `p`. */
 const isListOpen = atom({ plugin: "desk", key: "isListOpen" } as const, true);
+/** The pull-request list folds with `o`, apart from the Plain drawer (`p`). */
+const isPrsOpen = atom({ plugin: "desk", key: "isPrsOpen" } as const, true);
 const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
 const brief = atom({ plugin: "desk", key: "brief" } as const, null);
 const summaries = atom({ plugin: "desk", key: "summaries" } as const, {});
@@ -469,8 +471,7 @@ async function showStatus($: EngineInterface) {
 function startTicker($: EngineInterface) {
   ticker ??= $.clock.every(
     WAVE_MS,
-    () =>
-      void update($, tick, (count) => count + 1).then(() => showStatus($)),
+    () => void update($, tick, (count) => count + 1).then(() => showStatus($)),
   );
 }
 
@@ -1256,6 +1257,7 @@ export const register: Register = (on) => {
     const stats = await read($, plain);
     const isOpen = await read($, isPlainOpen);
     const listOpen = await read($, isListOpen);
+    const prsOpen = await read($, isPrsOpen);
     const shown = await read($, brief);
     const current = card && shown?.cardId === card.id ? shown : null;
     const summary = card ? (await read($, summaries))[card.id] : undefined;
@@ -1692,47 +1694,52 @@ export const register: Register = (on) => {
                     </Text>
                   ))}
                 </Box>
-                {stats.prs && (
-                  <Box flexDirection="column" marginTop={1}>
-                    <Text wrap="wrap">
-                      <Text bold color="magenta">
-                        PRS
-                      </Text>
-                      <Text dimColor> our open pull requests · </Text>
-                      <Text bold>{stats.prs.list.length}</Text>
-                      <Text dimColor>
-                        {Object.entries(stats.prs.byState)
-                          .sort((a, b) => b[1] - a[1])
-                          .map(([k, n]) => ` · ${n} ${k}`)
-                          .join("")}
-                        {" · github "}
-                        {ago(stats.prs.cacheAgeMin)}
-                      </Text>
+              </Box>
+            )}
+            {stats.prs && (
+              <Box flexDirection="column" marginTop={1}>
+                <Box gap={1}>
+                  <Button
+                    key="prs-toggle"
+                    plain
+                    hotkey="o"
+                    label={prsOpen ? "▾ PRS" : "▸ PRS"}
+                    onPress={() => update($, isPrsOpen, (open) => !open)}
+                  />
+                  <Text wrap="wrap">
+                    <Text dimColor>our open pull requests · </Text>
+                    <Text bold>{stats.prs.list.length}</Text>
+                    <Text dimColor>
+                      {Object.entries(stats.prs.byState)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([k, n]) => ` · ${n} ${k}`)
+                        .join("")}
+                      {" · github "}
+                      {ago(stats.prs.cacheAgeMin)}
                     </Text>
-                    {stats.prs.list.map((p) => (
-                      <Text key={`pr-${p.repo}-${p.pr}`} wrap="truncate-end">
-                        {"        "}
-                        <Text bold>
-                          {`${p.repo === "orbot" ? "orbot#" : "#"}${p.pr}`.padEnd(
-                            10,
-                          )}
-                        </Text>
-                        <Text color={prColor(p.state)}>
-                          {p.state.padEnd(18)}
-                        </Text>
-                        <Text dimColor>
-                          {(p.rounds > 0 ? `${p.rounds}r` : "").padEnd(4)}
-                          {(p.commitDays === null
-                            ? ""
-                            : `${p.commitDays}d`
-                          ).padEnd(4)}
-                        </Text>
-                        {p.title}
-                        {p.loop !== null && <Text dimColor> · {p.loop}</Text>}
+                  </Text>
+                </Box>
+                {prsOpen &&
+                  stats.prs.list.map((p) => (
+                    <Text key={`pr-${p.repo}-${p.pr}`} wrap="truncate-end">
+                      {"        "}
+                      <Text bold>
+                        {`${p.repo === "orbot" ? "orbot#" : "#"}${p.pr}`.padEnd(
+                          10,
+                        )}
                       </Text>
-                    ))}
-                  </Box>
-                )}
+                      <Text color={prColor(p.state)}>{p.state.padEnd(18)}</Text>
+                      <Text dimColor>
+                        {(p.rounds > 0 ? `${p.rounds}r` : "").padEnd(4)}
+                        {(p.commitDays === null
+                          ? ""
+                          : `${p.commitDays}d`
+                        ).padEnd(4)}
+                      </Text>
+                      {p.title}
+                      {p.loop !== null && <Text dimColor> · {p.loop}</Text>}
+                    </Text>
+                  ))}
               </Box>
             )}
           </Box>

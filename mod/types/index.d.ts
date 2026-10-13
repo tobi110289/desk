@@ -143,6 +143,8 @@ declare module "claude-code" {
       isPlainOpen: boolean;
       /** False while the open-cards list is folded to its header line (`l`). */
       isListOpen: boolean;
+      /** False while the pull-request list is folded (`o`). */
+      isPrsOpen: boolean;
       /** null until checked; then whether the session root lies inside a desk project (config `projects` or `repo`). */
       isHome: boolean | null;
       plain: PlainStats | null;
