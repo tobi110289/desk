@@ -3,7 +3,10 @@
 through the Luna send path: pre-send checks, send, verification, and a luna_conversation_turns row, so the customer's
 answer routes into the adapter's luna_followup job instead of a fresh triage. Spec: ~/orbit-scratch/luna-operator-send/PRD.md.
 
-  luna-send.py <th_id|T-ref> --file <draft.txt> [--ref T-106] [--intent operator_reply] [--force] [--wait 90] [--json]
+  luna-send.py <th_id|T-ref> --file <draft.txt> [--ref T-106] [--intent operator_reply|customer_question] [--force] [--wait 90] [--json]
+  --intent customer_question only when the draft asks the customer for an answer (the pending clarification): the adapter then
+  moves the pass to needs-info / customer_reply (orbot #801, PR #802). The default operator_reply is an acknowledgement and
+  leaves readiness alone.
   luna-send.py --status <actionId>
 
 The adapter listens on 127.0.0.1:8787 on the VPS only; every call goes `ssh <sendHost> curl …`. The bearer token lives in

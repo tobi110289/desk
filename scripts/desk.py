@@ -92,6 +92,46 @@ def a2a_feed():
         with urllib.request.urlopen(req,timeout=10) as r: return json.load(r)
     except Exception: return None
 feed=a2a_feed()
+def a2a_cfg():
+    cfg={}
+    try:
+        for line in open(f'{HOME}/.orbit-a2a/config.env'):
+            m=re.match(r'\s*([A-Z0-9_]+)=(.*)$',line.strip())
+            if m: cfg[m.group(1)]=m.group(2).strip().strip('"').strip("'")
+    except Exception: pass
+    return cfg
+_a2a_humans=None
+def a2a_task(tid,agent=None):
+    """GetTask (JSON-RPC, A2A-Version 1.0) on the hub for a task I sent. Returns {state,timestamp,from,agent,reply,
+    choices} or None when the hub, the token or the task is unreachable. Without an agent name every human agent of
+    the registry is tried (the hub answers TASK_NOT_FOUND for the wrong one). 2026-10-13: replaces the feed check."""
+    global _a2a_humans
+    cfg=a2a_cfg(); tok=cfg.get('A2A_TOKEN'); hub=(cfg.get('A2A_HUB_URL') or deskconfig.A2A_HUB).rstrip('/')
+    if not tok: return None
+    import urllib.request
+    H={'authorization':f'Bearer {tok}','content-type':'application/json','a2a-version':'1.0','user-agent':'curl/8.0 desk.py'}
+    if agent: names=[agent]
+    else:
+        if _a2a_humans is None:
+            try:
+                with urllib.request.urlopen(urllib.request.Request(f'{hub}/registry.json',headers={'user-agent':'curl/8.0 desk.py'}),timeout=10) as r:
+                    _a2a_humans=[a['name'] for a in json.load(r).get('agents',[]) if a.get('name') and a['name']!='orbot' and not a['name'].startswith('tobias')]
+            except Exception: return None
+        names=_a2a_humans
+    for name in names:
+        body=json.dumps({'jsonrpc':'2.0','id':1,'method':'GetTask','params':{'id':tid,'tenant':'','historyLength':0}}).encode()
+        try:
+            with urllib.request.urlopen(urllib.request.Request(f'{hub}/agents/{name}',data=body,headers=H),timeout=10) as r: res=json.load(r)
+        except Exception: return None
+        if 'result' not in res: continue   # TASK_NOT_FOUND on this agent: try the next
+        t=res['result']; st=(t.get('status') or {}); out={'state':st.get('state'),'timestamp':st.get('timestamp'),'agent':name,'from':None,'reply':None,'choices':None}
+        for a in t.get('artifacts') or []:
+            md=a.get('metadata') or {}
+            txt=' '.join(p.get('text','') for p in a.get('parts') or [] if p.get('text'))
+            if md.get('author')=='human' or (a.get('name')=='Reply' and txt):
+                out['reply']=txt; out['choices']=md.get('choices'); out['from']=md.get('from') or name; break
+        return out
+    return None
 def a2a_head(t,n=70):
     txt=re.sub(r'\s+',' ',(t.get('text') or '')).strip()
     return txt[:n]+('…' if len(txt)>n else '')
@@ -282,6 +322,13 @@ def add(card):
         card['note']=f"deferral voided (caption changed since {d.get('since')}, was until {d.get('trigger')}): "+(card.get('note') or ''); d=None
     if d:
         trig=d.get('trigger','')
+        # 2026-10-12: older closes stored 'until <trigger> -> <act>' in the trigger field, so appstore:/deployed:/manual:
+        # never matched (four parked cards sat past their release). Normalise here and on write.
+        trig=re.sub(r'^(?:until\s+)+','',trig.strip())
+        if ' -> ' in trig:
+            trig,_act=trig.split(' -> ',1)
+            if not d.get('act'): d['act']=_act.strip()
+        trig=trig.strip()
         fired=False
         if re.match(r'\d{4}-\d{2}-\d{2}$',trig): fired = today>=trig
         elif re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$',trig): fired = now.strftime('%Y-%m-%dT%H:%MZ')>=trig
@@ -336,10 +383,31 @@ def add(card):
                         card['lane']='REPLY' if card['lane'] in ('STALE','NOTIFY','RUN','PROMISE') else card['lane']
                         card['score']=900; card['released']=True; fired=True; break
             except Exception: fired=False
-        elif trig.startswith('a2a:') and feed is not None:
-            # a2a:<taskId> fires once the decision I sent is answered, i.e. no longer open on the hub
-            tid=trig.split(':',1)[1]
-            fired = tid not in {t.get('taskId') for t in feed.get('waitingOnOthers',[])}
+        elif trig.startswith('a2a:'):
+            # 2026-10-13 (Tobias: "make sure the desk picks up a2a answers automatically"): the desk reads the answer
+            # itself. The hub feed's waitingOnOthers was empty for an answered task, so the old check only dropped the
+            # hold and the card fell back to its ordinary score with its old act; a teammate's answered decision sat under
+            # a TASK card at score 20 until Tobias asked. GetTask on the hub is the authority: a completed task with a
+            # human reply fires and the card carries the reply (status, act from the deferral, score 900 like a deploy);
+            # a cancelled task fires too, since the wait is void; an open task or an unreadable hub keeps the card parked.
+            # Trigger forms: a2a:<taskId> (every registry human is tried) or a2a:<agent>:<taskId>.
+            _parts=trig.split(':'); tid=_parts[-1]; _agent=_parts[1] if len(_parts)==3 else None
+            _t=a2a_task(tid,_agent)
+            if _t and _t.get('state') in ('TASK_STATE_COMPLETED','TASK_STATE_CANCELED'):
+                fired=True
+                _who=_t.get('from') or _t.get('agent') or 'teammate'; _ts=(_t.get('timestamp') or '')[:16]
+                if _t.get('reply'):
+                    _head=re.sub(r'\s+',' ',_t['reply']).strip()[:120]
+                    _ch=', '.join(f"{k}={v}" for k,v in (_t.get('choices') or {}).items())
+                    card['status']=f"{_who} answered {_ts}Z"+(f" ({_ch})" if _ch else '')+f": {_head}"
+                else:
+                    card['status']=f"a2a task {tid[:8]} {'cancelled' if _t['state'].endswith('CANCELED') else 'closed without a reply'}: decide without {_who}"
+                card['act']=(d.get('act') or card.get('act') or '')+f" (a2a {tid[:8]} answered; full reply in cards.json a2a_reply)"
+                card['a2a_reply']=_t.get('reply'); card['a2a_choices']=_t.get('choices'); card['a2a_task']=tid
+                card['lane']='REPLY' if card['lane'] in ('STALE','NOTIFY','RUN','PROMISE') else card['lane']
+                card['score']=900; card['released']=True
+            elif _t is None:
+                card['note']=f"a2a task {tid[:8]} unreadable on the hub (still parked). "+(card.get('note') or '')
         if not fired:
             card['deferred']=d; card['score']=-1
     card['seen']=prev.get('seen',0)+(0 if prev.get('lastSeen')==today else 1)
@@ -878,6 +946,39 @@ for cid,pc in list(desk['cards'].items()):
          'act':d.get('act') or f"Release landed (PR #{prn}): tell {ref}, then close the thread",
          'score':round((IMPACT.get(lvl,1)+3)/3*10,1)})
 
+# ---------------------------------------------------------------- source 7c: TODO threads nobody owns (OWE, 2026-10-12)
+# Tobias 2026-10-12: nineteen TODO threads sat off the desk because no source made a card for them: graded
+# ready-for-human / needs-info / in the loop queue / never swept, no loop entry, not opened today, not pinned.
+# todo-gap.py already lists them (buckets D, E, F, J); every such thread without another card becomes one FAST card
+# owe:<ref> (the FAST recipe: claim + validate, draft the reply, hand to a worker). D/E/J rank like a P2 pin minus a
+# notch; F (waiting on the customer) only after seven days, low. A parked deferral still hides it via add().
+try:
+    _carded={c.get('ref') for c in cards}|{x['ref'] for x in desk.get('pins',[])}
+    # a thread whose card (today:/fast:/owe:/gap:) got its verb today stays off until tomorrow; today's threads have their own cards
+    _carded|={cid.split(':')[-1] for cid,pc in desk['cards'].items() if (pc.get('closed') or {}).get('date')==today}
+    _carded|=set(TODAY_NEW)|set(TODAY_ANSWERED)
+    for bucket,minage,base in (('D',0,60),('E',0,70),('J',0,55),('F',7,25)):
+        sec=re.search(r'^## '+bucket+r'\..*?$(.*?)(?=^## |\Z)',gap_md,re.S|re.M)
+        for m in re.finditer(r'- \[(T-\d+)\]\((https://[^)]+/thread/(th_\w+))\) (\S+) · (.*?) · (\S*) · `([^`]*)`',sec.group(1) if sec else ''):
+            ref,url,tid,lvl,title,_date,st=m.groups()
+            if ref in _carded or ref in notify_refs: continue
+            if state.get(ref,{}).get('phase') in ('handoff-running','pr-open','blocked'): continue
+            if SCOPE and not in_scope({'id':f'owe:{ref}','ref':ref,'thread':tid}): continue
+            age=age_days((_date or today)+'T00:00:00Z') if re.match(r'\d{4}-\d{2}-\d{2}$',_date or '') else 0
+            if age<minage: continue
+            lvl=lvl if lvl in IMPACT else 'P2'
+            # E = bot stalled (Tobias 2026-10-12): the triage pass ended needs-triage, so nobody holds the thread; the desk claims it for local triage
+            why={'D':'ready-for-human, nobody listed it','E':'bot stalled (needs-triage), claim it here','J':'never swept','F':'needs-info, customer silent'}[bucket]
+            add({'id':f'owe:{ref}','ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':age,'waits':'customer',
+                 'pr':None,'task':None,'thread':tid,'url':url,
+                 'status':f"{why}: {st[:50]}",'note':title[:200],
+                 'act':f"{ref} ({title[:60]}): {why}. Claim + validate, draft the reply, or hand it to a worker",
+                 'score':base+IMPACT.get(lvl,1)+min(age,10)})
+            _carded.add(ref)
+except Exception as _e:
+    if os.environ.get('DESK_DEBUG'): print(f"owe source failed: {_e}",file=sys.stderr)
+
+
 # ---------------------------------------------------------------- source 8: pinned refs (FAST lane)
 # `desk.py T-120 ORB-203` pins refs; they live in desk.json "pins" and come back every sitting until closed.
 # A T-ref is looked up in the sweep cache, then live on Plain (threadByRef) when the cache does not have it.
@@ -1128,6 +1229,11 @@ if memory and not SCOPE:
 # Work with no Plain thread, no PR and no Notion ticket (a help-center sweep, a cleanup) still belongs on the desk.
 # `task.py add "<title>" --step "…"` stores it in desk/tasks.json, local only; each open task is one TASK card
 # `task:<slug>` until it gets a verb (desk-close.py marks it done there). The title is the caption, so a closure sticks.
+# 2026-10-13: a queue of many small decisions of one kind feeds the desk one task at a time (task-drip.py beside task.py,
+# local like tasks.json): the next item follows only after the open one has its verb and the queue's pace allows.
+try:
+    if os.path.exists(f'{DESK}/task-drip.py'): subprocess.run(['python3',f'{DESK}/task-drip.py'],capture_output=True,timeout=20)
+except Exception: pass
 if not SCOPE:
     for _t in load(os.path.join(os.path.dirname(DESKFILE),'tasks.json'),{'tasks':[]}).get('tasks',[]):
         if _t.get('done'): continue
@@ -1168,11 +1274,6 @@ batch('TICKET',key=lambda c:'local-human',act='Clear the {n} local tickets that 
 batch('STALE',act='Sweep {n} loop entries with no caption: keep (write the caption) or drop each',mins_each=1,waits='nobody',pred=lambda c:not (c.get('status') or '').strip())   # 2026-09-16: captioned entries stay single cards; the batch hid 13 live rows behind one 'drop'
 live=[c for c in cards if c['score']>=0]
 live.sort(key=lambda c:(-c['score'],c['ref']))
-# 2026-10-13: a queue of many small decisions of one kind feeds the desk one task at a time (task-drip.py beside task.py,
-# local like tasks.json): the next item follows only after the open one has its verb and the queue's pace allows.
-try:
-    if os.path.exists(f'{DESK}/task-drip.py'): subprocess.run(['python3',f'{DESK}/task-drip.py'],capture_output=True,timeout=20)
-except Exception: pass
 parked=[c for c in cards if c['score']<0]
 
 # every card that ends in customer text (the ranked six plus the pins) carries its support memory: who the requester is,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """desk-close.py <card-id> <verb> [note]  — verbs: do decide delegate defer drop caption.  For defer: desk-close.py <id> defer "<trigger>" "<act>".  caption: store a status caption for a non-loop card (orbot / run cards) without closing it."""
-import json,sys,os,datetime
+import re, json,sys,os,datetime
 P=os.path.expanduser('~/orbit-scratch/desk/desk.json')
 import fcntl
 _lock=open(os.path.join(os.path.dirname(P),'.desk.lock'),'w'); fcntl.flock(_lock,fcntl.LOCK_EX)   # desk.py checks desk.json under the same lock before it writes
@@ -18,7 +18,9 @@ elif verb=='defer':
         if cid.startswith('loop:') and cid[5:] in thr: status=(thr[cid[5:]].get('status') or '').strip()
         elif cid.startswith('gap:') and cid[4:] in thr: status='loop done, thread TODO: '+(thr[cid[4:]].get('status') or '').strip()
     except Exception: pass
-    c['defer']={'trigger':sys.argv[3],'act':sys.argv[4] if len(sys.argv)>4 else c.get('act',''),'since':today,'status':status}
+    _trig=re.sub(r'^(?:until\s+)+','',sys.argv[3].strip()); _act=sys.argv[4] if len(sys.argv)>4 else c.get('act','')
+    if ' -> ' in _trig and not (len(sys.argv)>4 and sys.argv[4]): _trig,_act=[x.strip() for x in _trig.split(' -> ',1)]
+    c['defer']={'trigger':_trig.strip(),'act':_act,'since':today,'status':status}
     c.pop('closed',None)
 else:
     members=[]; status=''
@@ -38,8 +40,6 @@ else:
             st=json.load(open(sp)); thr=st['threads']
             if ref in thr:
                 thr[ref]['status']=cap
-                thr[ref]['note']=((thr[ref].get('note') or '')+f" | desk {today}: "+' '.join(sys.argv[3:])).strip(' |')
-                json.dump(st,open(sp,'w'),indent=2,ensure_ascii=False)
                 # 2026-10-13: a caption that says done ends the entry. one entry sat 18 days as a STALE card: validated as
                 # 'blocked' (already shipped), the desk captioned it 'done; …' twice, but the reaper only reads running
                 # entries and the archive only moves phase done, so nothing ever flipped the phase.
