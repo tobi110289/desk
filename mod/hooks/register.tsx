@@ -446,12 +446,36 @@ async function isPaneOpen($: EngineInterface) {
 }
 
 // The status line: the open count, and "working" while a turn runs.
+/** The status line under the prompt: the count, what is ready, the next card, and the wave while Claude works. */
 async function showStatus($: EngineInterface) {
+  if (!(await atHome($))) {
+    $.ui.status(undefined);
+    return;
+  }
   const desk = await read($, view);
-  const open = desk.cards.filter((card) => card.verb === null).length;
-  const busy = await read($, isBusy);
-  const text = `${open > 0 ? `${open} waiting` : ""}${busy ? `${open > 0 ? " · " : ""}working` : ""}`;
-  $.ui.status(text === "" ? undefined : text);
+  const waiting = desk.cards.filter((card) => card.verb === null);
+  const ready = waiting.filter((card) => card.prepared !== null).length;
+  const top = waiting[0];
+  const titles = (await read($, plain))?.titles ?? {};
+  const parts: string[] = [];
+  if (waiting.length > 0) {
+    parts.push(
+      `${waiting.length} open${ready > 0 ? ` · ${ready} ◆ ready` : ""}`,
+    );
+  }
+  if (top !== undefined) {
+    const title = (titles[top.ref] ?? top.note ?? "").trim();
+    parts.push(
+      `next ${top.lane} ${top.ref}${title === "" ? "" : ` ${title.length > 36 ? `${title.slice(0, 35)}…` : title}`}`,
+    );
+  }
+  if (desk.closedToday > 0) {
+    parts.push(`${desk.closedToday} done today`);
+  }
+  if (await read($, isBusy)) {
+    parts.push(`${wave(await read($, tick)).frame} working`);
+  }
+  $.ui.status(parts.length === 0 ? undefined : parts.join("  ·  "));
 }
 
 async function loadConfig($: EngineInterface) {
@@ -1049,7 +1073,8 @@ export const register: Register = (on) => {
     await update($, isBusy, () => true);
     ticker ??= $.clock.every(
       WAVE_MS,
-      () => void update($, tick, (count) => count + 1),
+      () =>
+        void update($, tick, (count) => count + 1).then(() => showStatus($)),
     );
     await showStatus($);
 
