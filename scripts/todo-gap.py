@@ -6,7 +6,10 @@ import json,re,sys,html,os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from deskconfig import PLAIN_THREAD
-LOOP=os.path.expanduser('~/orbit-scratch/agent-loop'); HERE=os.path.dirname(os.path.abspath(__file__))
+LOOP=os.path.expanduser('~/orbit-scratch/agent-loop')
+# Data files live beside the symlink in the desk data dir, never beside the script in the repo (a run through the real
+# path once left human-call.json, with thread ids and titles, inside the public repo folder).
+HERE=os.path.expanduser('~/orbit-scratch/desk')
 c=json.load(open(f'{LOOP}/sweep-cache.json'))['threads']; s=json.load(open(f'{LOOP}/state.json'))['threads']
 try: s={**json.load(open(f'{LOOP}/state-archive.json'))['threads'],**s}   # done entries older than 7 days live there
 except Exception: pass
