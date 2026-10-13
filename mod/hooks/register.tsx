@@ -204,6 +204,79 @@ const EMPTY: DeskView = {
   due: [],
 };
 
+/**
+ * A theme: a palette over the colour names the pane is written in, plus its glyphs and borders.
+ * config.json `theme` picks one ("default" when unset or unknown); `/desk-theme` cycles and saves it.
+ */
+type Theme = {
+  palette: Record<string, string>;
+  wave: string[];
+  waveMs: number;
+  title: string;
+  selected: string;
+  prepared: string;
+  rule: string;
+  border: {
+    focused: string;
+    idle: string;
+    focusedColor: string;
+    idleColor: string;
+  };
+};
+
+const DEFAULT_THEME: Theme = {
+  palette: {},
+  // braillewave (unicode-animations, MIT): one dot runs down and across four cells.
+  wave: ["⠁⠂⠄⡀", "⠂⠄⡀⢀", "⠄⡀⢀⠠", "⡀⢀⠠⠐", "⢀⠠⠐⠈", "⠠⠐⠈⠁", "⠐⠈⠁⠂", "⠈⠁⠂⠄"],
+  waveMs: 100,
+  title: "DESK",
+  selected: "▌",
+  prepared: "◆",
+  rule: "─",
+  border: {
+    focused: "double",
+    idle: "round",
+    focusedColor: "cyan",
+    idleColor: "gray",
+  },
+};
+
+const THEMES: Record<string, Theme> = {
+  default: DEFAULT_THEME,
+  cyberpunk: {
+    // Neon on night: hot pink for trouble, acid yellow for waits, cyan for the active thing.
+    palette: {
+      cyan: "#05d9e8",
+      yellow: "#fcee0c",
+      green: "#00ff9f",
+      red: "#ff2a6d",
+      magenta: "#d300c5",
+      blue: "#7b61ff",
+      gray: "#5a5f80",
+      white: "#d1f7ff",
+    },
+    // Own frames: a lit cell scans a four-cell bar and back, like a data bus.
+    wave: ["▰▱▱▱", "▱▰▱▱", "▱▱▰▱", "▱▱▱▰", "▱▱▰▱", "▱▰▱▱"],
+    waveMs: 90,
+    title: "//DESK",
+    selected: "▶",
+    prepared: "◈",
+    rule: "━",
+    border: {
+      focused: "bold",
+      idle: "single",
+      focusedColor: "#ff2a6d",
+      idleColor: "#5a5f80",
+    },
+  },
+};
+
+let theme: Theme = DEFAULT_THEME;
+
+/** A colour name as the active theme paints it; undefined stays undefined. */
+const C = (name: string | undefined) =>
+  name === undefined ? undefined : (theme.palette[name] ?? name);
+
 const LANE_COLORS: Record<string, string> = {
   SEND: "cyan",
   REVIEW: "magenta",
@@ -244,9 +317,9 @@ const PR_COLORS: Record<string, string> = {
   draft: "gray",
 };
 
-const prColor = (state: string) => PR_COLORS[state.toLowerCase()] ?? "white";
+const prColor = (state: string) => C(PR_COLORS[state.toLowerCase()] ?? "white");
 
-const laneColor = (lane: string) => LANE_COLORS[lane] ?? "white";
+const laneColor = (lane: string) => C(LANE_COLORS[lane] ?? "white");
 
 const view = atom({ plugin: "desk", key: "view" } as const, EMPTY);
 const working = atom({ plugin: "desk", key: "working" } as const, null);
@@ -258,18 +331,15 @@ const isGathering = atom(
 // True from turn.start to the main loop's turn.complete: the pane shows it and hides the "Work this card" button,
 // so the next card is not started while Claude still works the current one (asked for 2026-10-13).
 const isBusy = atom({ plugin: "desk", key: "isBusy" } as const, false);
-// Counts up every WAVE_MS while Claude works; the pane and the band draw one wave frame per count.
+// Counts up every theme.waveMs while Claude works; the pane and the band draw one wave frame per count.
 const tick = atom({ plugin: "desk", key: "tick" } as const, 0);
-// braillewave (unicode-animations, MIT): one dot runs down and across four cells.
-const WAVE = ["⠁⠂⠄⡀", "⠂⠄⡀⢀", "⠄⡀⢀⠠", "⡀⢀⠠⠐", "⢀⠠⠐⠈", "⠠⠐⠈⠁", "⠐⠈⠁⠂", "⠈⠁⠂⠄"];
-const WAVE_MS = 100;
 let ticker: ReturnType<EngineInterface["clock"]["every"]> | null = null;
 
 /** The wave frame for a count, dimmed on every second cycle so the eye also sees a slow 1.6 s beat. */
 function wave(count: number) {
   return {
-    frame: WAVE[count % WAVE.length],
-    isDim: count % (WAVE.length * 2) >= WAVE.length,
+    frame: theme.wave[count % theme.wave.length],
+    isDim: count % (theme.wave.length * 2) >= theme.wave.length,
   };
 }
 const hasReplyPass = atom(
@@ -470,7 +540,7 @@ async function showStatus($: EngineInterface) {
 /** The wave clock, started once per busy stretch; a hot reload drops the old timer, so a later call restarts it. */
 function startTicker($: EngineInterface) {
   ticker ??= $.clock.every(
-    WAVE_MS,
+    theme.waveMs,
     () => void update($, tick, (count) => count + 1).then(() => showStatus($)),
   );
 }
@@ -488,6 +558,7 @@ async function loadConfig($: EngineInterface) {
     for (const key of Object.keys(config) as (keyof typeof config)[]) {
       config[key] = text(file[key]);
     }
+    theme = THEMES[text(file.theme)] ?? DEFAULT_THEME;
     projectRoots = Array.isArray(file.projects)
       ? file.projects.map((one) => text(one)).filter((one) => one !== "")
       : [];
@@ -909,6 +980,10 @@ export const register: Register = (on) => {
         description: "Open the live desk pane",
       }),
       $.command.register({
+        name: "desk-theme",
+        description: `Switch the desk theme (${Object.keys(THEMES).join(", ")}); no name cycles to the next`,
+      }),
+      $.command.register({
         name: "desk-tickets",
         description:
           "Read the follow-up tickets we filed from Notion now (the mod does it every 30 min)",
@@ -954,6 +1029,31 @@ export const register: Register = (on) => {
     void gather($);
 
     return { text: "Desk pane opened." };
+  });
+
+  on("command.run", { command: "desk-theme" }, async ($, e) => {
+    const home = (await $.env.get("HOME")) ?? "";
+    const path = `${home}/orbit-scratch/desk/config.json`;
+    const file = JSON.parse(await $.fs.read(path).catch(() => "{}")) as Raw;
+    const names = Object.keys(THEMES);
+    const asked = e.args.trim();
+    const next =
+      asked !== ""
+        ? asked
+        : (names[
+            (names.indexOf(text(file.theme) || "default") + 1) % names.length
+          ] ?? "default");
+    if (!(next in THEMES)) {
+      return { text: `No theme "${next}". Themes: ${names.join(", ")}.` };
+    }
+    await $.fs.write(
+      path,
+      `${JSON.stringify({ ...file, theme: next }, null, 2)}\n`,
+    );
+    theme = THEMES[next] ?? DEFAULT_THEME;
+    $.ui.invalidate("ui.render");
+
+    return { text: `Desk theme: ${next}.` };
   });
 
   on("command.run", { command: "desk-tickets" }, async ($) => {
@@ -1223,7 +1323,7 @@ export const register: Register = (on) => {
           {waiting} waiting · closed today {desk.closedToday}
         </Text>
         {(await read($, isBusy)) && (
-          <Text bold color="yellow">
+          <Text bold color={C("yellow")}>
             <Text dimColor={wave(await read($, tick)).isDim}>
               {wave(await read($, tick)).frame}
             </Text>{" "}
@@ -1265,33 +1365,37 @@ export const register: Register = (on) => {
     // The engine's own frame has one color; this border is the one the eye finds when the desk holds the keyboard.
     const focused = e.props.isFocused;
     const width = Math.max(20, e.props.bodyColumns - 4);
-    const rule = "─".repeat(width);
+    const rule = theme.rule.repeat(width);
     const refWidth = Math.max(5, ...desk.cards.map((one) => one.ref.length));
 
     return (
       <Box
         flexDirection="column"
         paddingX={1}
-        borderStyle={focused ? "double" : "round"}
-        borderColor={focused ? "cyan" : "gray"}
+        borderStyle={focused ? theme.border.focused : theme.border.idle}
+        borderColor={
+          focused ? theme.border.focusedColor : theme.border.idleColor
+        }
         borderDimColor={!focused}
       >
         <Box justifyContent="space-between">
           <Text wrap="wrap">
-            <Text bold color="cyan" inverse={focused}>
-              {focused ? " DESK " : "DESK"}
+            <Text bold color={C("cyan")} inverse={focused}>
+              {focused ? ` ${theme.title} ` : theme.title}
             </Text>{" "}
             <Text bold>{open}</Text>
             <Text dimColor> waiting · </Text>
             {desk.parked}
             <Text dimColor> parked · </Text>
-            <Text color="green">{desk.closedToday}</Text>
+            <Text color={C("green")}>{desk.closedToday}</Text>
             <Text dimColor> closed today</Text>
-            {desk.scope !== "" && <Text color="yellow"> · {desk.scope}</Text>}
+            {desk.scope !== "" && (
+              <Text color={C("yellow")}> · {desk.scope}</Text>
+            )}
           </Text>
           <Box gap={1}>
             {busy && (
-              <Text bold color="yellow">
+              <Text bold color={C("yellow")}>
                 <Text dimColor={beat.isDim}>{beat.frame}</Text> CLAUDE WORKING
               </Text>
             )}
@@ -1314,7 +1418,7 @@ export const register: Register = (on) => {
         </Box>
         <Text dimColor>{rule}</Text>
         {desk.due.length > 0 && (
-          <Text wrap="wrap" color="yellow">
+          <Text wrap="wrap" color={C("yellow")}>
             due: {desk.due.join(" · ")}
           </Text>
         )}
@@ -1350,7 +1454,7 @@ export const register: Register = (on) => {
                   {card.prepared.resolved ? " already resolved" : ""} first:{" "}
                   {card.prepared.options[0]?.label ?? "?"}
                 </Text>
-                <Text wrap="wrap" bold color="yellow">
+                <Text wrap="wrap" bold color={C("yellow")}>
                   {card.prepared.fact}
                 </Text>
                 {card.prepared.draft !== "" && (
@@ -1371,7 +1475,7 @@ export const register: Register = (on) => {
             {summary !== undefined && (
               <Box marginTop={1} flexDirection="column">
                 <Text dimColor>NOW</Text>
-                <Text wrap="wrap" color="cyan">
+                <Text wrap="wrap" color={C("cyan")}>
                   {summary}
                 </Text>
               </Box>
@@ -1395,7 +1499,7 @@ export const register: Register = (on) => {
             {current && (
               <Box marginTop={1} flexDirection="column">
                 <Text dimColor>FACT</Text>
-                <Text wrap="wrap" bold color="yellow">
+                <Text wrap="wrap" bold color={C("yellow")}>
                   {current.fact}
                 </Text>
               </Box>
@@ -1422,7 +1526,7 @@ export const register: Register = (on) => {
             )}
             <Box marginTop={1} gap={1} alignItems="center">
               {busy && card.verb === null && current === null && (
-                <Text color="yellow">
+                <Text color={C("yellow")}>
                   Claude is working, wait for the turn to end before the next
                   card
                 </Text>
@@ -1465,7 +1569,7 @@ export const register: Register = (on) => {
           <Text wrap="wrap">
             <Text bold>{open}</Text>
             <Text dimColor> open · </Text>
-            <Text color="green">
+            <Text color={C("green")}>
               {
                 desk.cards.filter(
                   (one) => one.prepared !== null && one.verb === null,
@@ -1489,15 +1593,17 @@ export const register: Register = (on) => {
 
             return (
               <Box key={`row-${row}`} gap={1}>
-                <Text color={isSelected ? "cyan" : undefined}>
-                  {isSelected ? "▌" : " "}
+                <Text color={C(isSelected ? "cyan" : undefined)}>
+                  {isSelected ? theme.selected : " "}
                 </Text>
                 {/* ◆ = a prepared brief waits for this card; · = not prepared */}
                 <Text
-                  color={one.prepared !== null && !isDone ? "green" : undefined}
+                  color={C(
+                    one.prepared !== null && !isDone ? "green" : undefined,
+                  )}
                   dimColor={one.prepared === null || isDone}
                 >
-                  {one.prepared !== null && !isDone ? "◆" : "·"}
+                  {one.prepared !== null && !isDone ? theme.prepared : "·"}
                 </Text>
                 <Button
                   key={`pick-${row}`}
@@ -1514,7 +1620,7 @@ export const register: Register = (on) => {
                   color={isDone ? undefined : laneColor(one.lane)}
                 >
                   {isDone ? (
-                    <Text color="green">✓ {one.verb} · </Text>
+                    <Text color={C("green")}>✓ {one.verb} · </Text>
                   ) : (
                     <Text dimColor>{one.mins}m · </Text>
                   )}
@@ -1539,14 +1645,16 @@ export const register: Register = (on) => {
                 <Text dimColor> open · </Text>
                 {stats.snoozed}
                 <Text dimColor> snoozed · </Text>
-                <Text color={stats.newToday > 0 ? "yellow" : undefined}>
+                <Text color={C(stats.newToday > 0 ? "yellow" : undefined)}>
                   {stats.newToday}
                 </Text>
                 <Text dimColor> new today · </Text>
                 {stats.newWeek}
                 <Text dimColor> this week · </Text>
                 <Text
-                  color={stats.customerRepliesToday > 0 ? "yellow" : undefined}
+                  color={C(
+                    stats.customerRepliesToday > 0 ? "yellow" : undefined,
+                  )}
                 >
                   {stats.customerRepliesToday}
                 </Text>
@@ -1554,11 +1662,13 @@ export const register: Register = (on) => {
                 {!isOpen && (
                   <Text dimColor>
                     {" · "}
-                    <Text color={stats.waitingOnUs > 0 ? "red" : "green"}>
+                    <Text color={C(stats.waitingOnUs > 0 ? "red" : "green")}>
                       {stats.waitingOnUs}
                     </Text>{" "}
                     wait on us ·{" "}
-                    <Text color={stats.sync.uncovered > 0 ? "yellow" : "green"}>
+                    <Text
+                      color={C(stats.sync.uncovered > 0 ? "yellow" : "green")}
+                    >
                       {stats.sync.uncovered}
                     </Text>{" "}
                     uncovered
@@ -1570,7 +1680,7 @@ export const register: Register = (on) => {
               <Box flexDirection="column">
                 <Text wrap="wrap">
                   {"        "}
-                  <Text bold color={stats.waitingOnUs > 0 ? "red" : "green"}>
+                  <Text bold color={C(stats.waitingOnUs > 0 ? "red" : "green")}>
                     {stats.waitingOnUs}
                   </Text>
                   <Text dimColor>
@@ -1587,15 +1697,15 @@ export const register: Register = (on) => {
                   </Text>
                 </Text>
                 <Text wrap="wrap">
-                  <Text bold color="magenta">
+                  <Text bold color={C("magenta")}>
                     SYNC
                   </Text>
                   <Text dimColor> loop </Text>
                   {stats.sync.loopLive} live
                   <Text
-                    color={
-                      stats.sync.loopDoneStillTodo > 0 ? "yellow" : undefined
-                    }
+                    color={C(
+                      stats.sync.loopDoneStillTodo > 0 ? "yellow" : undefined,
+                    )}
                   >
                     {" "}
                     {stats.sync.loopDoneStillTodo} done-but-open
@@ -1603,10 +1713,12 @@ export const register: Register = (on) => {
                   <Text dimColor> · desk </Text>
                   {stats.sync.onDesk} live {stats.sync.parked} parked
                   <Text dimColor> · </Text>
-                  <Text color={stats.sync.uncovered > 0 ? "yellow" : "green"}>
+                  <Text
+                    color={C(stats.sync.uncovered > 0 ? "yellow" : "green")}
+                  >
                     {stats.sync.uncovered} uncovered
                   </Text>{" "}
-                  <Text color={stats.sync.unswept > 0 ? "red" : undefined}>
+                  <Text color={C(stats.sync.unswept > 0 ? "red" : undefined)}>
                     {stats.sync.unswept} unswept
                   </Text>
                   <Text dimColor>
@@ -1619,7 +1731,7 @@ export const register: Register = (on) => {
                 </Text>
                 {stats.tickets && (
                   <Text wrap="wrap">
-                    <Text bold color="magenta">
+                    <Text bold color={C("magenta")}>
                       TICKETS
                     </Text>
                     <Text dimColor> filed by us </Text>
@@ -1631,13 +1743,17 @@ export const register: Register = (on) => {
                     <Text dimColor> · shipped </Text>
                     {stats.tickets.shipped}
                     <Text dimColor> · </Text>
-                    <Text color={stats.tickets.idle > 0 ? "yellow" : "green"}>
+                    <Text
+                      color={C(stats.tickets.idle > 0 ? "yellow" : "green")}
+                    >
                       {stats.tickets.idle} idle (oldest{" "}
                       {stats.tickets.oldestIdleDays}d)
                     </Text>
                     <Text dimColor> · </Text>
                     <Text
-                      color={stats.tickets.shippedUntold > 0 ? "red" : "green"}
+                      color={C(
+                        stats.tickets.shippedUntold > 0 ? "red" : "green",
+                      )}
                     >
                       {stats.tickets.shippedUntold} shipped, customer not told
                     </Text>
@@ -1658,7 +1774,7 @@ export const register: Register = (on) => {
                 )}
                 <Box flexDirection="column" marginTop={1}>
                   <Text>
-                    <Text bold color="magenta">
+                    <Text bold color={C("magenta")}>
                       NEWEST
                     </Text>
                     <Text dimColor> last activity on Plain</Text>
@@ -1668,7 +1784,7 @@ export const register: Register = (on) => {
                       {"        "}
                       <Text
                         bold={t.isNew}
-                        color={t.isNew ? "yellow" : undefined}
+                        color={C(t.isNew ? "yellow" : undefined)}
                       >
                         {t.ref.padEnd(7)}
                       </Text>
@@ -1680,11 +1796,13 @@ export const register: Register = (on) => {
                             : "–"
                         ).padEnd(3)}
                       </Text>
-                      <Text color={t.onDesk ? "green" : "yellow"}>
+                      <Text color={C(t.onDesk ? "green" : "yellow")}>
                         {(t.onDesk ? "desk" : "nobody").padEnd(7)}
                       </Text>
                       <Text
-                        color={t.lastSpoke === "customer" ? "red" : undefined}
+                        color={C(
+                          t.lastSpoke === "customer" ? "red" : undefined,
+                        )}
                       >
                         {t.lastSpoke.padEnd(9)}
                       </Text>
