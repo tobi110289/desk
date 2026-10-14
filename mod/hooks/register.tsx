@@ -12,6 +12,7 @@ import type {
 } from "../types";
 
 const PANE = "desk";
+const PANE_SIZE = { id: PANE, title: "Desk", columns: 72, rows: 40 };
 const POLL_MS = 15_000;
 // The desk is live: the pane reruns desk.py when cards.json is older than this (Tobias, 2026-10-09: no sittings).
 const GATHER_MS = 10 * 60_000;
@@ -352,6 +353,11 @@ const isPlainOpen = atom({ plugin: "desk", key: "isPlainOpen" } as const, true);
 const isListOpen = atom({ plugin: "desk", key: "isListOpen" } as const, true);
 /** The pull-request list folds with `o`, apart from the Plain drawer (`p`). */
 const isPrsOpen = atom({ plugin: "desk", key: "isPrsOpen" } as const, true);
+/** True from the pane's close (`h`, ctrl+x x) to its next open: the band offers it back on ctrl+k. */
+const isPaneHidden = atom(
+  { plugin: "desk", key: "isPaneHidden" } as const,
+  false,
+);
 const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
 const brief = atom({ plugin: "desk", key: "brief" } as const, null);
 const summaries = atom({ plugin: "desk", key: "summaries" } as const, {});
@@ -1296,7 +1302,40 @@ export const register: Register = (on) => {
     return r;
   });
 
+  on("ui.open", async ($, e, next) => {
+    const r = await next(e);
+    if (e.id === PANE) {
+      await update($, isPaneHidden, () => false);
+    }
+
+    return r;
+  });
+
+  on("ui.close", async ($, e, next) => {
+    const r = await next(e);
+    if (e.id === PANE) {
+      await update($, isPaneHidden, () => true);
+    }
+
+    return r;
+  });
+
+  // ctrl+k (abovePrompt:focus) gives the band the keyboard; its autoFocus "show" Button takes the ring and opens the pane.
+  on("ui.focus", async ($, e, next) => {
+    const r = await next(e);
+    if (
+      e.component === "AbovePrompt" &&
+      e.element === "show" &&
+      (await read($, isPaneHidden))
+    ) {
+      await $.ui.open({ ...PANE_SIZE, focus: true });
+    }
+
+    return r;
+  });
+
   // The band names the card being worked; with none, the status line's count is enough.
+  // While the pane is hidden it also offers it back.
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (!(await atHome($))) {
       return next(e);
@@ -1304,13 +1343,33 @@ export const register: Register = (on) => {
     const id = await read($, working);
     const desk = await read($, view);
     const card = desk.cards.find((one) => one.id === id);
+    const hidden = await read($, isPaneHidden);
 
-    if (!card || e.props.hasSurvey) {
+    if ((!card && !hidden) || e.props.hasSurvey) {
       return next(e);
     }
 
     const { Box, Button, Text } = $.ui.resolve(e);
     const waiting = desk.cards.filter((one) => one.verb === null).length;
+    const show = hidden && (
+      <Button
+        key="show"
+        autoFocus
+        dimColor
+        label="ctrl+k show desk"
+        onPress={() => void $.ui.open({ ...PANE_SIZE, focus: true })}
+      />
+    );
+
+    if (!card) {
+      return (
+        <Box gap={1}>
+          <Text bold>Desk</Text>
+          <Text dimColor>{waiting} open</Text>
+          {show}
+        </Box>
+      );
+    }
 
     return (
       <Box gap={1}>
@@ -1339,6 +1398,7 @@ export const register: Register = (on) => {
             await update($, brief, () => null);
           }}
         />
+        {show}
       </Box>
     );
   });
@@ -1403,7 +1463,7 @@ export const register: Register = (on) => {
               {isRunning ? "ranking… " : ""}
               {desk.generatedAt.slice(11, 16)}Z
             </Text>
-            {/* The pane goes away until /desk-pane, the next gather, or the next desk_card opens it again. */}
+            {/* The pane goes away until ctrl+k, /desk-pane, the next gather or the next desk_card opens it again. */}
             <Button
               key="hide"
               plain
