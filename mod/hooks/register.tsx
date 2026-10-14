@@ -515,26 +515,6 @@ let gatherRun: Promise<void> | null = null;
 // The desk-prepare.py pass in flight.
 let prepareRun: Promise<void> | null = null;
 
-// A short trace of the hide/show path in ~/orbit-scratch/desk/pane-trace.log, to see where ctrl+k stops.
-const paneTrace: string[] = [];
-let lastTrace = "";
-async function trace($: EngineInterface, line: string) {
-  // The band draws ten times a second while Claude works; one line per change is enough.
-  if (line === lastTrace) {
-    return;
-  }
-  lastTrace = line;
-  paneTrace.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
-  paneTrace.splice(0, Math.max(0, paneTrace.length - 60));
-  const home = (await $.env.get("HOME")) ?? "";
-  await $.fs
-    .write(
-      `${home}/orbit-scratch/desk/pane-trace.log`,
-      paneTrace.join("\n") + "\n",
-    )
-    .catch(() => undefined);
-}
-
 async function isPaneOpen($: EngineInterface) {
   try {
     return (await $.ui.panes()).some((pane) => pane.id === PANE);
@@ -1325,17 +1305,16 @@ export const register: Register = (on) => {
   on("ui.open", async ($, e, next) => {
     const r = await next(e);
     if (e.id === PANE) {
-      await trace($, `ui.open focus=${String(e.focus)}`);
       await update($, isPaneHidden, () => false);
     }
 
     return r;
   });
 
+  // The person's close (ctrl+x x); the mod's own $.ui.close does not come back here, so `h` sets the flag itself.
   on("ui.close", async ($, e, next) => {
     const r = await next(e);
     if (e.id === PANE) {
-      await trace($, `ui.close origin=${JSON.stringify(e.origin)}`);
       await update($, isPaneHidden, () => true);
     }
 
@@ -1345,12 +1324,6 @@ export const register: Register = (on) => {
   // ctrl+k (abovePrompt:focus) gives the band the keyboard; its autoFocus "show" Button takes the ring and opens the pane.
   on("ui.focus", async ($, e, next) => {
     const r = await next(e);
-    if (e.component === "AbovePrompt") {
-      await trace(
-        $,
-        `ui.focus band element=${String(e.element)} plugin=${String(e.plugin)} hidden=${String(await read($, isPaneHidden))}`,
-      );
-    }
     if (
       e.component === "AbovePrompt" &&
       e.element === "show" &&
@@ -1372,10 +1345,6 @@ export const register: Register = (on) => {
     const desk = await read($, view);
     const card = desk.cards.find((one) => one.id === id);
     const hidden = await read($, isPaneHidden);
-    await trace(
-      $,
-      `band render hidden=${String(hidden)} card=${String(card?.ref)}`,
-    );
 
     if ((!card && !hidden) || e.props.hasSurvey) {
       return next(e);
@@ -1504,7 +1473,6 @@ export const register: Register = (on) => {
               label="h hide"
               onPress={async () => {
                 await update($, isPaneHidden, () => true);
-                await trace($, "h pressed");
                 void $.ui.close({ id: PANE }).catch(() => undefined);
               }}
             />
