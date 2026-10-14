@@ -174,6 +174,18 @@ def apply(ev, now=None):
         if d and (d.get('status') is None or d.get('status') == card['status']): return 'parked'
         return None
 
+    def waiting_card(new):
+        """The card unanswered_cards() in desk.py makes: the customer's message is the newest one, so a loop entry,
+        a worker or another card of the thread hides nothing."""
+        card = thread_card(at, at if new else None, ev.get('status') or 'TODO')
+        card['act'] = f"{ref} ({title[:60]}, {email}): customer waits for a first answer since {_hm(at)}: draft the reply"
+        card['unanswered'] = at
+        why = held(card)
+        if why:
+            out.append(f"skip: {cid} is {why} on this caption"); return
+        card['score'] = relift(card['score'], new); live.append(card)
+        out.append(f"{cid} added, the customer waits ({card['score']})")
+
     if kind in ('thread.created', 'thread.customer_message'):
         new = kind == 'thread.created'
         own = next((c for c in live if c['id'] == cid), None)
@@ -189,6 +201,8 @@ def apply(ev, now=None):
             c['note'] = f"customer wrote {_hm(at)} (live): " + re.sub(r'^customer wrote \S+ \(live\): ', '', c.get('note') or '')
             c['live'] = kind
             out.append(f"{c['id']} lifted ({c['score']})")
+        if not own and other and not ignored(ref, title):
+            waiting_card(new)   # another card (loop:, gap:, owe:) carries the thread; the gather adds this one beside it
         if not own and not other:
             hold = next((c for c in parked if mine(c)), None)
             loop = load(f'{LOOP}/state.json', {'threads': {}}).get('threads', {})
@@ -205,15 +219,7 @@ def apply(ev, now=None):
                 else:
                     out.append(f"{hold['id']} stays parked ({trig[:40] or 'hold'}); the full gather decides")
             elif ref in loop and not ignored(ref, title):
-                # the loop owns the thread, but the customer's message is the newest one: same card the gather makes
-                card = thread_card(at, at if new else None, ev.get('status') or 'TODO')
-                card['act'] = f"{ref} ({title[:60]}, {email}): customer waits for a first answer since {_hm(at)}: draft the reply"
-                card['unanswered'] = at
-                if held(card):
-                    out.append(f"skip: {cid} is {held(card)} on this caption")
-                else:
-                    card['score'] = relift(card['score'], new); live.append(card)
-                    out.append(f"{cid} added, the loop owns {ref} but the customer waits ({card['score']})")
+                waiting_card(new)
             elif ignored(ref, title):
                 out.append(f"skip: {ref} is on ignore.json")
             else:
