@@ -1,8 +1,20 @@
 // Plain words on the pane (Tobias, 2026-10-14): the brief is read by someone who has not opened the file, often at the
-// end of a long day. Code words go into the file, the close note or the PR, never into `fact` or `draft`.
+// end of a long day. Code words go into the file, the close note or the PR, never into the brief's fields
+// (`why`, `decide`, `then`, `fact`, `draft`).
 // The checks lean towards rejecting: a false reject costs one rewrite, a missed one costs the reader.
 
 export const FACT_MAX = 140;
+// WHY and DECIDE are one sentence each, THEN one or two (Tobias, 2026-10-14: "why a card is on the desk in the first
+// place, what am i to decide and for what").
+export const LINE_MAX: Record<string, number> = {
+  why: 160,
+  decide: 160,
+  then: 300,
+  fact: FACT_MAX,
+};
+/** The brief's fields in the order the pane shows them. */
+export const BRIEF_FIELDS = ["why", "decide", "then", "fact", "draft"] as const;
+export type BriefText = Partial<Record<(typeof BRIEF_FIELDS)[number], string>>;
 export const ITEMS_MAX = 3;
 export const ITEM_MAX = 220;
 
@@ -101,23 +113,19 @@ const itemsOf = (draft: string): string[] => {
 
 /**
  * What keeps a brief off the pane, one line per problem; empty when the brief may go on.
+ * Every field gets the ban; `why`, `decide`, `then` and `fact` a length cap; `draft` the cap on numbered items.
  * `isReply` marks customer text: it keeps the ban but not the cap on numbered items.
  */
-export function plainWordsProblems(
-  fact: string,
-  draft: string,
-  isReply = false,
-): string[] {
+export function plainWordsProblems(brief: BriefText, isReply = false): string[] {
   const problems: string[] = [];
-  if (fact.length > FACT_MAX) {
-    problems.push(
-      `fact is ${fact.length} characters; keep it to one sentence under ${FACT_MAX}`,
-    );
-  }
-  for (const [field, value] of [
-    ["fact", fact],
-    ["draft", draft],
-  ] as const) {
+  for (const field of BRIEF_FIELDS) {
+    const value = brief[field] ?? "";
+    const max = LINE_MAX[field];
+    if (max !== undefined && value.length > max) {
+      problems.push(
+        `${field} is ${value.length} characters; keep it under ${max}`,
+      );
+    }
     const words = codeWords(value);
     if (words.length > 0) {
       problems.push(
@@ -125,6 +133,7 @@ export function plainWordsProblems(
       );
     }
   }
+  const draft = brief.draft ?? "";
   // A customer reply keeps its own shape: no item cap, no item length.
   const items = isReply ? [] : itemsOf(draft);
   if (items.length > ITEMS_MAX) {

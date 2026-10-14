@@ -70,6 +70,9 @@ VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'de
 SCHEMA = {
     'type': 'object',
     'properties': {
+        'why': {'type': 'string', 'description': 'one plain sentence: what put this card on the desk, since when, and who waits'},
+        'decide': {'type': 'string', 'description': 'the one question the person answers, in one plain sentence'},
+        'then': {'type': 'string', 'description': 'one or two plain sentences: what the recommended option sets in motion, and what is at stake if nothing happens'},
         'fact': {'type': 'string', 'description': 'the single fact that decides this card, one plain sentence under 140 characters, no code words or ids'},
         'draft': {'type': 'string', 'description': 'the drafted consequence: the customer text, the reply, the command, or the decision; empty when nothing is drafted'},
         'options': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'why': {'type': 'string'}}, 'required': ['label', 'why']},
@@ -79,7 +82,7 @@ SCHEMA = {
         'resolved': {'type': 'boolean', 'description': 'true when the context shows the card is already resolved (reply sent, PR merged, line submitted)'},
         'replyReady': {'type': 'boolean', 'description': 'true only when `draft` is customer text ready to send as it stands: every claim in checks, openChecks empty, the thread at a stage where a reply is the move'},
     },
-    'required': ['fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady'],
+    'required': ['why', 'decide', 'then', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady'],
 }
 log_lock = threading.Lock()
 
@@ -219,7 +222,8 @@ The desk's rules for a card (from its skill):
 - When the card is a REVIEW card, `draft` is the recommended move and the one-line reason; when it is a RUN card, `draft` is the exact command or action.
 - `draft` holds only the text that would go out (or the command, or the decision). No remarks about the draft inside it: those belong in `fact` or `openChecks`.
 - Keep `fact` to one sentence. Keep `draft` under 1200 characters.
-- Plain words on the pane: the person reads `fact` and `draft` without opening any file, often at the end of a long day. `fact` is one plain sentence under 140 characters: what the case is and what changed. `draft` on a batch or task card is at most three numbered lines; each names the thing in product words (what a user sees or cannot do), says whether it is still true, and ends with the verb. A reply draft is one short paragraph of customer text; it keeps the customer-text rules above and skips the three-line cap. Never put into `fact` or `draft`: file paths, function, hook or variable names, commit hashes, entity ids or UUIDs, status enum values, ticket folder slugs, backticked code. PR numbers, thread refs, ticket ids, dates and amounts may stay. `checks` and `openChecks` are for the agent and may carry identifiers; `fact` and `draft` may not. The desk refuses a brief that breaks this.
+- Every brief has a fixed shape so the person sees why the card is there, what to decide and for what. `why`: one sentence, what put the card on the desk, since when, and who waits ("Dana wrote at 09:11 today and has had no answer", "this file has sat untriaged since 26 Aug, nobody waits"). `decide`: the one question in one sentence ("Send Dana this answer as Luna?"). `then`: one or two sentences, what the recommended option sets in motion and what is at stake if nothing happens ("Luna sends it now; the thread stays open until she confirms on staging"). Keep `why` and `decide` under 160 characters and `then` under 300.
+- Plain words on the pane: the person reads `why`, `decide`, `then`, `fact` and `draft` without opening any file, often at the end of a long day. `fact` is one plain sentence under 140 characters: what the case is and what changed. `draft` on a batch or task card is at most three numbered lines; each names the thing in product words (what a user sees or cannot do), says whether it is still true, and ends with the verb. A reply draft is one short paragraph of customer text; it keeps the customer-text rules above and skips the three-line cap. Never put into `fact` or `draft`: file paths, function, hook or variable names, commit hashes, entity ids or UUIDs, status enum values, ticket folder slugs, backticked code. PR numbers, thread refs, ticket ids, dates and amounts may stay. `checks` and `openChecks` are for the agent and may carry identifiers; `why`, `decide`, `then`, `fact` and `draft` may not. The desk refuses a brief that breaks this.
 
 ## The card
 {json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'mins', 'waits', 'age', 'status', 'note', 'act', 'pr', 'url')}, ensure_ascii=False, indent=1)}
@@ -271,6 +275,7 @@ def prepare(card, dry=False):
     brief = {
         'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'fingerprint': fingerprint(card),
         'status': card.get('status'), 'act': card.get('act'),
+        'why': so.get('why', ''), 'decide': so.get('decide', ''), 'then': so.get('then', ''),
         'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options,
         'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),
         'replyReady': ready, 'preparedAt': now_iso(), 'model': MODEL, 'costUsd': out.get('total_cost_usd'), 'ms': out.get('duration_ms'),

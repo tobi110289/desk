@@ -38,9 +38,11 @@ Two checks run when Claude ends a turn. A reply that says a message went out whi
 
 ## Plain words on the pane
 
+Every card has a fixed shape. WHY says what put it on the desk, since when, and who waits. DECIDE is the one question. THEN says what the recommended pick sets in motion and what is at stake if nothing happens. The pane shows the three as labelled lines above the fact and the draft, and `desk_card` refuses a card that lacks one. Prepared briefs carry them too.
+
 The pane is read by someone who has not opened the file, often at the end of a long day. A card's fact is one plain sentence under 140 characters. A batch or task draft is at most three numbered lines, each naming the thing in product words, whether it is still true, and the verb. File paths, code names, commit hashes, ids, status values and backticked code go into the file, the close note or the PR. PR numbers, thread refs, ticket ids, dates and amounts stay.
 
-`desk_card` enforces it. It refuses a fact over 140 characters, a draft with more than three numbered items or an item over 220 characters, and any of these in the fact or the draft: a backtick, a file path or a file name with a code extension, a slug path, a UUID, 8 or more hex characters with a digit, camelCase or PascalCase of three or more parts, snake_case, an ALL_CAPS token of six or more letters, kebab-case of three or more parts, a triage status value, or a function call. Links are skipped. The refusal names each word, so Claude rewrites and calls again. A customer reply skips the item cap, not the ban. `desk-prepare.py` gives the same rule to the headless run, whose `checks` and `openChecks` may still carry identifiers.
+`desk_card` enforces it. It refuses a fact over 140 characters, a draft with more than three numbered items or an item over 220 characters, why, decide or then lines over 160, 160 or 300 characters, and any of these in any of the five fields: a backtick, a file path or a file name with a code extension, a slug path, a UUID, 8 or more hex characters with a digit, camelCase or PascalCase of three or more parts, snake_case, an ALL_CAPS token of six or more letters, kebab-case of three or more parts, a triage status value, or a function call. Links are skipped. The refusal names each word, so Claude rewrites and calls again. A customer reply skips the item cap, not the ban. `desk-prepare.py` gives the same rule to the headless run, whose `checks` and `openChecks` may still carry identifiers.
 
 ## Live events
 

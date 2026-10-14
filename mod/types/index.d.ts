@@ -4,6 +4,9 @@ export type DeskLink = { label: string; href: string };
 export type PreparedBrief = {
   file: string;
   at: string;
+  why: string;
+  decide: string;
+  then: string;
   fact: string;
   draft: string;
   options: DeskOption[];
@@ -48,6 +51,12 @@ export type DeskOption = { label: string; verb: string };
 /** What Claude handed to the pane with desk_card: the deciding fact, the drafted consequence, the options. */
 export type DeskBrief = {
   cardId: string;
+  /** What put the card on the desk, since when, who waits. */
+  why: string;
+  /** The one question. */
+  decide: string;
+  /** What the recommended pick sets in motion, and what is at stake if nothing happens. */
+  then: string;
   fact: string;
   draft: string;
   options: DeskOption[];

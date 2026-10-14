@@ -44,12 +44,17 @@ Score = (impact weight + who-waits weight + age weight, age capped at six days) 
 
 The pane is read by someone who has not opened the file (Tobias, 2026-10-14: "do you think someone who has been working for 8 hours can still understand wtf this is supposed to mean?").
 
+Every card has the same shape (Tobias, 2026-10-14: "i need to clearly see, why a card is on the desk in the first place, what am i to decide and for what"). The pane shows WHY, DECIDE and THEN as labelled lines above the fact and the draft, then the options.
+
+- `why`: one sentence. What put the card on the desk, since when, and who waits: "Dana wrote at 09:11 today and has had no answer", "this file has sat untriaged since 26 Aug, nobody waits".
+- `decide`: the one question in one sentence: "Send Dana this answer as Luna?", "Hand the two Hub bugs to agents and close the third file?".
+- `then`: one or two sentences. What the recommended pick sets in motion, and what is at stake if nothing happens: "Two agents start today; left alone the bugs stay live on Hub."
 - `fact`: one plain sentence, under 140 characters, what the case is and what changed.
 - `draft`: at most three numbered lines for a batch or task card, one short paragraph for a reply card. Each line names the thing in product words (what a user sees or cannot do), says whether it is still true, and ends with the verb.
-- Never on the pane: file paths, function, hook or variable names, commit hashes, entity ids and UUIDs, status enum values, ticket folder slugs, backticked code. They go into the file, the `note` on close, or the PR. PR numbers, thread refs, ticket ids, dates and amounts stay.
+- Never in any of the five fields: file paths, function, hook or variable names, commit hashes, entity ids and UUIDs, status enum values, ticket folder slugs, backticked code. They go into the file, the `note` on close, or the PR. PR numbers, thread refs, ticket ids, dates and amounts stay.
 - A customer reply keeps its own rules (du/Sie, signed as Luna). It skips the three-line cap, not the ban.
 
-`desk_card` checks `fact` and `draft` and refuses a brief that breaks these rules, naming each word to rewrite. The rewrite of a bad card reads like this: "1. Hub bug: a resumed booking whose product never comes back stays on the loading screen forever. Still true. Hand it to an agent."
+`desk_card` needs `why`, `decide`, `then` and `fact`, and refuses a card that lacks one, naming the field. It checks all five fields against these rules and refuses a brief that breaks them, naming each word to rewrite. The rewrite of a bad card reads like this: "1. Hub bug: a resumed booking whose product never comes back stays on the loading screen forever. Still true. Hand it to an agent."
 
 ## Lanes
 

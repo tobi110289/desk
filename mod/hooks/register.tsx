@@ -11,7 +11,7 @@ import type {
   PlainStats,
   PreparedBrief,
 } from "../types";
-import { plainWordsProblems } from "./plainWords";
+import { BRIEF_FIELDS, plainWordsProblems } from "./plainWords";
 
 const PANE = "desk";
 const PANE_SIZE = { id: PANE, title: "Desk", columns: 72, rows: 40 };
@@ -117,8 +117,11 @@ const SUMMARY_MODEL = "sonnet";
 const REPLY_LANES = ["REPLY", "NOTIFY", "PROMISE", "FAST"];
 
 const CARD_DESCRIPTION =
-  "Put a desk card's brief on the desk pane: the one fact that decides it, the drafted consequence, and the " +
-  "lane's options (recommended first). Call it once per card, after pushing right, instead of AskUserQuestion. " +
+  "Put a desk card's brief on the desk pane in its fixed shape: WHY the card is on the desk, what to DECIDE, what THEN " +
+  "happens, the one fact that decides it, the drafted consequence, and the lane's options (recommended first). " +
+  "Every text field is plain words for a reader who has not opened the file: no paths, code names, ids, hashes, " +
+  "status values or backticks; the tool refuses them and names each one. " +
+  "Call it once per card, after pushing right, instead of AskUserQuestion. " +
   "Then end the turn: the user's pick arrives as their next message, 'Re desk card <id>: <option>'.";
 const CARD_SCHEMA = {
   type: "object",
@@ -127,6 +130,24 @@ const CARD_SCHEMA = {
       type: "string",
       description:
         "The card's id as desk.py prints it, such as loop:T-120 or batch:SEND:all.",
+    },
+    why: {
+      type: "string",
+      description:
+        "One plain sentence: what put the card on the desk, since when, and who waits, such as " +
+        "'Dana wrote at 09:11 today and has had no answer' or 'this file has sat untriaged since 26 Aug, nobody waits'.",
+    },
+    decide: {
+      type: "string",
+      description:
+        "The one question, in one sentence, such as 'Send Dana this answer as Luna?' or " +
+        "'Hand the two Hub bugs to agents and close the third file?'.",
+    },
+    then: {
+      type: "string",
+      description:
+        "One or two sentences: what the recommended pick sets in motion and what is at stake if nothing happens, such as " +
+        "'Luna sends it now; the thread stays open until she confirms on staging' or 'two agents start today; left alone the bugs stay live on Hub'.",
     },
     fact: {
       type: "string",
@@ -163,7 +184,7 @@ const CARD_SCHEMA = {
       },
     },
   },
-  required: ["card_id", "fact", "options"],
+  required: ["card_id", "why", "decide", "then", "fact", "options"],
 };
 
 const CLOSE_DESCRIPTION =
@@ -440,6 +461,9 @@ const preparedOf = (
   return {
     file: text(b.file),
     at: text(b.preparedAt),
+    why: text(b.why),
+    decide: text(b.decide),
+    then: text(b.then),
     fact: text(b.fact),
     draft: text(b.draft),
     options: ((b.options ?? []) as Raw[]).map((o) => ({
@@ -1031,11 +1055,22 @@ async function showCard($: EngineInterface, input: Raw): Promise<string> {
   if (options.length === 0) {
     return "Not shown: give at least one option with a label and a verb.";
   }
-  const fact = text(input.fact).trim();
-  const draft = text(input.draft).trim();
+  const [why, decide, then, fact, draft] = BRIEF_FIELDS.map((field) =>
+    text(input[field]).trim(),
+  ) as [string, string, string, string, string];
+  // The fixed shape: WHY the card is on the desk, what to DECIDE, what THEN happens. Each is required.
+  const missing = (["why", "decide", "then", "fact"] as const).filter(
+    (field) => text(input[field]).trim() === "",
+  );
+  if (missing.length > 0) {
+    return (
+      `Not shown: the brief has no ${missing.join(", ")}. Every card carries why (what put it on the desk, since when, who waits), ` +
+      "decide (the one question), then (what the recommended pick sets in motion and what is at stake if nothing happens) " +
+      "and fact (the deciding fact), each in plain words. Then call desk_card again."
+    );
+  }
   const problems = plainWordsProblems(
-    fact,
-    draft,
+    { why, decide, then, fact, draft },
     REPLY_LANES.includes(desk.cards[row]?.lane ?? ""),
   );
   if (problems.length > 0) {
@@ -1049,6 +1084,9 @@ async function showCard($: EngineInterface, input: Raw): Promise<string> {
   const at = await $.clock.now();
   await update($, brief, () => ({
     cardId: id,
+    why,
+    decide,
+    then,
     fact,
     draft: draft.slice(0, 1500),
     options,
@@ -1419,7 +1457,7 @@ export const register: Register = (on) => {
         lines.push(
           `A prepared brief for this card waits at ${card.prepared.file} (desk-prepare.py, ${card.prepared.at}, caption unchanged since). ` +
             "Read it and start from it: verify each of its openChecks live, confirm no customer-visible message is newer than preparedAt, " +
-            "then call desk_card with its fact, draft and options (edit what the checks changed). Skip the raw reads the brief already did; " +
+            "then call desk_card with its why, decide, then, fact, draft and options (edit what the checks changed). Skip the raw reads the brief already did; " +
             "its context file (.ctx.md beside it) holds what it saw.",
         );
       }
@@ -1738,6 +1776,20 @@ export const register: Register = (on) => {
                   {card.prepared.resolved ? " already resolved" : ""} first:{" "}
                   {card.prepared.options[0]?.label ?? "?"}
                 </Text>
+                {(
+                  [
+                    ["WHY", card.prepared.why],
+                    ["DECIDE", card.prepared.decide],
+                    ["THEN", card.prepared.then],
+                  ] as const
+                )
+                  .filter(([, line]) => Boolean(line))
+                  .map(([label, line]) => (
+                    <Text wrap="wrap">
+                      <Text dimColor>{label.padEnd(7)}</Text>
+                      {line}
+                    </Text>
+                  ))}
                 <Text wrap="wrap" bold color={C("yellow")}>
                   {card.prepared.fact}
                 </Text>
@@ -1780,6 +1832,23 @@ export const register: Register = (on) => {
                 </Text>
               </Box>
             )}
+            {current &&
+              (
+                [
+                  ["WHY", current.why],
+                  ["DECIDE", current.decide],
+                  ["THEN", current.then],
+                ] as const
+              )
+                .filter(([, line]) => Boolean(line))
+                .map(([label, line]) => (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>{label}</Text>
+                    <Text wrap="wrap" bold={label === "DECIDE"}>
+                      {line}
+                    </Text>
+                  </Box>
+                ))}
             {current && (
               <Box marginTop={1} flexDirection="column">
                 <Text dimColor>FACT</Text>

@@ -159,6 +159,9 @@ test("desk_card puts the options on the pane and tells Claude to wait", async ($
   const shown = await $.tool.call({
     tool: "mcp__desk__desk_card",
     card_id: "loop:T-1",
+    why: "Dana wrote at 09:11 today and has had no answer",
+    decide: "Send Dana this answer as Luna?",
+    then: "Luna sends it now; the thread stays open until she confirms.",
     fact: "customer asked twice",
     draft: "Hallo Dana, ...",
     options: [
@@ -173,6 +176,7 @@ test("desk_card puts the options on the pane and tells Claude to wait", async ($
   const unknown = await $.tool.call({
     tool: "mcp__desk__desk_card",
     card_id: "loop:T-9",
+    ...PLAIN_SHAPE,
     fact: "x",
     options: [{ label: "Send it", verb: "do" }],
   } as never);
@@ -188,6 +192,12 @@ const CODE_DRAFT =
   "the current index); acme/01 → wontfix (product 12345678 retired 2026-10-06, …)";
 const PLAIN_FACT =
   "Three old triage files: two Hub booking bugs are still real, one Acme pricing issue is gone";
+// The fixed shape above the draft (Tobias, 2026-10-14): why it is on the desk, what to decide, what then happens.
+const PLAIN_SHAPE = {
+  why: "These three files have sat untriaged since 26 Aug, nobody waits",
+  decide: "Hand the two Hub bugs to agents and close the third file?",
+  then: "Two agents start today; left alone the bugs stay live on Hub.",
+};
 const PLAIN_DRAFT = [
   "1. Hub bug: a resumed booking whose product never comes back stays on the loading screen forever. Still true. Hand it to an agent.",
   "2. Hub bug: edit the schedule of product A, switch to product B, go back: B's schedule gets wiped. Still true. Hand it to an agent; only the product that was edited may be cleared.",
@@ -195,7 +205,7 @@ const PLAIN_DRAFT = [
 ].join("\n");
 
 test("the plain-words check names the code words of a draft nobody can read", () => {
-  const problems = plainWordsProblems("Three triage files", CODE_DRAFT).join(" ");
+  const problems = plainWordsProblems({ fact: "Three triage files", draft: CODE_DRAFT }).join(" ");
 
   for (const word of [
     "deferredIntentRef",
@@ -210,7 +220,7 @@ test("the plain-words check names the code words of a draft nobody can read", ()
 });
 
 test("the plain-words check passes the rewrite Tobias accepted", () => {
-  expect(plainWordsProblems(PLAIN_FACT, PLAIN_DRAFT)).toEqual([]);
+  expect(plainWordsProblems({ ...PLAIN_SHAPE, fact: PLAIN_FACT, draft: PLAIN_DRAFT })).toEqual([]);
 });
 
 test("a customer reply with a thread ref, a PR number, a date and an amount passes", () => {
@@ -219,18 +229,27 @@ test("a customer reply with a thread ref, a PR number, a date and an amount pass
     "über 49,90 € kommt mit der nächsten Rechnung. Mehr dazu: https://support.example.com/articles/booking-schedule-per-product\n\nLG Luna";
 
   expect(
-    plainWordsProblems("customer asked twice, fix for ORB-203 is live since 2026-10-14", reply, true),
+    plainWordsProblems(
+      {
+        why: "Dana wrote at 09:11 today and has had no answer",
+        decide: "Send Dana this answer as Luna?",
+        then: "Luna sends it now; the thread stays open until she confirms on staging.",
+        fact: "customer asked twice, fix for ORB-203 is live since 2026-10-14",
+        draft: reply,
+      },
+      true,
+    ),
   ).toEqual([]);
 });
 
 test("the plain-words check holds the fact length, the item cap and the item length", () => {
-  expect(plainWordsProblems("x".repeat(141), "").join(" ")).toContain("141 characters");
+  expect(plainWordsProblems({ fact: "x".repeat(141) }).join(" ")).toContain("141 characters");
   const four = ["1. a", "2. b", "3. c", "4. d"].join("\n");
-  expect(plainWordsProblems("ok", four).join(" ")).toContain("4 numbered items");
+  expect(plainWordsProblems({ draft: four }).join(" ")).toContain("4 numbered items");
   // A reply keeps its own shape.
-  expect(plainWordsProblems("ok", four, true)).toEqual([]);
-  expect(plainWordsProblems("ok", `1. ${"word ".repeat(50)}`).join(" ")).toContain("item 1");
-  expect(plainWordsProblems("ok", "run `pnpm test` in mod/hooks/register.tsx at 6ff560d68e").join(" ")).toMatch(
+  expect(plainWordsProblems({ draft: four }, true)).toEqual([]);
+  expect(plainWordsProblems({ draft: `1. ${"word ".repeat(50)}` }).join(" ")).toContain("item 1");
+  expect(plainWordsProblems({ draft: "run `pnpm test` in mod/hooks/register.tsx at 6ff560d68e" }).join(" ")).toMatch(
     /backtick.*file path.*id or hash/,
   );
 });
@@ -245,6 +264,7 @@ test("desk_card refuses a brief in code words and names them", async ($, on) => 
     $.tool.call({
       tool: "mcp__desk__desk_card",
       card_id: "loop:T-1",
+      ...PLAIN_SHAPE,
       fact,
       draft,
       options: [{ label: "Hand it to an agent", verb: "do" }],
@@ -258,6 +278,46 @@ test("desk_card refuses a brief in code words and names them", async ($, on) => 
 
   const shown = String((await show(PLAIN_FACT, PLAIN_DRAFT)).result);
   expect(shown).toContain("Stop here and wait");
+});
+
+test("desk_card refuses a card without why and names the missing field", async ($, on) => {
+  world(on);
+  await $.tool.call({
+    tool: "Bash",
+    command: "python3 ~/orbit-scratch/desk/desk.py",
+  });
+  const refused = String(
+    (
+      await $.tool.call({
+        tool: "mcp__desk__desk_card",
+        card_id: "loop:T-1",
+        decide: PLAIN_SHAPE.decide,
+        then: PLAIN_SHAPE.then,
+        fact: PLAIN_FACT,
+        draft: PLAIN_DRAFT,
+        options: [{ label: "Hand it to an agent", verb: "do" }],
+      } as never)
+    ).result,
+  );
+
+  expect(refused).toContain("Not shown");
+  expect(refused).toContain("no why");
+  expect(refused).not.toContain("decide,");
+});
+
+test("why, decide and then go through the same plain-words guard", () => {
+  const problems = plainWordsProblems({
+    why: "the file at needs-triage since 26 Aug",
+    decide: "Clear handleSelectionChange at unmount?",
+    then: `route a held CACHE_MISS to the expired flow; ${"and more ".repeat(40)}`,
+    fact: PLAIN_FACT,
+  }).join(" ");
+
+  expect(problems).toContain('why has code words: "needs-triage"');
+  expect(problems).toContain('decide has code words: "handleSelectionChange"');
+  expect(problems).toContain("then has code words");
+  expect(problems).toContain("CACHE_MISS");
+  expect(problems).toMatch(/then is \d+ characters/);
 });
 
 // The live feed: config.json "liveEvents" switches it on; a round runs desk-events.py poll, then one desk.py --event
