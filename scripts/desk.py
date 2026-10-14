@@ -791,7 +791,7 @@ SCOPE=(f'tenant {TENANT}' if TENANT else None) or (f'threads since {SINCE}' if S
 def _tenant_key(s): return re.sub(r'[^a-z0-9]','',(s or '').lower())
 def _plain_threads(statuses, keep):
     """Every Plain thread in <statuses> that <keep>(node) accepts, paginated 100 at a time; None when Plain is unreachable."""
-    q='query($after:String,$st:[ThreadStatus!]){ threads(first:100, after:$after, filters:{statuses:$st}) { pageInfo{ hasNextPage endCursor } edges{ node{ id ref title status createdAt{ iso8601 } customer{ email{ email } company{ name domainName } } threadFields{ key stringValue } timelineEntries(first:6){ edges{ node{ timestamp{ iso8601 } actor{ __typename } entry{ __typename } } } } } } } }'
+    q='query($after:String,$st:[ThreadStatus!]){ threads(first:100, after:$after, filters:{statuses:$st}) { pageInfo{ hasNextPage endCursor } edges{ node{ id ref title status createdAt{ iso8601 } customer{ email{ email } company{ name domainName } } threadFields{ key stringValue } timelineEntries(first:10){ edges{ node{ timestamp{ iso8601 } actor{ __typename } entry{ __typename } } } } } } } }'
     after=None; out=[]
     while True:
         d=plain_gql(q,{'after':after,'st':statuses})
@@ -804,11 +804,19 @@ def _plain_threads(statuses, keep):
             ne=(n.get('timelineEntries') or {}).get('edges') or []
             newest=ne[0]['node'] if ne else {}
             cust=next((x['node'] for x in ne if (x['node'].get('actor') or {}).get('__typename')=='CustomerActor'),None)
+            # the customer-visible messages only (notes, field writes and status changes are no answer), newest first:
+            # waitSince is the oldest customer message after our newest reply, '' when our reply is the newest message
+            wait_since=''
+            for x in ne:
+                xn=x['node']; who=(xn.get('actor') or {}).get('__typename')
+                if (xn.get('entry') or {}).get('__typename') not in MSG_ENTRIES: continue
+                if who!='CustomerActor': break
+                wait_since=(xn.get('timestamp') or {}).get('iso8601') or wait_since
             out.append({'id':n['id'],'ref':n['ref'],'title':n.get('title') or '','status':n.get('status') or '','fields':f,'email':em,'domain':dom or edom,
                         'createdAt':(n.get('createdAt') or {}).get('iso8601') or '',
                         'customerAt':((cust or {}).get('timestamp') or {}).get('iso8601') or '',
                         'newestAt':(newest.get('timestamp') or {}).get('iso8601') or '','newestActor':(newest.get('actor') or {}).get('__typename') or '',
-                        'newestType':(newest.get('entry') or {}).get('__typename') or ''})
+                        'newestType':(newest.get('entry') or {}).get('__typename') or '','waitSince':wait_since})
         if not d['threads']['pageInfo']['hasNextPage']: break
         after=d['threads']['pageInfo']['endCursor']
     return out
@@ -902,6 +910,28 @@ def fast_thread_cards(threads,prefix):
              'status':'; '.join(facts)[:300],'note':(th['title'][:120]+' · '+'; '.join(note_bits))[:300],
              'act':f"{ref} ({th['title'][:60]}, {th['email']}): {READINESS_ACT.get(rd,READINESS_ACT['needs-triage'])}",
              'score':deskevent.fast_score(lvl,who,age)})
+def unanswered_cards(threads):
+    """2026-10-14: a thread of today whose newest customer-visible message is the customer's gets a today:<ref> card
+    even when the loop owns it. A thread opened in the morning got a validation note and a worker within 30 minutes,
+    the worker's PR was open, and the customer had no reply for five hours while the desk showed nothing: the loop
+    entry hid the row. The card goes away by itself on the first run after a reply of ours (Luna or a person)."""
+    have={c['id'] for c in cards}
+    for th in threads or []:
+        ref=th['ref']; since=th.get('waitSince')
+        if not since or f'today:{ref}' in have: continue
+        if TODAY_BERLIN not in (berlin_day(th['createdAt']),berlin_day(th['customerAt'])): continue
+        f=th['fields']; lvl=f.get('impact_level') if f.get('impact_level') in IMPACT else 'P2'
+        hm=parse_iso(since).astimezone(datetime.timezone.utc).strftime('%H:%MZ')
+        facts=[f"Plain {th.get('status') or 'TODO'}",f"customer wrote {th['customerAt'][:10]}"]
+        if th.get('createdAt'): facts.append(f"opened {parse_iso(th['createdAt']).astimezone(BERLIN).strftime('%Y-%m-%d %H:%M')} Berlin")
+        t=state.get(ref,{})
+        add({'id':f'today:{ref}','ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':0,'waits':'customer',
+             'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],'unanswered':since,
+             'status':'; '.join(facts)[:300],
+             'note':(th['title'][:120]+' · '+(f"loop: {t.get('phase')}, {(t.get('status') or '')[:60]}" if t else 'no loop entry'))[:300],
+             'act':f"{ref} ({th['title'][:60]}, {th['email']}): customer waits for a first answer since {hm}: draft the reply",
+             'score':deskevent.fast_score(lvl,'customer',0)})
+        have.add(f'today:{ref}')
 if SCOPE:
     srefs,sprs=tenant_scope(TENANT) if TENANT else since_scope(SINCE)
     def in_scope(c):
@@ -923,6 +953,7 @@ else:
     day_threads=plain_threads_since(TODAY_BERLIN)
     if day_threads is None: print("WARNING: Plain unreachable, today's threads are missing from the desk",file=sys.stderr)
     fast_thread_cards(day_threads,'today')
+    unanswered_cards(day_threads)
 # A thread opened today ranks above everything but desk.json "top"; a thread with a customer message today ranks right
 # under those. Pins (1000+) sit below both unless the pinned thread is itself from today. Only live cards move: a
 # parked card keeps its hold (a customer message changes the caption, and add() voids the hold on its own).

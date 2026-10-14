@@ -6,6 +6,7 @@ desk.json, board-sync.json or release-watch.json, never runs the pre-flight, and
 pane's gather clock reads it), stamping `eventAt` instead.
 
 Event types:
+  (a thread the loop owns gets the card too when the customer's message is the newest: "customer waits")
   thread.created           add or refresh the today:<ref> FAST card, ranked like a thread opened today (1800+)
   thread.customer_message  refresh that card, lift any live card of the ref (1700+), release a manual hold, or add
                            a today:<ref> card when nothing carries the thread
@@ -203,8 +204,16 @@ def apply(ev, now=None):
                     live.append(hold); out.append(f"{hold['id']} released from its manual hold")
                 else:
                     out.append(f"{hold['id']} stays parked ({trig[:40] or 'hold'}); the full gather decides")
-            elif ref in loop:
-                out.append(f"skip: the loop owns {ref}, no today card")
+            elif ref in loop and not ignored(ref, title):
+                # the loop owns the thread, but the customer's message is the newest one: same card the gather makes
+                card = thread_card(at, at if new else None, ev.get('status') or 'TODO')
+                card['act'] = f"{ref} ({title[:60]}, {email}): customer waits for a first answer since {_hm(at)}: draft the reply"
+                card['unanswered'] = at
+                if held(card):
+                    out.append(f"skip: {cid} is {held(card)} on this caption")
+                else:
+                    card['score'] = relift(card['score'], new); live.append(card)
+                    out.append(f"{cid} added, the loop owns {ref} but the customer waits ({card['score']})")
             elif ignored(ref, title):
                 out.append(f"skip: {ref} is on ignore.json")
             else:
@@ -234,6 +243,10 @@ def apply(ev, now=None):
                 c['note'] = re.sub(r' · [a-z-]+; owner ', f' · {rd}; owner ', c.get('note') or ''); c['live'] = kind
                 out.append(f"{c['id']} readiness {rd}")
     else:
+        if kind == 'luna.reply_sent':
+            # our reply answers the customer: an unanswered-customer card has done its job
+            gone = [c for c in live if mine(c) and c.get('unanswered')]
+            for c in gone: live.remove(c); out.append(f"{c['id']} dropped (Luna answered)")
         what = 'Luna replied' if kind == 'luna.reply_sent' else 'triage writeback'
         detail = ev.get('detail') if isinstance(ev.get('detail'), str) else ''
         for c in live:
