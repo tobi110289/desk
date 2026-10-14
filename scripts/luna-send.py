@@ -3,11 +3,17 @@
 through the Luna send path: pre-send checks, send, verification, and a luna_conversation_turns row, so the customer's
 answer routes into the adapter's luna_followup job instead of a fresh triage. Spec: ~/orbit-scratch/luna-operator-send/PRD.md.
 
-  luna-send.py <th_id|T-ref> --file <draft.txt> [--ref T-106] [--intent operator_reply|customer_question] [--force] [--wait 90] [--json]
+  luna-send.py <th_id|T-ref> --file <draft.txt> [--ref T-106] [--intent operator_reply|customer_question] [--force] [--allow-terminal-readiness] [--wait 90] [--json]
   --intent customer_question only when the draft asks the customer for an answer (the pending clarification): the adapter then
   moves the pass to needs-info / customer_reply (orbot #801, PR #802). The default operator_reply is an acknowledgement and
   leaves readiness alone.
+  --allow-terminal-readiness skips the readiness pre-check below (only when the field is already flipped and Plain lags).
   luna-send.py --status <actionId>
+
+Readiness pre-check: before queueing, the script reads the thread's agent_readiness from Plain. On ready-for-human or
+wontfix the adapter refuses operator sends (orbot gate), so the script prints why and exits 3 without queueing. Recovery:
+set agent_readiness to needs-info, send, set it back. A failed action blocks the identical text, so change one word. The
+script never writes the field itself. An unreadable field prints a warning and the send goes on (the adapter still gates).
 
 The adapter listens on 127.0.0.1:8787 on the VPS only; every call goes `ssh <sendHost> curl …`. The bearer token lives in
 the adapter's .env on the box (config.json sendEnvFile, ORBOT_OPERATOR_API_TOKEN) and never leaves the box: the curl reads it there.
@@ -36,10 +42,29 @@ def remote_curl(method, path, body=None, timeout=40):
     except ValueError: return int(status or 0), {'raw': out[:400]}
 
 
+JEV = os.path.expanduser('~/orbit-scratch/agent-loop/jev')   # home of plain.py, the one Plain reader
+
+
 def thread_id(ref_or_id):
     if ref_or_id.startswith('th_'): return ref_or_id
-    sys.path.insert(0, os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import plain   # the one Plain reader
+    sys.path.insert(0, JEV); import plain
     return plain.thread_id(ref_or_id)
+
+
+TERMINAL_READINESS = ('ready-for-human', 'wontfix')
+Q_READINESS = "query($id: ID!){ thread(threadId:$id){ threadFields{ key stringValue } } }"
+
+
+def readiness(tid):
+    """The thread's agent_readiness from Plain ('' when unset), or None when Plain cannot be read."""
+    try:
+        if JEV not in sys.path: sys.path.insert(0, JEV)
+        import plain
+        fields = plain.gql(Q_READINESS, {'id': tid})['thread']['threadFields'] or []
+        return next((f.get('stringValue') or '' for f in fields if f['key'] == 'agent_readiness'), '')
+    except Exception as e:
+        print(f'readiness not read ({str(e)[:120]}): the adapter still gates the send')
+        return None
 
 
 def status(action_id):
@@ -60,6 +85,11 @@ def main(argv):
     if not text: print('empty draft'); return 2
     ref = opt('--ref') or (target if re.match(r'^T-\d+$', target) else None)
     tid = thread_id(target)
+    if '--allow-terminal-readiness' not in argv:
+        rd = readiness(tid)
+        if rd in TERMINAL_READINESS:
+            print(f'readiness {rd} is terminal: the adapter refuses operator sends on it (orbot gate); flip it, send, restore it')
+            return 3
     body = {'threadId': tid, 'text': text, 'operator': 'tobias', 'source': 'desk', 'intent': opt('--intent', 'operator_reply')}
     if ref: body['ref'] = ref
     if '--force' in argv: body['force'] = True

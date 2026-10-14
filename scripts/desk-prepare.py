@@ -7,10 +7,13 @@ material per card (scripts only, no LLM), hands one headless `claude -p` per car
 writes the answer to briefs/<card id>.json. The desk mod shows a prepared card with a marker and tells Claude to
 start from the brief; Claude only checks the brief is still current before it calls desk_card.
 
+A customer-text card (REPLY, NOTIFY, PROMISE, FAST) whose brief carries a draft, no open checks and replyReady gets the
+options Send it · Edit then send · I sent it already · Defer · Drop, Send it first; any other brief keeps the lane's set.
+
 A brief is bound to the card's caption (status + act). When the caption changes the brief is stale and the next
 pass writes a new one. Batch cards and lanes that take the session over are never prepared.
 
-  desk-prepare.py [--top N] [--force] [--dry] [<card id> …]
+  desk-prepare.py [--top N] [--force] [--dry] [--help] [<card id> …]
 
 Env: PLAIN_API_KEY (thread reads), DESK_PREPARE_MODEL (default sonnet), DESK_PREPARE_TOP (default 5).
 Never runs inside a prepare child (DESK_PREPARE=1) so a child cannot start children.
@@ -47,6 +50,16 @@ OPTIONS = {
     'TASK': ['Start it now', 'Hand it to agents', 'Defer', 'Drop'],
     'SWEEP': ['Answer', 'Defer', 'Drop (accepted risk, recorded)'],
 }
+# 2026-10-14: a customer-text card whose reply is drafted and checked puts the send on the pane, first. The pick is the
+# send approval; no second question. OPTIONS above stay the set while checks are open or the thread is not yet claimed.
+REPLY_LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST'}
+DRAFTED = ['Send it', 'Edit then send', 'I sent it already', 'Defer', 'Drop']
+
+
+def drafted(lane, so):
+    """True when the brief carries a reply ready to send: a customer-text lane, a draft, no open checks, not resolved."""
+    return (lane in REPLY_LANES and bool((so.get('draft') or '').strip()) and not so.get('openChecks')
+            and not so.get('resolved') and bool(so.get('replyReady')))
 VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'delegate', 'Defer': 'defer', 'Defer until a trigger': 'defer',
          'Drop': 'drop', 'Drop (unpin)': 'drop', 'Nobody to tell (mark done)': 'do', 'Reply with a status': 'delegate',
          'Close the loop (nothing owed)': 'do', 'Hand to a worker / ticket': 'delegate', 'Claim + validate now': 'do',
@@ -64,8 +77,9 @@ SCHEMA = {
         'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence line in the context that backs it'},
         'openChecks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'claims the draft needs that the context does not back; Claude verifies these live before desk_card'},
         'resolved': {'type': 'boolean', 'description': 'true when the context shows the card is already resolved (reply sent, PR merged, line submitted)'},
+        'replyReady': {'type': 'boolean', 'description': 'true only when `draft` is customer text ready to send as it stands: every claim in checks, openChecks empty, the thread at a stage where a reply is the move'},
     },
-    'required': ['fact', 'draft', 'options', 'checks', 'openChecks', 'resolved'],
+    'required': ['fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady'],
 }
 log_lock = threading.Lock()
 
@@ -187,11 +201,18 @@ def material(card):
 
 def prompt(card, ctx):
     opts = OPTIONS.get(card['lane'], [])
+    if card['lane'] in REPLY_LANES:
+        rule = (f"- The options depend on the draft. When `draft` is a customer reply ready to send (every claim backed in `checks`, `openChecks` empty, "
+                f"and a reply is the right move at this stage), set `replyReady` true and use this set with \"Send it\" first: {json.dumps(DRAFTED, ensure_ascii=False)}. "
+                f"Otherwise (open checks, the thread unclaimed, a Hermes brief not yet validated, or the move is no reply) set `replyReady` false and use the lane's set, "
+                f"in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use the labels verbatim.")
+    else:
+        rule = f"- The options are this lane's fixed set, in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use these labels verbatim. Set `replyReady` false."
     return f"""You prepare ONE card of a support desk for the person who runs it. You cannot use tools: everything you may rely on is in this message. Answer with the JSON the schema asks for.
 
 The desk's rules for a card (from its skill):
 - A brief, not a draft: the deciding fact on top, the consequence already drafted. The person confirms or edits, never composes.
-- The options are this lane's fixed set, in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use these labels verbatim.
+{rule}
 - Customer text: German "du" unless the customer wrote "Sie"; warm and short; sign as Luna (never with the person's name); it never quotes memory, tenant ids, sources or inferred facts. Address form, greeting and sign-off habits come from the memory block.
 - Every claim in a customer text must be backed by a line in the context. Put each claim and its evidence into `checks`. A claim you need but cannot back goes into `openChecks` and NOT into the draft; the person's agent verifies it live.
 - When the context shows the card is already resolved (reply already sent, PR merged, line already submitted), say so in `fact`, set `resolved` true and leave `draft` empty.
@@ -238,17 +259,20 @@ def prepare(card, dry=False):
         json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(out.get('result'))[:300], 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
         return
     so = out['structured_output']
-    allowed = OPTIONS.get(card['lane'], [])
+    ready = drafted(card['lane'], so)
+    allowed = DRAFTED if ready else OPTIONS.get(card['lane'], [])
     options = [{'label': o['label'], 'verb': VERBS.get(o['label'], 'do'), 'why': o.get('why', '')} for o in so.get('options', []) if o.get('label') in allowed]
     for label in allowed:  # the fixed set stays complete, recommended ones first
         if all(o['label'] != label for o in options):
             options.append({'label': label, 'verb': VERBS.get(label, 'do'), 'why': ''})
+    if ready:  # a checked draft always leads with the send
+        options.sort(key=lambda o: o['label'] != 'Send it')
     brief = {
         'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'fingerprint': fingerprint(card),
         'status': card.get('status'), 'act': card.get('act'),
         'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options,
         'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),
-        'preparedAt': now_iso(), 'model': MODEL, 'costUsd': out.get('total_cost_usd'), 'ms': out.get('duration_ms'),
+        'replyReady': ready, 'preparedAt': now_iso(), 'model': MODEL, 'costUsd': out.get('total_cost_usd'), 'ms': out.get('duration_ms'),
         'context': ctx_path,
     }
     json.dump(brief, open(brief_path(cid), 'w'), ensure_ascii=False, indent=1)
@@ -262,6 +286,8 @@ def now_iso():
 def main():
     if os.environ.get('DESK_PREPARE'):
         return 0
+    if '--help' in sys.argv or '-h' in sys.argv:
+        print(__doc__); return 0
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     top = int(os.environ.get('DESK_PREPARE_TOP', '5'))
     if '--top' in sys.argv:
