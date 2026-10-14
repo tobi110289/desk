@@ -35,7 +35,7 @@ const RULES: Rule[] = [
     pattern:
       /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
   },
-  // 8+ hex characters with at least one digit: commit hashes, entity ids, 47642946
+  // 8+ hex characters with at least one digit: commit hashes, entity ids, 12345678
   {
     what: "id or hash",
     pattern: /\b(?=[0-9a-f]*\d)[0-9a-f]{8,}\b/gi,
