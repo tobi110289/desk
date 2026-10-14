@@ -789,9 +789,37 @@ if '--since' in sys.argv:
     i=sys.argv.index('--since'); SINCE=sys.argv[i+1] if i+1<len(sys.argv) else SINCE
 SCOPE=(f'tenant {TENANT}' if TENANT else None) or (f'threads since {SINCE}' if SINCE else None)
 def _tenant_key(s): return re.sub(r'[^a-z0-9]','',(s or '').lower())
+WAIT_SCAN_CAP=80   # timeline entries read at most per thread to find its newest customer-visible message
+Q_TIMELINE_PAGE='query($id:ID!,$after:String,$n:Int!){ thread(threadId:$id){ timelineEntries(first:$n, after:$after){ pageInfo{ hasNextPage endCursor } edges{ node{ timestamp{ iso8601 } actor{ __typename } entry{ __typename } } } } } }'
+def scan_wait(nodes):
+    """Newest-first timeline nodes -> (since, decided). Notes, field writes, labels and status changes are skipped. since is
+    the oldest customer message after our newest reply; decided turns True at the first customer-visible message."""
+    since=''
+    for xn in nodes:
+        if (xn.get('entry') or {}).get('__typename') not in MSG_ENTRIES: continue
+        if (xn.get('actor') or {}).get('__typename')!='CustomerActor': return since,True   # a reply of ours (Luna or a person)
+        since=(xn.get('timestamp') or {}).get('iso8601') or since
+    return since,bool(since)
+def wait_since_of(tid,ref,nodes,page,is_today):
+    """2026-10-14: a thread can carry a dozen notes after the customer's message (four per Hermes pass, plus desk
+    notes), so the first page often holds no message at all. For a thread of today the walk pages on with the Plain
+    cursor, up to WAIT_SCAN_CAP entries; a thread with no customer-visible message in that window counts as answered."""
+    since,decided=scan_wait(nodes)
+    if decided or not is_today or not page.get('hasNextPage'): return since
+    read=len(nodes); after=page.get('endCursor')
+    while read<WAIT_SCAN_CAP:
+        d=plain_gql(Q_TIMELINE_PAGE,{'id':tid,'after':after,'n':min(20,WAIT_SCAN_CAP-read)})
+        if not d or not d.get('thread'): return ''
+        tl=d['thread']['timelineEntries']; more=[e['node'] for e in tl['edges']]; read+=len(more)
+        since,decided=scan_wait(more)
+        if decided: return since
+        if not tl['pageInfo']['hasNextPage'] or not more: return ''
+        after=tl['pageInfo']['endCursor']
+    print(f"desk: {ref} shows no customer-visible message in its newest {WAIT_SCAN_CAP} timeline entries; counted as answered",file=sys.stderr)
+    return ''
 def _plain_threads(statuses, keep):
     """Every Plain thread in <statuses> that <keep>(node) accepts, paginated 100 at a time; None when Plain is unreachable."""
-    q='query($after:String,$st:[ThreadStatus!]){ threads(first:100, after:$after, filters:{statuses:$st}) { pageInfo{ hasNextPage endCursor } edges{ node{ id ref title status createdAt{ iso8601 } customer{ email{ email } company{ name domainName } } threadFields{ key stringValue } timelineEntries(first:10){ edges{ node{ timestamp{ iso8601 } actor{ __typename } entry{ __typename } } } } } } } }'
+    q='query($after:String,$st:[ThreadStatus!]){ threads(first:100, after:$after, filters:{statuses:$st}) { pageInfo{ hasNextPage endCursor } edges{ node{ id ref title status createdAt{ iso8601 } customer{ email{ email } company{ name domainName } } threadFields{ key stringValue } timelineEntries(first:10){ pageInfo{ hasNextPage endCursor } edges{ node{ timestamp{ iso8601 } actor{ __typename } entry{ __typename } } } } } } } }'
     after=None; out=[]
     while True:
         d=plain_gql(q,{'after':after,'st':statuses})
@@ -804,14 +832,10 @@ def _plain_threads(statuses, keep):
             ne=(n.get('timelineEntries') or {}).get('edges') or []
             newest=ne[0]['node'] if ne else {}
             cust=next((x['node'] for x in ne if (x['node'].get('actor') or {}).get('__typename')=='CustomerActor'),None)
-            # the customer-visible messages only (notes, field writes and status changes are no answer), newest first:
-            # waitSince is the oldest customer message after our newest reply, '' when our reply is the newest message
-            wait_since=''
-            for x in ne:
-                xn=x['node']; who=(xn.get('actor') or {}).get('__typename')
-                if (xn.get('entry') or {}).get('__typename') not in MSG_ENTRIES: continue
-                if who!='CustomerActor': break
-                wait_since=(xn.get('timestamp') or {}).get('iso8601') or wait_since
+            _created=(n.get('createdAt') or {}).get('iso8601') or ''
+            wait_since=wait_since_of(n['id'],n['ref'],[x['node'] for x in ne],(n.get('timelineEntries') or {}).get('pageInfo') or {},
+                                     berlin_day(_created)==TODAY_BERLIN or berlin_day(((cust or {}).get('timestamp') or {}).get('iso8601'))==TODAY_BERLIN)
+            if wait_since and not cust: cust={'timestamp':{'iso8601':wait_since}}   # the customer's message sat beyond the first page
             out.append({'id':n['id'],'ref':n['ref'],'title':n.get('title') or '','status':n.get('status') or '','fields':f,'email':em,'domain':dom or edom,
                         'createdAt':(n.get('createdAt') or {}).get('iso8601') or '',
                         'customerAt':((cust or {}).get('timestamp') or {}).get('iso8601') or '',
