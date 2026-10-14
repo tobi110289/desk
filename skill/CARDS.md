@@ -40,7 +40,20 @@ The desk never waits on a dispatched run. Their output lands as cards in the nex
 
 Score = (impact weight + who-waits weight + age weight, age capped at six days) ÷ minutes × 10. Impact: P0 8, RBP 6, RBS 5, P1 4, P2 2. Who waits: customer 3, person 2, agent 2, nobody 0. Cheap, high-value cards float; a batch scores like its most urgent member and costs the sum of its members.
 
+## A brief, not a draft
+
+The pane is read by someone who has not opened the file (Tobias, 2026-10-14: "do you think someone who has been working for 8 hours can still understand wtf this is supposed to mean?").
+
+- `fact`: one plain sentence, under 140 characters, what the case is and what changed.
+- `draft`: at most three numbered lines for a batch or task card, one short paragraph for a reply card. Each line names the thing in product words (what a user sees or cannot do), says whether it is still true, and ends with the verb.
+- Never on the pane: file paths, function, hook or variable names, commit hashes, entity ids and UUIDs, status enum values, ticket folder slugs, backticked code. They go into the file, the `note` on close, or the PR. PR numbers, thread refs, ticket ids, dates and amounts stay.
+- A customer reply keeps its own rules (du/Sie, signed as Luna). It skips the three-line cap, not the ban.
+
+`desk_card` checks `fact` and `draft` and refuses a brief that breaks these rules, naming each word to rewrite. The rewrite of a bad card reads like this: "1. Hub bug: a resumed booking whose product never comes back stays on the loading screen forever. Still true. Hand it to an agent."
+
 ## Lanes
+
+Every lane's `fact` and `draft` follow "A brief, not a draft" above: plain words, no code.
 
 **A checked draft puts the send on the pane** (Tobias, 2026-10-14). REPLY, NOTIFY, PROMISE and FAST cards end in customer text. When the agent holds a checked draft for one (every claim verified live, the text on the clipboard and in `~/orbit-scratch/desk/drafts/<ref>.txt`), the card's options are `Send it · Edit then send · I sent it already · Defer · Drop`, with `Send it` first. The pick `Send it` on the pane is the send approval: the agent sends at once and asks nothing more. `Edit then send` takes the edit in one `AskUserQuestion` (free text), writes the file, then sends. Verbs: `Send it` and `Edit then send` are `delegate`, `I sent it already` is `do`. The lane's other set below holds only while there is no checked draft: open checks remain, the thread is unclaimed, or its Hermes brief is unvalidated. That is when `Draft the reply` or `Claim + validate now` lead.
 

@@ -11,6 +11,7 @@ import type {
   PlainStats,
   PreparedBrief,
 } from "../types";
+import { plainWordsProblems } from "./plainWords";
 
 const PANE = "desk";
 const PANE_SIZE = { id: PANE, title: "Desk", columns: 72, rows: 40 };
@@ -112,6 +113,8 @@ const VERBS = ["do", "decide", "delegate", "defer", "drop"];
 // Hotkeys for the options on a card; 1-9, p and w are taken.
 const OPTION_KEYS = "abcdefghij";
 const SUMMARY_MODEL = "sonnet";
+// Lanes whose draft is customer text: the plain-words ban holds, the cap on numbered items does not.
+const REPLY_LANES = ["REPLY", "NOTIFY", "PROMISE", "FAST"];
 
 const CARD_DESCRIPTION =
   "Put a desk card's brief on the desk pane: the one fact that decides it, the drafted consequence, and the " +
@@ -128,12 +131,15 @@ const CARD_SCHEMA = {
     fact: {
       type: "string",
       description:
-        "The single fact that decides the card, under 140 characters, such as 'customer asked twice, fix is on staging since 06.10'.",
+        "The single fact that decides the card: one plain sentence under 140 characters, what the case is and what changed, " +
+        "such as 'customer asked twice, fix is on staging since 06.10'. No paths, code names, ids, hashes, status values or backticks.",
     },
     draft: {
       type: "string",
       description:
-        "The drafted consequence the recommended option executes: the reply text, the caption, the message. Omit when there is none.",
+        "The drafted consequence the recommended option executes: the reply text, the caption, the message. Omit when there is none. " +
+        "A batch or task card: at most three numbered lines, each naming the thing in product words, whether it is still true, and the verb. " +
+        "No paths, code names, ids, hashes, status values or backticks: the tool refuses them.",
     },
     options: {
       type: "array",
@@ -1025,11 +1031,26 @@ async function showCard($: EngineInterface, input: Raw): Promise<string> {
   if (options.length === 0) {
     return "Not shown: give at least one option with a label and a verb.";
   }
+  const fact = text(input.fact).trim();
+  const draft = text(input.draft).trim();
+  const problems = plainWordsProblems(
+    fact,
+    draft,
+    REPLY_LANES.includes(desk.cards[row]?.lane ?? ""),
+  );
+  if (problems.length > 0) {
+    return (
+      `Not shown: the brief is not in plain words. ${problems.join(". ")}. ` +
+      "Rewrite it for someone who has not opened the file: name each thing in product words (what a user sees or cannot do), " +
+      "say whether it is still true, end with the verb. Paths, code names, ids, hashes and status values go into the file, " +
+      "the close note or the PR. Then call desk_card again."
+    );
+  }
   const at = await $.clock.now();
   await update($, brief, () => ({
     cardId: id,
-    fact: text(input.fact).trim().slice(0, 300),
-    draft: text(input.draft).trim().slice(0, 1500),
+    fact,
+    draft: draft.slice(0, 1500),
     options,
     at,
   }));

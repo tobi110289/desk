@@ -70,7 +70,7 @@ VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'de
 SCHEMA = {
     'type': 'object',
     'properties': {
-        'fact': {'type': 'string', 'description': 'the single fact that decides this card, one sentence'},
+        'fact': {'type': 'string', 'description': 'the single fact that decides this card, one plain sentence under 140 characters, no code words or ids'},
         'draft': {'type': 'string', 'description': 'the drafted consequence: the customer text, the reply, the command, or the decision; empty when nothing is drafted'},
         'options': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'why': {'type': 'string'}}, 'required': ['label', 'why']},
                     'description': "the lane's fixed options, recommended first"},
@@ -219,6 +219,7 @@ The desk's rules for a card (from its skill):
 - When the card is a REVIEW card, `draft` is the recommended move and the one-line reason; when it is a RUN card, `draft` is the exact command or action.
 - `draft` holds only the text that would go out (or the command, or the decision). No remarks about the draft inside it: those belong in `fact` or `openChecks`.
 - Keep `fact` to one sentence. Keep `draft` under 1200 characters.
+- Plain words on the pane: the person reads `fact` and `draft` without opening any file, often at the end of a long day. `fact` is one plain sentence under 140 characters: what the case is and what changed. `draft` on a batch or task card is at most three numbered lines; each names the thing in product words (what a user sees or cannot do), says whether it is still true, and ends with the verb. A reply draft is one short paragraph of customer text; it keeps the customer-text rules above and skips the three-line cap. Never put into `fact` or `draft`: file paths, function, hook or variable names, commit hashes, entity ids or UUIDs, status enum values, ticket folder slugs, backticked code. PR numbers, thread refs, ticket ids, dates and amounts may stay. `checks` and `openChecks` are for the agent and may carry identifiers; `fact` and `draft` may not. The desk refuses a brief that breaks this.
 
 ## The card
 {json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'mins', 'waits', 'age', 'status', 'note', 'act', 'pr', 'url')}, ensure_ascii=False, indent=1)}

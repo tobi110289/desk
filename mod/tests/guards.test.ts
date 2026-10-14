@@ -1,6 +1,8 @@
 import type { On } from "claude-code";
 import { expect, mock, test } from "claude-code/testing";
 
+import { plainWordsProblems } from "../hooks/plainWords";
+
 const CARDS = JSON.stringify({
   generatedAt: "2026-10-02T10:04:51+00:00",
   cards: [
@@ -175,6 +177,87 @@ test("desk_card puts the options on the pane and tells Claude to wait", async ($
     options: [{ label: "Send it", verb: "do" }],
   } as never);
   expect(String(unknown.result)).toContain("Not shown");
+});
+
+// Plain words on the pane (Tobias, 2026-10-14): the draft that landed on the pane, and the rewrite he accepted.
+const CODE_DRAFT =
+  "Set the Status lines: 01 → ready-for-agent (Remaining: the deferredIntentRef hold exists; missing is the terminal " +
+  "path when the rebuild settles with no product: route a held CACHE_MISS to the cache-expired flow and a held failure " +
+  "to inline error/Retry, from an explicit rebuild-settled signal, no timeout); 03 → ready-for-agent (decision: record " +
+  "the edited product by id in handleSelectionChange, clear only that product at unmount, resolve its index by id; never " +
+  "the current index); acme/01 → wontfix (product 12345678 retired 2026-10-06, …)";
+const PLAIN_FACT =
+  "Three old triage files: two Hub booking bugs are still real, one Acme pricing issue is gone";
+const PLAIN_DRAFT = [
+  "1. Hub bug: a resumed booking whose product never comes back stays on the loading screen forever. Still true. Hand it to an agent.",
+  "2. Hub bug: edit the schedule of product A, switch to product B, go back: B's schedule gets wiped. Still true. Hand it to an agent; only the product that was edited may be cleared.",
+  "3. Acme: the purchasing product this was about was retired on 6 Oct. Close it as wontfix.",
+].join("\n");
+
+test("the plain-words check names the code words of a draft nobody can read", () => {
+  const problems = plainWordsProblems("Three triage files", CODE_DRAFT).join(" ");
+
+  for (const word of [
+    "deferredIntentRef",
+    "CACHE_MISS",
+    "12345678",
+    "handleSelectionChange",
+    "ready-for-agent",
+    "acme/01",
+  ]) {
+    expect(problems).toContain(word);
+  }
+});
+
+test("the plain-words check passes the rewrite Tobias accepted", () => {
+  expect(plainWordsProblems(PLAIN_FACT, PLAIN_DRAFT)).toEqual([]);
+});
+
+test("a customer reply with a thread ref, a PR number, a date and an amount passes", () => {
+  const reply =
+    "Hallo Dana,\n\ndanke dir für den Hinweis zu T-120. Der Fix ist mit #1234 seit 14.10. live, die Gutschrift " +
+    "über 49,90 € kommt mit der nächsten Rechnung. Mehr dazu: https://support.example.com/articles/booking-schedule-per-product\n\nLG Luna";
+
+  expect(
+    plainWordsProblems("customer asked twice, fix for ORB-203 is live since 2026-10-14", reply, true),
+  ).toEqual([]);
+});
+
+test("the plain-words check holds the fact length, the item cap and the item length", () => {
+  expect(plainWordsProblems("x".repeat(141), "").join(" ")).toContain("141 characters");
+  const four = ["1. a", "2. b", "3. c", "4. d"].join("\n");
+  expect(plainWordsProblems("ok", four).join(" ")).toContain("4 numbered items");
+  // A reply keeps its own shape.
+  expect(plainWordsProblems("ok", four, true)).toEqual([]);
+  expect(plainWordsProblems("ok", `1. ${"word ".repeat(50)}`).join(" ")).toContain("item 1");
+  expect(plainWordsProblems("ok", "run `pnpm test` in mod/hooks/register.tsx at 6ff560d68e").join(" ")).toMatch(
+    /backtick.*file path.*id or hash/,
+  );
+});
+
+test("desk_card refuses a brief in code words and names them", async ($, on) => {
+  world(on);
+  await $.tool.call({
+    tool: "Bash",
+    command: "python3 ~/orbit-scratch/desk/desk.py",
+  });
+  const show = (fact: string, draft: string) =>
+    $.tool.call({
+      tool: "mcp__desk__desk_card",
+      card_id: "loop:T-1",
+      fact,
+      draft,
+      options: [{ label: "Hand it to an agent", verb: "do" }],
+    } as never);
+
+  const refused = String((await show("Three triage files", CODE_DRAFT)).result);
+  expect(refused).toContain("Not shown");
+  expect(refused).toContain("deferredIntentRef");
+  expect(refused).toContain("CACHE_MISS");
+  expect(refused).toContain("12345678");
+
+  const shown = String((await show(PLAIN_FACT, PLAIN_DRAFT)).result);
+  expect(shown).toContain("Stop here and wait");
 });
 
 // The live feed: config.json "liveEvents" switches it on; a round runs desk-events.py poll, then one desk.py --event
