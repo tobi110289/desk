@@ -10,6 +10,8 @@ Usage:
                           tenant_id (sweep-cache), plus PR cards those threads' loop entries name
   desk.py --today         scope the sitting to the Plain threads created today (Europe/Berlin): every open
                           thread from today is a card, nothing older is (--since YYYY-MM-DD for another day)
+  desk.py --event <json>  apply one live event from the adapter's feed to cards.json and stop (deskevent.py; no
+                          gather, no pre-flight, no board files; desk-events.py feeds it)
   desk.py T-120 ORB-203 pin one or more Plain threads / Notion tickets: each becomes a FAST card above the
                           ranking (score 1000+) and stays there in every sitting until it gets a verb
                           (`desk-close.py fast:T-120 <verb>` unpins it; `--unpin <ref>` drops one by hand)
@@ -73,6 +75,13 @@ def release_state(env,pr):
     cmp=(gh(['api',f'repos/{ORBIT}/compare/{sha}...{dep["sha"]}','--jq','{s:.status}'],30) or {}).get('s')
     return {'landed':cmp in ('ahead','identical'),'merged':True,'deployAt':dep['at'],'deploySha':dep['sha'],'title':d.get('title')}
 release_watch=[]   # rows for the board: every card parked on a deployed:<env>:<pr> trigger, with its live state
+
+# 2026-10-14: the live feed. `--event` adds or refreshes one card from the event fields alone and exits before any
+# source below is read (the gather takes ~45 s, an event must land in under one).
+import deskevent
+if '--event' in sys.argv:
+    _i=sys.argv.index('--event')
+    sys.exit(deskevent.main(sys.argv[_i+1] if _i+1<len(sys.argv) else ''))
 
 def a2a_feed():
     """GET /inbox/feed on the A2A hub with this machine's own token. None when the hub or the
@@ -169,7 +178,7 @@ try:
 except Exception as _e:
     memory=None; MEMORY={'ok':False,'head':'?','reason':str(_e)[:80]}
 
-IMPACT={'P0':8,'RBP':6,'RBS':5,'P1':4,'P2':2}
+IMPACT=deskevent.IMPACT
 def impact_of(ref):
     r=byref.get(ref)
     if not r: return 'P2',2
@@ -860,14 +869,7 @@ def since_scope(date):
 TODAY_BERLIN=now.astimezone(BERLIN).strftime('%Y-%m-%d')
 def berlin_day(iso):
     t=parse_iso(iso or ''); return t.astimezone(BERLIN).strftime('%Y-%m-%d') if t else ''
-READINESS_ACT={
-    'ready-for-agent': 'validate the Hermes brief and hand it to a worker (the loop never picked it up)',
-    'ready-for-human': 'read the Hermes brief, then draft the reply or take the decision it waits on',
-    'needs-info':      'check whether the customer answered; nudge them or close the thread',
-    'needs-triage':    'claim it, validate, draft the reply',
-    'wontfix':         'the sweep graded it wontfix: tell the customer in one line and close the thread',
-    'duplicate':       'the sweep graded it a duplicate: link it to the canonical thread and close it',
-}
+READINESS_ACT=deskevent.READINESS_ACT   # one table for the gather and the live event path
 def fast_thread_cards(threads,prefix):
     """One FAST card `<prefix>:<ref>` per Plain thread that no other source put on the desk (no loop entry, no deploy
     note, no gap row), the same recipe as a pinned ref: read it live, claim, validate, draft the reply or hand it to a
@@ -899,7 +901,7 @@ def fast_thread_cards(threads,prefix):
              'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],
              'status':'; '.join(facts)[:300],'note':(th['title'][:120]+' · '+'; '.join(note_bits))[:300],
              'act':f"{ref} ({th['title'][:60]}, {th['email']}): {READINESS_ACT.get(rd,READINESS_ACT['needs-triage'])}",
-             'score':round((IMPACT.get(lvl,1)+{'customer':3,'person':2,'nobody':0}[who]+min(age/3,2))/10*10,1)})
+             'score':deskevent.fast_score(lvl,who,age)})
 if SCOPE:
     srefs,sprs=tenant_scope(TENANT) if TENANT else since_scope(SINCE)
     def in_scope(c):
@@ -1261,8 +1263,8 @@ def batch(lane,key=lambda c:'all',title=None,mins_each=1,waits='agent',act=None,
 # An id that matches no live card does nothing, so an answered decision drops out by itself; parked cards stay parked.
 for c in cards:
     if c['score']<0: continue
-    if c.get('ref') in TODAY_NEW: c['score']=round(1800+min(c['score'],99)/100,2)
-    elif c.get('ref') in TODAY_ANSWERED: c['score']=round(1700+min(c['score'],99)/100,2)
+    if c.get('ref') in TODAY_NEW: c['score']=deskevent.lift_new(c['score'])
+    elif c.get('ref') in TODAY_ANSWERED: c['score']=deskevent.lift_answered(c['score'])
 for _i,_cid in enumerate(desk.get('top',[])):
     for c in cards:
         if c['id']==_cid and c['score']>=0: c['score']=2000-_i

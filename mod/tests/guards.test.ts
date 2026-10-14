@@ -176,3 +176,86 @@ test("desk_card puts the options on the pane and tells Claude to wait", async ($
   } as never);
   expect(String(unknown.result)).toContain("Not shown");
 });
+
+// The live feed: config.json "liveEvents" switches it on; a round runs desk-events.py poll, then one desk.py --event
+// with the round's events, and the loop ends when the pane closes.
+const liveWorld = (on: On, liveEvents: boolean) => {
+  const config = JSON.stringify({ projects: ["~/app"], liveEvents });
+  mock.env(on, { HOME: "/home/t" });
+  mock.clock(on, { now: Date.parse("2026-10-02T10:00:00Z") });
+  on("session.root", () => ({ value: "/home/t/app" }));
+  on("fs.stat", () => ({
+    value: { kind: "file" as const, size: 1, mtimeMs: 1, isLink: false },
+  }));
+  on("fs.read", (_$, e) => ({
+    value: e.path.endsWith("cards.json")
+      ? CARDS
+      : e.path.endsWith("config.json")
+        ? config
+        : e.path.endsWith("desk.json")
+          ? DESK
+          : "",
+  }));
+  on("fs.write", () => ({ value: undefined as never }));
+  on("fs.list", () => ({ value: [] as never }));
+  on("ui.open", () => ({ value: { id: "desk" } as never }));
+  on("ui.status", () => ({ value: undefined as never }));
+  const processes: string[][] = [];
+  let polls = 0;
+  // The pane stays open for one round.
+  on("ui.panes", () => ({
+    value: (polls < 1 ? [{ id: "desk" }] : []) as never,
+  }));
+  on("process.run", (_$, e) => {
+    processes.push([...e.argv]);
+    const isPoll = e.argv.some((arg) => arg.endsWith("desk-events.py"));
+    if (isPoll) {
+      polls += 1;
+    }
+
+    return {
+      value: {
+        exitCode: 0,
+        stdout: isPoll
+          ? JSON.stringify([
+              { type: "thread.created", ref: "T-101", at: "2026-10-02T09:59:00Z" },
+            ])
+          : "",
+        stderr: "",
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    };
+  });
+
+  return processes;
+};
+
+// The loop runs in the background of the command; a few runtime ticks let it finish its round.
+declare const setTimeout: (fn: () => void, ms: number) => unknown;
+const settle = async () => {
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+};
+
+test("with liveEvents on, a feed round applies its events through desk.py --event", async ($, on) => {
+  const processes = liveWorld(on, true);
+  await $.command.run({ command: "desk-pane" } as never);
+  await settle();
+
+  const scripts = processes.map((argv) => argv[1]?.split("/").at(-1));
+  expect(scripts).toContain("desk-events.py");
+  const applied = processes.find((argv) => argv.includes("--event"));
+  expect(applied?.[1]).toEndWith("desk.py");
+  expect(JSON.parse(applied?.[3] ?? "[]")[0].ref).toBe("T-101");
+});
+
+test("without liveEvents the pane never polls the feed", async ($, on) => {
+  const processes = liveWorld(on, false);
+  await $.command.run({ command: "desk-pane" } as never);
+  await settle();
+
+  expect(processes.some((argv) => argv.includes("poll"))).toBe(false);
+  expect(processes.some((argv) => argv.includes("--event"))).toBe(false);
+});

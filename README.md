@@ -21,6 +21,7 @@ This is my working setup, published as a worked example. It runs against my comp
 | `skill/CARDS.md`        | Sources, lanes and the recipe for each lane                                                                                                                              |
 | `scripts/desk.py`       | Gathers from every source, ranks, writes `cards.json`                                                                                                                    |
 | `scripts/desk-close.py` | Records a verb (the mod calls it through `desk_close`)                                                                                                                   |
+| `scripts/desk-events.py` | The client for the support bot's live event feed (see Live events)                                                                                                     |
 | `scripts/` (rest)       | Plain numbers for the pane, Notion ticket classes, support memory, the send path, local tasks                                                                            |
 | `docs/BRIEF.md`         | The brief for an agent that builds a desk for somebody else                                                                                                              |
 | `config.example.json`   | Every company id the code reads                                                                                                                                          |
@@ -34,6 +35,16 @@ This is my working setup, published as a worked example. It runs against my comp
 5. The pane ranks again in the background.
 
 Two checks run when Claude ends a turn. A reply that says a message went out while no send ran is sent back. So is a turn that ends on an answered card without a verb.
+
+## Live events
+
+With `"liveEvents": true` in `config.json`, the pane hears about a new Plain thread or a customer message within seconds, not at the next 10-minute gather.
+
+- `desk-events.py poll` asks the support bot's adapter for the events after the stored cursor. It is one `ssh` round trip that runs `curl` on the box, the same path `luna-send.py` takes, so the token never leaves the box. The adapter holds the call up to 20 s and answers as soon as an event lands. Each event goes to `events.jsonl`; `desk-events.py tail` prints the last ones.
+- `desk.py --event <json>` puts one event on `cards.json` in well under a second. A new thread gets its `today:<ref>` card at once, ranked like the gather ranks it. A customer message lifts the thread's card. A thread set to DONE loses its `today:` card. A reply or a triage note rewrites the caption.
+- The mod runs the loop while the pane is open: poll, apply, redraw, poll again. It waits for a running gather, backs off 60 s after a failed round, and runs in one session per machine. The pane line says `live · last event 12:34Z`, `live · quiet` or `feed off: <reason>`.
+- The gather stays the truth. It runs on its own clock and rewrites every card the events touched.
+- `desk-events.py poll --stub <file>` reads a feed answer from a file, and `DESK_DIR` points both scripts at a copy of the desk, so a test never touches the live files.
 
 ## Pane keys
 

@@ -124,6 +124,14 @@ export type PlainStats = {
   waitingOnUsRefs: [string, number][];
 };
 
+/** The live feed's state for the pane line: "" while config.json liveEvents is off, else live or off with a reason. */
+export type DeskFeed = {
+  state: "" | "live" | "off";
+  reason: string;
+  /** ISO time of the newest event applied this session, "" before the first. */
+  lastEventAt: string;
+};
+
 declare module "claude-code" {
   interface PluginState {
     desk: {
@@ -134,6 +142,8 @@ declare module "claude-code" {
       picked: string;
       /** True while desk.py runs in the background. */
       isGathering: boolean;
+      /** The live event loop (desk-events.py), shown as one pane line. */
+      feed: DeskFeed;
       /** True from turn.start to the main loop's turn.complete: Claude is working, the pane hides "Work this card". */
       isBusy: boolean;
       /** Counts up ten times a second while Claude works; drives the wave next to WORKING. */

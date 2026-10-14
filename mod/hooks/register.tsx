@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from "claude-code";
 import type {
   DeskBrief,
   DeskCard,
+  DeskFeed,
   DeskLink,
   DeskOption,
   DeskView,
@@ -22,6 +23,14 @@ const GATHER_LOCK_MS = 3 * 60_000;
 // desk.py's exit code when a close landed while it gathered: nothing was written, run it again.
 const STALE_RUN = 75;
 const SKILL = "~/.claude/skills/desk";
+// The live feed (config.json "liveEvents": true): one long-poll round takes up to this many seconds.
+const EVENTS_WAIT_S = 20;
+// After a failed round (desk-events.py exit 4) the loop waits this long before the next.
+const EVENTS_BACKOFF_MS = 60_000;
+// The .events marker holds the time of the newest round and its owner; younger than this means another session runs it.
+const EVENTS_LOCK_MS = 90_000;
+// While a full gather runs, the loop checks again after this long.
+const EVENTS_GATHER_WAIT_MS = 5_000;
 const PLAIN_MS = 5 * 60_000;
 const TICKETS_MS = 30 * 60_000;
 const NOTION_TOOL = "mcp__notion__notion-query-data-sources";
@@ -329,6 +338,8 @@ const isGathering = atom(
   { plugin: "desk", key: "isGathering" } as const,
   false,
 );
+const NO_FEED: DeskFeed = { state: "", reason: "", lastEventAt: "" };
+const feed = atom({ plugin: "desk", key: "feed" } as const, NO_FEED);
 // True from turn.start to the main loop's turn.complete: the pane shows it and hides the "Work this card" button,
 // so the next card is not started while Claude still works the current one (asked for 2026-10-13).
 const isBusy = atom({ plugin: "desk", key: "isBusy" } as const, false);
@@ -514,6 +525,11 @@ let isClosedThisTurn = false;
 let gatherRun: Promise<void> | null = null;
 // The desk-prepare.py pass in flight.
 let prepareRun: Promise<void> | null = null;
+// The live event loop in flight, and its desk.py --event step: the gather waits for the step, the step for the gather.
+let liveRun: Promise<void> | null = null;
+let applyRun: Promise<void> | null = null;
+// Who owns the .events marker: this module instance (a reload or another session gets its own).
+const LIVE_OWNER = Math.random().toString(36).slice(2, 10);
 
 async function isPaneOpen($: EngineInterface) {
   try {
@@ -758,8 +774,17 @@ async function runGather($: EngineInterface, when: "due" | "now") {
       () => 0,
     );
   const time = await $.clock.now();
-  if (when === "due" && time - (await mtime(`${dir}/cards.json`)) < GATHER_MS) {
+  // The gather's own clock: an event write (desk.py --event) touches cards.json but keeps generatedAt.
+  const generatedAt = Date.parse((await read($, view)).generatedAt);
+  const gatheredAt = Number.isNaN(generatedAt)
+    ? await mtime(`${dir}/cards.json`)
+    : generatedAt;
+  if (when === "due" && time - gatheredAt < GATHER_MS) {
     return;
+  }
+  // An event step writes cards.json in well under a second; the gather starts after it.
+  if (applyRun !== null) {
+    await applyRun;
   }
   // The marker holds the start time of a run in flight and is empty between runs.
   const marker = `${dir}/.gather`;
@@ -818,6 +843,167 @@ function prepare($: EngineInterface) {
       prepareRun = null;
     });
 }
+
+async function isLiveOn($: EngineInterface) {
+  const home = (await $.env.get("HOME")) ?? "";
+  const json = await $.fs
+    .read(`${home}/orbit-scratch/desk/config.json`)
+    .catch(() => "");
+  try {
+    return (JSON.parse(json) as Raw).liveEvents === true;
+  } catch {
+    return false;
+  }
+}
+
+/** A full gather runs here (gatherRun) or in another session (a .gather marker younger than GATHER_LOCK_MS). */
+async function isGatherBusy($: EngineInterface, dir: string) {
+  if (gatherRun !== null) {
+    return true;
+  }
+  const startedAt = Date.parse(await $.fs.read(`${dir}/.gather`).catch(() => ""));
+
+  return (await $.clock.now()) - startedAt < GATHER_LOCK_MS;
+}
+
+const setFeed = (
+  $: EngineInterface,
+  state: DeskFeed["state"],
+  reason = "",
+) => update($, feed, (kept) => ({ ...kept, state, reason }));
+
+// The live desk between two gathers: desk-events.py long-polls the adapter's feed (one round returns within ~20 s),
+// desk.py --event applies the events to cards.json, refresh() redraws the pane. Opt-in through config.json
+// "liveEvents": true. It runs while the pane is open, one loop per machine (the .events marker), never in parallel
+// with a full gather, and the 10-minute gather stays the truth.
+function live($: EngineInterface) {
+  liveRun ??= runLive($)
+    .catch(async (error: unknown) => {
+      await setFeed($, "off", String(error).slice(0, 80)).catch(() => undefined);
+    })
+    .finally(() => {
+      liveRun = null;
+    });
+
+  return liveRun;
+}
+
+async function runLive($: EngineInterface) {
+  const home = (await $.env.get("HOME")) ?? "";
+  const dir = `${home}/orbit-scratch/desk`;
+  const marker = `${dir}/.events`;
+  const key = await $.env.get("PLAIN_API_KEY");
+  const env = key ? { PLAIN_API_KEY: key } : undefined;
+  try {
+    for (;;) {
+      if (!(await isLiveOn($))) {
+        await update($, feed, () => NO_FEED);
+        return;
+      }
+      if (!(await isPaneOpen($))) {
+        return;
+      }
+      const time = await $.clock.now();
+      const [heldAt = "", owner = ""] = (
+        await $.fs.read(marker).catch(() => "")
+      ).split(" ");
+      if (owner !== LIVE_OWNER && time - Date.parse(heldAt) < EVENTS_LOCK_MS) {
+        await setFeed($, "off", "another session holds the feed");
+        return;
+      }
+      await $.fs.write(marker, `${new Date(time).toISOString()} ${LIVE_OWNER}`);
+      // A gather in flight first: the events wait in the feed (the cursor stays) until it has written cards.json.
+      if (await isGatherBusy($, dir)) {
+        await $.clock.sleep(EVENTS_GATHER_WAIT_MS);
+        continue;
+      }
+      const ran = await $.process
+        .run(
+          [
+            "python3",
+            `${dir}/desk-events.py`,
+            "poll",
+            "--wait",
+            String(EVENTS_WAIT_S),
+          ],
+          { env, timeoutMs: (EVENTS_WAIT_S + 45) * 1000 },
+        )
+        .catch((error: unknown) => ({
+          exitCode: 4,
+          stdout: "",
+          stderr: String(error),
+        }));
+      if (ran.exitCode !== 0) {
+        const why = ran.stderr.trim().split("\n")[0] ?? "";
+        await setFeed(
+          $,
+          "off",
+          why.replace(/^desk-events: /, "").slice(0, 60) || `exit ${ran.exitCode}`,
+        );
+        await $.clock.sleep(EVENTS_BACKOFF_MS);
+        continue;
+      }
+      let events: Raw[] = [];
+      try {
+        const parsed = JSON.parse(ran.stdout) as unknown;
+        events = Array.isArray(parsed) ? (parsed as Raw[]) : [];
+      } catch {
+        // an unreadable answer counts as a quiet round; the events are in events.jsonl
+      }
+      await setFeed($, "live");
+      if (events.length > 0) {
+        applyRun = applyEvents($, dir, events, env).finally(() => {
+          applyRun = null;
+        });
+        await applyRun;
+        const newest = events
+          .map((one) => text(one.at))
+          .filter((at) => at !== "")
+          .sort()
+          .at(-1);
+        const at = newest ?? new Date(await $.clock.now()).toISOString();
+        await update($, feed, (kept) => ({ ...kept, lastEventAt: at }));
+        await refresh($, true);
+      }
+    }
+  } finally {
+    // Hand the marker back so the next open (here or in another session) starts at once.
+    const [, owner = ""] = (await $.fs.read(marker).catch(() => "")).split(" ");
+    if (owner === LIVE_OWNER) {
+      await $.fs.write(marker, "").catch(() => undefined);
+    }
+  }
+}
+
+/** One desk.py --event call for the round's events; exit 75 means a gather started meanwhile, so wait and try again. */
+async function applyEvents(
+  $: EngineInterface,
+  dir: string,
+  events: Raw[],
+  env: Record<string, string> | undefined,
+) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    while (await isGatherBusy($, dir)) {
+      await $.clock.sleep(EVENTS_GATHER_WAIT_MS);
+    }
+    const ran = await $.process.run(
+      ["python3", `${dir}/desk.py`, "--event", JSON.stringify(events)],
+      { env, timeoutMs: 30_000 },
+    );
+    if (ran.exitCode !== STALE_RUN) {
+      return;
+    }
+    await $.clock.sleep(EVENTS_GATHER_WAIT_MS);
+  }
+}
+
+/** The pane's feed line: `live · last event 12:34Z`, `live · quiet`, `feed off: <reason>`. */
+const feedLine = (one: DeskFeed) =>
+  one.state === "off"
+    ? `feed off: ${one.reason || "no answer"}`
+    : one.lastEventAt === ""
+      ? "live · quiet"
+      : `live · last event ${new Date(one.lastEventAt).toISOString().slice(11, 16)}Z`;
 
 // desk_card: the brief goes on the pane, the card becomes the one being worked, and the reply tells Claude to wait.
 async function showCard($: EngineInterface, input: Raw): Promise<string> {
@@ -1014,7 +1200,10 @@ export const register: Register = (on) => {
     await update($, view, (kept) => ({ ...EMPTY, ...kept }));
     await refresh($, true);
     $.clock.every(POLL_MS, () => void refresh($));
-    $.clock.every(GATHER_CHECK_MS, () => void gather($));
+    $.clock.every(GATHER_CHECK_MS, () => {
+      void gather($);
+      void live($);
+    });
     void pollPlain($);
     $.clock.every(PLAIN_MS, () => void pollPlain($));
     $.clock.after(20_000, () => void syncTickets($));
@@ -1033,6 +1222,7 @@ export const register: Register = (on) => {
       focus: true,
     });
     void gather($);
+    void live($);
 
     return { text: "Desk pane opened." };
   });
@@ -1306,6 +1496,7 @@ export const register: Register = (on) => {
     const r = await next(e);
     if (e.id === PANE) {
       await update($, isPaneHidden, () => false);
+      void live($);
     }
 
     return r;
@@ -1410,6 +1601,7 @@ export const register: Register = (on) => {
     const index = rowOf(desk, await read($, picked));
     const card = desk.cards[index];
     const isRunning = await read($, isGathering);
+    const liveFeed = await read($, feed);
     const busy = await read($, isBusy);
     const beat = wave(await read($, tick));
     if (busy) {
@@ -1482,6 +1674,15 @@ export const register: Register = (on) => {
         {desk.due.length > 0 && (
           <Text wrap="wrap" color={C("yellow")}>
             due: {desk.due.join(" · ")}
+          </Text>
+        )}
+        {liveFeed.state !== "" && (
+          <Text
+            wrap="truncate"
+            dimColor={liveFeed.state === "live"}
+            color={liveFeed.state === "off" ? C("yellow") : undefined}
+          >
+            {feedLine(liveFeed)}
           </Text>
         )}
         {card && (
