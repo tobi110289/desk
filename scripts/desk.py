@@ -324,7 +324,15 @@ def add(card):
                 d={**_sd,'status':card.get('status'),'borrowed':_sib}; break
     # a deferral belongs to the caption it was written for: when the loop writes a new caption the wait is over
     # (2026-09-10: T-108 parked on deployed:production:2955 for the "ist live" reply hid a staged line of Tobias's).
-    if d and d.get('status') is not None and _cmp(cid,card.get('status') or '')!=_cmp(cid,d['status']) and not card.get('rebuilt'):
+    # 2026-10-16: a batch deferral is bound to its member set (desk-close.py writes 'refs'): a new member voids it, a
+    # member's changed status or age does not (batch:TICKET:all voided itself on the daily age tick and on the desk's
+    # own Notion writes).
+    if d and cid.startswith('batch:') and d.get('refs') is not None:
+        _new=sorted({m.get('ref') for m in (card.get('members') or [])}-set(d['refs']))
+        if _new:
+            desk['cards'].setdefault(cid,{}).pop('defer',None); prev=desk['cards'][cid]
+            card['note']=f"deferral voided (new members {', '.join(_new)} since {d.get('since')}, was until {d.get('trigger')}): "+(card.get('note') or ''); d=None
+    elif d and d.get('status') is not None and _cmp(cid,card.get('status') or '')!=_cmp(cid,d['status']) and not card.get('rebuilt'):
         import os as _os
         if _os.environ.get('DESK_DEBUG'): print(f"VOID {cid}: card status={card.get('status')!r} bound={d['status']!r}",file=sys.stderr)
         desk['cards'].setdefault(cid,{}).pop('defer',None); prev=desk['cards'][cid]

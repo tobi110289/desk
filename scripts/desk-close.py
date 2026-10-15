@@ -21,6 +21,16 @@ elif verb=='defer':
     _trig=re.sub(r'^(?:until\s+)+','',sys.argv[3].strip()); _act=sys.argv[4] if len(sys.argv)>4 else c.get('act','')
     if ' -> ' in _trig and not (len(sys.argv)>4 and sys.argv[4]): _trig,_act=[x.strip() for x in _trig.split(' -> ',1)]
     c['defer']={'trigger':_trig.strip(),'act':_act,'since':today,'status':status}
+    # 2026-10-16: a batch's status line carries every member's status and age, so it changed daily and on the desk's own
+    # Notion writes, and the deferral voided itself within the hour (batch:TICKET:all). A batch deferral binds to its
+    # member set instead: desk.py voids it only when a member appears that was not in it.
+    if cid.startswith('batch:'):
+        _refs=set()
+        try:
+            for card in json.load(open(os.path.expanduser('~/orbit-scratch/desk/cards.json')))['cards']:
+                if card['id']==cid: _refs={m.get('ref') for m in card.get('members') or [] if m.get('ref')}
+        except Exception: pass
+        c['defer']['refs']=sorted(_refs)
     c.pop('closed',None)
 else:
     members=[]; status=''
