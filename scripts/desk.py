@@ -1323,6 +1323,11 @@ for c in cards:
 for _i,_cid in enumerate(desk.get('top',[])):
     for c in cards:
         if c['id']==_cid and c['score']>=0: c['score']=2000-_i
+# desk.json "bottom": the mirror of "top" (Tobias, 2026-10-15: "put this task last in the queue"). A listed card stays
+# live but ranks under everything else, in list order; a card that gets its verb leaves the list with the next close.
+for _i,_cid in enumerate(desk.get('bottom',[])):
+    for c in cards:
+        if c['id']==_cid and c['score']>=0: c['score']=round(0.5-_i*0.001,3)
 batch('SEND',act='Go through the {n} lines you typed but never sent: send / edit / drop each',mins_each=1,waits='agent')
 batch('TICKET',act='Work through the {n} follow-up tickets we filed that nobody moves: push, hand to an agent, or archive each',mins_each=1,waits='nobody',pred=lambda c:not c.get('kind'))
 batch('TICKET',key=lambda c:'local-agent',act='Hand the {n} local tickets with a ready brief to workers, ticket them in Notion, or drop them',mins_each=1,waits='nobody',pred=lambda c:c.get('kind')=='local-agent')
