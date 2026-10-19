@@ -91,8 +91,10 @@ def classify():
                 shipped_untold.append(t)
         elif status in OPEN:
             open_.append(t)
-            # Nobody moves it: unassigned, no PR, and either old or not even in a sprint.
-            if not t.get('assignee') and not t.get('prs') and (t['age'] >= IDLE_DAYS or not t.get('sprint')):
+            # Nobody moves it: unassigned, no PR, and old. 2026-10-19 (Tobias: no sprint planning, no estimates, ever):
+            # "not in a sprint" is the normal state of every ticket now, so it no longer makes a ticket idle on day one;
+            # the 17 tickets the desk filed that morning came straight back as a 33-member batch.
+            if not t.get('assignee') and not t.get('prs') and t['age'] >= IDLE_DAYS:
                 idle.append(t)
     idle.sort(key=lambda t: -t['age'])
     return {
