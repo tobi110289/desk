@@ -36,7 +36,7 @@ else:
     members=[]; status=''
     try:
         for card in json.load(open(os.path.expanduser('~/orbit-scratch/desk/cards.json')))['cards']:
-            if card['id']==cid: members=[f"{m.get('ref')}|{m.get('task') or ''}|{m.get('status') or ''}" for m in card.get('members') or []]; status=card.get('status') or ''
+            if card['id']==cid: members=[(f"{m.get('ref')}|{m.get('task') or ''}|staged_line_typed" if m.get('screen')=='staged_line_typed' else f"{m.get('ref')}|{m.get('task') or ''}|{m.get('status') or ''}") for m in card.get('members') or []]; status=card.get('status') or ''   # 2026-10-19: same key as desk.py member_key (a ghost line's text is not part of it)
     except Exception: pass
     # status = the caption the card was closed with; a later caption reopens a single card (desk.py add())
     # 2026-09-23: --caption "<text>" writes the loop caption here and binds the closure to it. Closing first and rewriting

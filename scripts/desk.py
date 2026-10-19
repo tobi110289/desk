@@ -273,7 +273,13 @@ def _cmp(cid,s):
     # during the day and reopened T-122/T-123 within the hour. Compare without it.
     if cid.startswith('promise:'): return re.sub(r'\(\d+d,','(Nd,',s or '')
     return s or ''
-def member_key(m): return f"{m.get('ref')}|{m.get('task') or ''}|{m.get('status') or ''}"   # 2026-09-14: the caption is part of the key, so a member whose staged line changed (T-105 r3 -> r4) reopens the batch
+def member_key(m):
+    # 2026-09-14: the caption is part of the key, so a member whose staged line changed (T-105 r3 -> r4) reopens the batch.
+    # 2026-10-19: except for a staged line itself. The line in an idle worker's input box is Claude Code's ghost text,
+    # the worker's own proposal, and it changes after every worker turn; keying on it reopened SEND×5 four times in one
+    # day with nothing new to send. A staged member keys on its state, a picker or sign-off still keys on its text.
+    if m.get('screen')=='staged_line_typed': return f"{m.get('ref')}|{m.get('task') or ''}|staged_line_typed"
+    return f"{m.get('ref')}|{m.get('task') or ''}|{m.get('status') or ''}"
 cards=[]
 # 2026-10-06 (Tobias): threads listed in ignore.json never become cards (a teammate's sprint threads: he owns them end to
 # end, the desk kept surfacing them as FAST/gap cards). An explicit pin (fast:<ref>) still wins.
@@ -493,7 +499,7 @@ def screen_card(ref,t,x):
     pf=_pr_facts(pr)
     if st=='staged_line_typed':
         line=x.get('staged') or ''
-        return {**base,'lane':'SEND','mins':1,'waits':'agent','status':f'"{line[:60]}" staged (yours)','staged':line,
+        return {**base,'lane':'SEND','mins':1,'waits':'agent','status':f'worker proposes: "{line[:60]}"','staged':line,
                 'act':f'Send or drop the line staged in `{task}`: "{line[:120]}"','score':50+iw}
     if st=='picker_or_question_waiting':
         opts=x.get('options') or []; q=x.get('question') or ''
