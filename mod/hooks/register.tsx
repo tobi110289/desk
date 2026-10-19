@@ -432,12 +432,21 @@ const linksOf = (card: Raw): DeskLink[] => {
   return links;
 };
 
-const verbOf = (entry: Raw | undefined, today: string): string | null => {
+// A closure counts only while the card's status is the one it was closed with: desk.py reopens a single card on a new
+// caption (2026-10-19: a thread came back as "customer waits for a first answer" and the pane still showed it as ✓ do).
+const verbOf = (
+  entry: Raw | undefined,
+  today: string,
+  status: string,
+): string | null => {
   const closed = entry?.closed as Raw | undefined;
   const defer = entry?.defer as Raw | undefined;
 
   if (closed?.date === today) {
-    return text(closed.verb) || "do";
+    const was = closed.status;
+    if (typeof was !== "string" || was === status) {
+      return text(closed.verb) || "do";
+    }
   }
 
   return defer?.since === today ? "defer" : null;
@@ -511,7 +520,7 @@ const toView = (
       age: typeof card.age === "number" ? card.age : 0,
       links: linksOf(card),
       members,
-      verb: verbOf(state[id], today),
+      verb: verbOf(state[id], today, text(card.status)),
     };
   });
 
@@ -1355,7 +1364,16 @@ export const register: Register = (on) => {
         };
       }
 
-      await update($, hasReplyPass, () => false);
+      // The pass ends with the call that reached Plain. A call the harness
+      // rejected before sending (a wrong parameter name, a schema error) keeps
+      // it: on 2026-10-19 such a call burned the pass on a thread and the user
+      // had to type the command twice.
+      const replied = await next(e);
+      if (replied.deny === undefined && replied.isError !== true) {
+        await update($, hasReplyPass, () => false);
+        isSentThisTurn = true;
+      }
+      return replied;
     }
 
     if (SEND_TOOLS.includes(tool)) {

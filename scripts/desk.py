@@ -804,7 +804,12 @@ def scan_wait(nodes):
     the oldest customer message after our newest reply; decided turns True at the first customer-visible message."""
     since=''
     for xn in nodes:
-        if (xn.get('entry') or {}).get('__typename') not in MSG_ENTRIES: continue
+        et=(xn.get('entry') or {}).get('__typename')
+        if et=='CustomEntry':
+            # 2026-10-19: an in-app bug report (Mission's reporter) lands as a CustomEntry written by a machine user, not
+            # as a customer message. A thread opened at 05:34 Berlin counted as answered and never got its today card.
+            since=(xn.get('timestamp') or {}).get('iso8601') or since; continue
+        if et not in MSG_ENTRIES: continue
         if (xn.get('actor') or {}).get('__typename')!='CustomerActor': return since,True   # a reply of ours (Luna or a person)
         since=(xn.get('timestamp') or {}).get('iso8601') or since
     return since,bool(since)
@@ -956,6 +961,10 @@ def unanswered_cards(threads):
         hm=parse_iso(since).astimezone(datetime.timezone.utc).strftime('%H:%MZ')
         facts=[f"Plain {th.get('status') or 'TODO'}",f"customer wrote {th['customerAt'][:10]}"]
         if th.get('createdAt'): facts.append(f"opened {parse_iso(th['createdAt']).astimezone(BERLIN).strftime('%Y-%m-%d %H:%M')} Berlin")
+        # 2026-10-19: the status is the closure key. a today card was closed with `do` once the loop had spawned a
+        # worker, its status line stayed the same, and the "customer waits for a first answer" card never came back that
+        # day. The wait is a fact of its own, so it goes into the status and a closure of the other variant does not hide it.
+        facts.append(f"customer unanswered since {hm}")
         t=state.get(ref,{})
         add({'id':f'today:{ref}','ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':0,'waits':'customer',
              'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],'unanswered':since,
