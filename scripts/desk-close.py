@@ -57,6 +57,13 @@ else:
                 thr[ref]['note']=((thr[ref].get('note') or '')+f" | desk {today}: "+' '.join(sys.argv[3:])).strip(' |')
                 json.dump(st,open(sp,'w'),indent=2,ensure_ascii=False)
                 status=cap if cid.startswith('loop:') else ('loop done, thread TODO: '+cap if cid.startswith('gap:') else status)
+                # 2026-10-19: a caption the desk writes while closing one card of a thread must not void a hold on a
+                # sibling card of the same thread (a gap card deferred until the customer replies came back on every
+                # close of the thread's today card). Rebind sibling deferrals to the caption just written.
+                for sid,sc in d.get('cards',{}).items():
+                    if sid==cid or not sc.get('defer') or sid.split(':',1)[-1]!=ref: continue
+                    if sid.startswith('loop:'): sc['defer']['status']=cap
+                    elif sid.startswith('gap:'): sc['defer']['status']='loop done, thread TODO: '+cap
         except Exception as e: print('caption not written:',e)
     c['closed']={'verb':verb,'date':today,'note':' '.join(sys.argv[3:]),'members':members,'status':status}
     if cid.startswith('fast:'): d['pins']=[p for p in d.get('pins',[]) if p['ref']!=cid[5:]]   # a verb unpins a FAST card
