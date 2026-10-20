@@ -53,6 +53,7 @@ Done when the card has one verb in the log and its caption is current.
 - **A brief, not a draft.** The card arrives with the consequence drafted and the deciding fact on top; Tobias confirms or edits, never composes from scratch and never reads raw material.
 - **One card at a time.** A card is worked from its start to its verb; the next one starts when Tobias says so, never by itself.
 - **Appetite over willpower.** A card that overruns its minutes goes back to the desk with `defer` and a re-bet note.
+- **A drop holds for the day.** A thread dropped today shows no card of any lane (`today:`, `promise:`, `owe:`, `gap:`, `tenant:`) until tomorrow, whatever its status line does in the meantime; only a fresh pin (`/desk <ref>`) brings it back sooner (Tobias, 2026-10-20).
 - **Expiry.** A card seen on three days without a verb is marked EXPIRING and its options collapse to `defer` / `drop`.
 - **A shipped fix waits for its release, not for a person.** Deferring a customer note until a deploy always uses `deployed:<env>:<pr>` (or `appstore:` for Cockpit), so the desk fires it by itself and the board lists it under "Fix built, release pending" until then. Recipe in CARDS.md, "Release triggers".
 - **The sweep pauses, the desk decides.** `/sentry-sweep` stops at its fix-pass pause; the desk answers its `## Decisions needed` (recorded in the report with `sweep-answer.py`) and resumes the fix pass with the picks. A SWEEP run card's `Resume` takes the session over, like `Review it now`: the desk waits until that work is done.

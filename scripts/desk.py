@@ -291,9 +291,20 @@ def ignored(card):
     if refs & set(IGNORE.get('refs') or []): return True
     title=(card.get('title') or card.get('status') or '')
     return any(re.search(p,title,re.I) for p in (IGNORE.get('titles') or []))
+def dropped_today(ref):
+    """2026-10-20 (Tobias: "it shouldn't have landed on my desk again after I dropped it"): a drop holds for the day
+    and for the thread, not for one card id. The same thread was dropped as today:<ref>, came back within the hour as
+    today:<ref> with a new status fact, and then as promise:<ref>. Any card of the ref closed with `drop` today hides
+    every other card of that ref until tomorrow; an explicit pin (fast:<ref>) still wins."""
+    if not ref: return False
+    for k,v in desk['cards'].items():
+        c=v.get('closed') or {}
+        if c.get('verb')=='drop' and c.get('date')==today and k.split(':',1)[-1]==ref: return True
+    return False
 def add(card):
     if ignored(card): return
     cid=card['id']
+    if not cid.startswith('fast:') and not card.get('members') and dropped_today(card.get('ref')): return
     prev=desk['cards'].get(cid,{})
     if prev.get('closed'):
         # a batch stays closed only today and only while its member set has not grown; new members reopen it.
@@ -778,7 +789,7 @@ try:
     _pc=promise_cards(); _shown=0
     for c in _pc:
         c.pop('_age',None)
-        if c['ref'] in notify_refs or any(x['ref']==c['ref'] for x in cards): continue
+        if c['ref'] in notify_refs or any(x['ref']==c['ref'] for x in cards) or dropped_today(c['ref']): continue
         prev=desk['cards'].get(c['id'],{})
         # a verdict binds to the last visible message: same status -> stays closed (add() checks); the cap counts only cards that will show
         if prev.get('closed') and _cmp(c['id'],c['status'])==_cmp(c['id'],prev['closed'].get('status') or ''): add(c); continue
