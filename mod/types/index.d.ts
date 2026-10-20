@@ -159,6 +159,8 @@ declare module "claude-code" {
       tick: number;
       hasReplyPass: boolean;
       captioned: string[];
+      /** The option label the user pressed per card id, until desk_close hands it to desk-close.py as --pick. */
+      picks: Record<string, string>;
       isPlainOpen: boolean;
       /** False while the open-cards list is folded to its header line (`l`). */
       isListOpen: boolean;

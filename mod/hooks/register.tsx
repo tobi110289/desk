@@ -397,6 +397,8 @@ const isPaneHidden = atom(
   false,
 );
 const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
+/** The option label the user pressed per card, until its close: desk-close.py scores it against the prepared brief. */
+const picks = atom({ plugin: "desk", key: "picks" } as const, {});
 const brief = atom({ plugin: "desk", key: "brief" } as const, null);
 const summaries = atom({ plugin: "desk", key: "summaries" } as const, {});
 
@@ -900,16 +902,15 @@ async function isGatherBusy($: EngineInterface, dir: string) {
   if (gatherRun !== null) {
     return true;
   }
-  const startedAt = Date.parse(await $.fs.read(`${dir}/.gather`).catch(() => ""));
+  const startedAt = Date.parse(
+    await $.fs.read(`${dir}/.gather`).catch(() => ""),
+  );
 
   return (await $.clock.now()) - startedAt < GATHER_LOCK_MS;
 }
 
-const setFeed = (
-  $: EngineInterface,
-  state: DeskFeed["state"],
-  reason = "",
-) => update($, feed, (kept) => ({ ...kept, state, reason }));
+const setFeed = ($: EngineInterface, state: DeskFeed["state"], reason = "") =>
+  update($, feed, (kept) => ({ ...kept, state, reason }));
 
 // The live desk between two gathers: desk-events.py long-polls the adapter's feed (one round returns within ~20 s),
 // desk.py --event applies the events to cards.json, refresh() redraws the pane. Opt-in through config.json
@@ -918,7 +919,9 @@ const setFeed = (
 function live($: EngineInterface) {
   liveRun ??= runLive($)
     .catch(async (error: unknown) => {
-      await setFeed($, "off", String(error).slice(0, 80)).catch(() => undefined);
+      await setFeed($, "off", String(error).slice(0, 80)).catch(
+        () => undefined,
+      );
     })
     .finally(() => {
       liveRun = null;
@@ -977,7 +980,8 @@ async function runLive($: EngineInterface) {
         await setFeed(
           $,
           "off",
-          why.replace(/^desk-events: /, "").slice(0, 60) || `exit ${ran.exitCode}`,
+          why.replace(/^desk-events: /, "").slice(0, 60) ||
+            `exit ${ran.exitCode}`,
         );
         await $.clock.sleep(EVENTS_BACKOFF_MS);
         continue;
@@ -1124,6 +1128,7 @@ async function choose(
 ) {
   pendingAnswer = current.cardId;
   await update($, brief, (b) => (b?.cardId === current.cardId ? null : b));
+  await update($, picks, (p) => ({ ...p, [current.cardId]: option.label }));
   await $.prompt.submit({
     text:
       `Re desk card ${current.cardId}: ${option.label} (${option.verb}). ` +
@@ -1163,6 +1168,8 @@ async function closeCard($: EngineInterface, input: Raw): Promise<string> {
   }
   const home = (await $.env.get("HOME")) ?? "";
   const script = `${home}/orbit-scratch/desk/desk-close.py`;
+  const pick = (await read($, picks))[id];
+  const pickArgs = pick === undefined ? [] : ["--pick", pick];
   const argv =
     verb === "defer"
       ? [
@@ -1172,6 +1179,7 @@ async function closeCard($: EngineInterface, input: Raw): Promise<string> {
           "defer",
           trigger,
           text(input.act).trim() || card.act,
+          ...pickArgs,
         ]
       : [
           "python3",
@@ -1180,11 +1188,13 @@ async function closeCard($: EngineInterface, input: Raw): Promise<string> {
           verb,
           text(input.note).trim(),
           ...(caption !== "" ? ["--caption", caption] : []),
+          ...pickArgs,
         ];
   const ran = await $.process.run(argv, { timeoutMs: 30_000 });
   if (ran.exitCode !== 0) {
     return `Not closed: desk-close.py exited ${ran.exitCode}: ${(ran.stderr || ran.stdout).trim().slice(-400)}`;
   }
+  await update($, picks, ({ [id]: _gone, ...rest }) => rest);
   isClosedThisTurn = true;
   if (answeredCard === id) {
     answeredCard = null;

@@ -5,6 +5,10 @@ P=os.path.expanduser('~/orbit-scratch/desk/desk.json')
 import fcntl
 _lock=open(os.path.join(os.path.dirname(P),'.desk.lock'),'w'); fcntl.flock(_lock,fcntl.LOCK_EX)   # desk.py checks desk.json under the same lock before it writes
 d=json.load(open(P)); cid,verb=sys.argv[1],sys.argv[2]
+# --pick "<label>": the option the user pressed on the pane (the mod passes it); scored against the prepared brief below
+pick=None
+if '--pick' in sys.argv:
+    i=sys.argv.index('--pick'); pick=sys.argv[i+1]; sys.argv=sys.argv[:i]+sys.argv[i+2:]
 today=datetime.date.today().isoformat(); c=d['cards'].setdefault(cid,{})
 if verb=='caption':
     c['caption']=' '.join(sys.argv[3:]); c.pop('closed',None)
@@ -73,3 +77,19 @@ else:
         except Exception as e: print('task not marked done:',e)
 d['log'].append({'date':today,'id':cid,'verb':verb,'note':' '.join(sys.argv[3:]) if verb!='defer' else f"until {sys.argv[3]}"})
 json.dump(d,open(P,'w'),indent=1,ensure_ascii=False); print(f"{cid} → {verb}")
+# 2026-10-20: score the prepared brief against what the user did. The brief file goes away with the next prepare pass,
+# so the guess is copied here, at the close: briefs/<id>.json recommended option and draft, the pick and the verb.
+# desk-score.py reads the ledger. A caption is not a close and is not scored.
+if verb!='caption':
+    try:
+        bp=os.path.join(os.path.dirname(P),'briefs',re.sub(r'[^A-Za-z0-9._-]','_',cid)+'.json'); b=json.load(open(bp))
+        if not b.get('error'):
+            opts=b.get('options') or []
+            with open(os.path.join(os.path.dirname(P),'score.jsonl'),'a') as f:
+                f.write(json.dumps({'date':today,'at':datetime.datetime.now().isoformat(timespec='seconds'),'id':cid,'ref':b.get('ref'),'lane':b.get('lane'),
+                    'preparedAt':b.get('preparedAt'),'model':b.get('model'),
+                    'guess':{'option':(opts[0].get('label') if opts else None),'verb':(opts[0].get('verb') if opts else None),'options':[o.get('label') for o in opts],
+                             'draft':b.get('draft') or '','replyReady':bool(b.get('replyReady')),'resolved':bool(b.get('resolved')),'openChecks':len(b.get('openChecks') or [])},
+                    'did':{'pick':pick,'verb':verb,'note':' '.join(sys.argv[3:])}},ensure_ascii=False)+'\n')
+    except FileNotFoundError: pass
+    except Exception as e: print('not scored:',e)
