@@ -38,7 +38,7 @@ Since 2026-10-08 the desk mod records verbs: every `desk-close.py <id> <verb> "<
 
 The desk never waits on a dispatched run. Their output lands as cards in the next sitting (newly blocked loop entries; harvested issues wait on GitHub). A dispatched agent has no MCP servers: the loop uses its GraphQL curl path for Plain, the harvest needs only `gh`.
 
-Score = (impact weight + who-waits weight + age weight, age capped at six days) ÷ minutes × 10. Impact: P0 8, RBP 6, RBS 5, P1 4, P2 2. Who waits: customer 3, person 2, agent 2, nobody 0. Cheap, high-value cards float; a batch scores like its most urgent member and costs the sum of its members.
+Score = (impact weight + who-waits weight + age weight, age capped at six days) ÷ minutes × 10. Impact: P0 8, RBP 6, RBS 5, P1 4, P2 2. Who waits: customer 3, person 2, agent 2, nobody 0. Cheap, high-value cards float; a batch scores like its most urgent member and costs the sum of its members. A card where an agent or a PR stopped for the person (SEND, REVIEW, INBOX, STUCK) ranks in its own bracket, 100 plus its score: above every card that waits on nobody and above customer cards without an event today, under today's customer events and the top list (2026-10-20: a PR that asked for a human sat at 3, under tasks at 20).
 
 ## A brief, not a draft
 

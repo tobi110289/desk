@@ -1343,6 +1343,14 @@ for c in cards:
     if c['score']<0: continue
     if c.get('ref') in TODAY_NEW: c['score']=deskevent.lift_new(c['score'])
     elif c.get('ref') in TODAY_ANSWERED: c['score']=deskevent.lift_answered(c['score'])
+# 2026-10-20 (Tobias: "when something waits for me, like a babysat PR that needs input, put it higher up or even first;
+# my PRs sit stuck for a long time"): a card where an agent or a PR stopped for a person gets its own bracket, 100 plus
+# the base score, above every card that waits on nobody and above customer cards without an event today, under today's
+# customer events (1700+) and desk.json top (2000+). Before this a REVIEW card scored 3 (15 minutes divide it) and sat
+# under help-center tasks at 20. The SEND batch inherits the bracket from its members; the bottom list still sinks a card.
+WAITS_ON_ME={'SEND','REVIEW','INBOX','STUCK'}
+for c in cards:
+    if 0<=c['score']<100 and c['lane'] in WAITS_ON_ME: c['score']=round(100+c['score'],1)
 for _i,_cid in enumerate(desk.get('top',[])):
     for c in cards:
         if c['id']==_cid and c['score']>=0: c['score']=2000-_i
