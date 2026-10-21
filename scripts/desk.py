@@ -632,7 +632,8 @@ def pr_next_move(p):
     if draft and idle is not None and idle>=PR_WAIT_DAYS['draftIdle']:
         return (f'draft idle {idle}d', f'Finish #{n}, hand it to an agent, or close it', idle)
     if p.get('mergeable')=='CONFLICTING' and rev!='CHANGES_REQUESTED' and not hold and not draft:
-        return ('conflicts with base'+(f' · {blocker}' if blocker else ''), f'Resolve the conflicts on #{n} or hand them to its agent', upd)
+        _b=blocker.replace('conflicts with base','').strip(', ')
+        return ('conflicts with base'+(f' · {_b}' if _b else ''), f'Resolve the conflicts on #{n} or hand them to its agent', upd)
     if upd>=PR_WAIT_DAYS['untouched']:
         return (f'untouched {upd}d'+(f' ({rev})' if rev else ''), f'Decide #{n}: nothing moved for {upd} days (merge, rework, hand off, or close)', upd)
     return None
