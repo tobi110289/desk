@@ -598,28 +598,72 @@ for ref,t in state.items():
 
 # ---------------------------------------------------------------- source 2: own open PRs (orbit + orbot)
 def _cached_prs(repo):
-    """Open PRs by us from the PR cache (orbit: .prs, orbot: .orbot) in gh's list shape, or None without a cache."""
+    """Open PRs by us from the PR cache (orbit: .prs, orbot: .orbot) in gh's list shape plus the health facts, or None without a cache."""
     if not _prh_doc: return None
     if repo==ORBOT: return _prh_doc.get('orbot')
     return [{'number':r['pr'],'title':r['title'],'labels':[{'name':l} for l in r.get('labels') or []],'reviewDecision':None if r.get('review') in (None,'-') else r['review'],
-             'mergeable':r.get('mergeable'),'updatedAt':r.get('updatedAt') or r.get('created'),'isDraft':r.get('draft')} for r in _prh_doc.get('prs',{}).values()]
+             'mergeable':r.get('mergeable'),'updatedAt':r.get('updatedAt') or r.get('created'),'createdAt':r.get('created'),'isDraft':r.get('draft'),
+             'rounds':r.get('rounds') or 0,'idle':r.get('days_since_commit'),'approvedAt':r.get('approved_at'),'authorMerges':bool(r.get('author_merges')),
+             'mergeState':r.get('merge_state'),'ciRed':bool(r.get('ci_red')),'needsHuman':bool(r.get('needs_human')),'loop':r.get('loop')} for r in _prh_doc.get('prs',{}).values()]
+# 2026-10-21 (Tobias, retro: "PRs sit for weeks in review, waiting on a human, not on code"; #3083 was approved three
+# times with "author merges" while its caption said "HORST merges", #3180 sat 25 days as a draft, #3846 sat six days in
+# no queue at all): every open PR has a next mover, and when that mover is a person the desk says so, whatever the
+# caption claims. The facts come from the PR itself. A parked loop hold on the PR's entry is the one deliberate wait
+# that still hides it (the hold names its trigger).
+PR_WAIT_DAYS={'approved':1,'noQueue':1,'queueSilent':2,'draftIdle':5,'untouched':7}
+def pr_next_move(p):
+    """(status, act, age) when the PR's next move is the person's, else None. p is the list shape of _cached_prs; the gh
+    fallback lacks rounds/idle/approvedAt and then only the states gh alone can show fire."""
+    n=p['number']; labels=[l['name'] for l in p['labels']]; rev=p.get('reviewDecision') or ''; draft=bool(p.get('isDraft'))
+    _z=lambda t: (t+('T00:00:00Z' if len(t)==10 else 'Z' if t and not t.endswith(('Z','+00:00')) else '')) if t else ''   # cache dates: a bare day, or minute precision without a zone
+    upd=age_days(_z(p.get('updatedAt'))); age=age_days(_z(p.get('createdAt') or p.get('updatedAt'))); idle=p.get('idle'); rounds=p.get('rounds')
+    blocker=', '.join(x for x in ['CI red' if p.get('ciRed') else '', 'conflicts with base' if p.get('mergeable')=='CONFLICTING' else '',
+                                  'checks not green' if p.get('mergeState') in ('UNSTABLE','BLOCKED') and not p.get('ciRed') else '', 'no auto-review label' if 'auto-review' not in labels and not p.get('authorMerges') else ''] if x)
+    hold="🚨 Don't Merge" in labels   # a deliberate hold: only the untouched net below reaches it
+    if rev=='APPROVED' and not draft and not hold:
+        d=age_days(_z(p.get('approvedAt'))) if p.get('approvedAt') else upd
+        if d>=PR_WAIT_DAYS['approved'] or blocker:
+            who='author merges' if p.get('authorMerges') else 'not merged'
+            return (f'approved {d}d ago, {who}'+(f' · {blocker}' if blocker else ''), f'Merge #{n}: HORST approved it {d}d ago and left the merge to you'+(f' ({blocker})' if blocker else ''), d)
+    if not draft and rounds==0 and rev=='' and 'auto-review' not in labels and age>=PR_WAIT_DAYS['noQueue']:
+        return (f'in no review queue for {age}d', f'Queue #{n} (add auto-review), make it a draft, or close it', age)
+    if not draft and rounds==0 and rev=='' and 'auto-review' in labels and upd>=PR_WAIT_DAYS['queueSilent']:
+        return (f'auto-review set, HORST silent {upd}d', f'Nudge the queue on #{n}: push a commit or re-add auto-review', upd)
+    if draft and idle is not None and idle>=PR_WAIT_DAYS['draftIdle']:
+        return (f'draft idle {idle}d', f'Finish #{n}, hand it to an agent, or close it', idle)
+    if p.get('mergeable')=='CONFLICTING' and rev!='CHANGES_REQUESTED' and not hold and not draft:
+        return ('conflicts with base'+(f' · {blocker}' if blocker else ''), f'Resolve the conflicts on #{n} or hand them to its agent', upd)
+    if upd>=PR_WAIT_DAYS['untouched']:
+        return (f'untouched {upd}d'+(f' ({rev})' if rev else ''), f'Decide #{n}: nothing moved for {upd} days (merge, rework, hand off, or close)', upd)
+    return None
 def pr_cards(repo,prefix,url):
     prs=_cached_prs(repo)
-    if prs is None: prs=gh(['pr','list','--repo',repo,'--state','open','--author','@me','--json','number,title,labels,reviewDecision,mergeable,updatedAt,isDraft']) or []
-    # 2026-09-14: every loop entry's PR counts as covered, parked ones included, or a deferred loop card resurfaces as a bare REVIEW card (#2948)
-    covered=({c['pr'] for c in cards if c.get('pr')} | {t.get('pr') for t in state.values() if t.get('pr')}) if repo==ORBIT else set()
+    if prs is None: prs=gh(['pr','list','--repo',repo,'--state','open','--author','@me','--json','number,title,labels,reviewDecision,mergeable,updatedAt,createdAt,isDraft']) or []
+    loop_of={t.get('pr'):r for r,t in state.items() if t.get('pr')} if repo==ORBIT else {}
+    covered=({c['pr'] for c in cards if c.get('pr')} | set(loop_of)) if repo==ORBIT else set()
     for p in prs:
-        n=p['number']
+        n=p['number']; labels=[l['name'] for l in p['labels']]; ref=f'{prefix}#{n}'; cid=f'{"gh" if repo==ORBIT else "orbot"}:{n}'
+        if any(c.get('pr')==n and c['lane'] in ('REVIEW','SEND') for c in cards): continue   # the loop already asks for it
+        move=pr_next_move(p) if not p.get('needsHuman') else None   # needs-human has its own card (pr_health, with HORST's ask)
+        if move:
+            lref=loop_of.get(n)
+            if lref and desk['cards'].get(f'loop:{lref}',{}).get('defer'): continue   # a parked hold on the entry is the deliberate wait
+            st,act,age=move
+            add({'id':cid,'ref':ref,'lane':'REVIEW','mins':15,'impact':'-','age':age,'waits':'person','pr':n,'thread':None,'url':f'{url}{n}','repo':repo,'task':lref,
+                 'status':st,'note':p['title'],'act':act,'score':round((2+2+min(age/3,2))/15*10,1)})
+            continue
         if n in covered or p.get('isDraft'): continue
-        labels=[l['name'] for l in p['labels']]
         needs = p.get('reviewDecision')=='CHANGES_REQUESTED' or p.get('mergeable')=='CONFLICTING' or 'needs-human-review' in labels
         if not needs: continue
         st=', '.join(x for x in [p.get('reviewDecision') if p.get('reviewDecision')!='UNKNOWN' else None,p.get('mergeable') if p.get('mergeable')=='CONFLICTING' else None,'needs-human-review' if 'needs-human-review' in labels else None] if x)
-        age=age_days(p['updatedAt']); ref=f'{prefix}#{n}'
-        add({'id':f'{"gh" if repo==ORBIT else "orbot"}:{n}','ref':ref,'lane':'REVIEW','mins':15,'impact':'-','age':age,'waits':'agent','pr':n,'thread':None,'url':f'{url}{n}','repo':repo,
+        age=age_days(p['updatedAt'])
+        add({'id':cid,'ref':ref,'lane':'REVIEW','mins':15,'impact':'-','age':age,'waits':'agent','pr':n,'thread':None,'url':f'{url}{n}','repo':repo,
              'status':st,'note':p['title'],'act':f'Decide the fate of {ref} ({st}): rework, hand to an agent, or close','score':round((2+2+min(age/3,2))/15*10,1)})
 pr_cards(ORBIT,'',GH)
 pr_cards(ORBOT,'orbot',f'{GHO}pull/')
+# A PR whose next move is the person's outranks its loop entry's worker card: the stalled worker is not the act, the PR is.
+_person_prs={c['pr'] for c in cards if c.get('pr') and c['lane']=='REVIEW' and c.get('waits')=='person'}
+cards[:]=[c for c in cards if not (c['id'].startswith('loop:') and c['lane'] in ('RUN','STALE') and c.get('pr') in _person_prs)]
 
 # ---------------------------------------------------------------- source 2b: PR health (facts a caption cannot hide)
 # 2026-09-23 (Tobias: "5 waiting for me, 22 open PRs, something is wrong"): eleven PRs had 8-14 HORST rounds and nine
