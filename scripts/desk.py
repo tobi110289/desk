@@ -10,6 +10,7 @@ Usage:
                           tenant_id (sweep-cache), plus PR cards those threads' loop entries name
   desk.py --today         scope the sitting to the Plain threads created today (Europe/Berlin): every open
                           thread from today is a card, nothing older is (--since YYYY-MM-DD for another day)
+  desk.py --fresh         read every source again (the Plain-heavy ones are cached for 20 min otherwise)
   desk.py --event <json>  apply one live event from the adapter's feed to cards.json and stop (deskevent.py; no
                           gather, no pre-flight, no board files; desk-events.py feeds it)
   desk.py T-120 ORB-203 pin one or more Plain threads / Notion tickets: each becomes a FAST card above the
@@ -20,13 +21,13 @@ issues, the Hermes feedback LOG.md,
 desk.json (deferrals, seen counts, captions of non-loop cards, done log).
 Read-only towards every source except desk.json / cards.json.
 """
-import json, re, sys, os, subprocess, datetime, glob
+import json, re, sys, os, subprocess, datetime, glob, zoneinfo
 HOME=os.path.expanduser('~')
 LOOP=f'{HOME}/orbit-scratch/agent-loop'
 DESK=f'{HOME}/orbit-scratch/desk'
 DESKFILE=f'{DESK}/desk.json'
 HERMES_LOG=f'{HOME}/orbit-scratch/hermes-feedback/LOG.md'
-import deskconfig
+import deskconfig, deskhold
 PLAIN=deskconfig.PLAIN_THREAD
 ORBIT=deskconfig.REPO; ORBOT=deskconfig.BOT_REPO
 GH=f'https://github.com/{ORBIT}/pull/'; GHO=f'https://github.com/{ORBOT}/'
@@ -35,7 +36,12 @@ HARVEST_DUE_OPEN=3             # harvest is "due" at this many open LOG entries 
 HARVEST_DUE_AGE_DAYS=7         # … or when the oldest open entry is older than this
 SWEEPS=f'{HOME}/orbit-scratch/sentry-sweeps'   # the weekly Sentry sweep's state + reports (desk owns its follow-through since 2026-09-11)
 now=datetime.datetime.now(datetime.timezone.utc)
-today=now.strftime('%Y-%m-%d')
+# 2026-10-22: one clock. The desk's day is the Berlin day the person works in; the close script and the live feed use the
+# same one (the gather used UTC before, so a drop after Berlin midnight counted for the wrong day for one or two hours).
+BERLIN=deskhold.BERLIN
+TODAY_BERLIN=now.astimezone(BERLIN).strftime('%Y-%m-%d')
+today=TODAY_BERLIN
+FRESH='--fresh' in sys.argv   # bypass the per-source caches (the pane passes it on a forced gather)
 
 def load(p,default):
     try: return json.load(open(p))
@@ -46,6 +52,27 @@ def parse_iso(iso):
 def age_days(iso):
     d=parse_iso(iso or ''); return max(0,(now-d).days) if d else 0
 def hours_since(dt): return (now-dt).total_seconds()/3600 if dt else None
+# 2026-10-22: rebuild only what changed. The Plain-heavy sources (every TODO and SNOOZED thread with its timeline) are
+# read again at most every CACHE_S; the pane gathers every 10 min and the live feed moves the pane between two reads.
+# `desk.py --fresh` (the pane's forced gather) reads everything again. Cache files: ~/orbit-scratch/desk/cache/<name>.json.
+CACHE_S=20*60
+CACHE_DIR=f'{DESK}/cache'
+def cached(name,fn,max_age_s=CACHE_S):
+    path=f'{CACHE_DIR}/{name}.json'
+    if not FRESH:
+        try:
+            doc=json.load(open(path)); at=parse_iso(doc.get('at') or '')
+            if at and (now-at).total_seconds()<max_age_s: return doc['value']
+        except Exception: pass
+    value=fn()
+    if value is not None:
+        try:
+            os.makedirs(CACHE_DIR,exist_ok=True); json.dump({'at':now.isoformat(),'value':value},open(path,'w'),ensure_ascii=False)
+        except Exception: pass
+    return value
+def file_age_s(path):
+    try: return (now-datetime.datetime.fromtimestamp(os.stat(path).st_mtime,datetime.timezone.utc)).total_seconds()
+    except OSError: return None
 def gh(args,timeout=40):
     try:
         out=subprocess.run(['gh',*args],capture_output=True,text=True,timeout=timeout).stdout
@@ -156,6 +183,7 @@ def _desk_stamp():
 DESK_STAMP=_desk_stamp()
 desk=load(DESKFILE,{'cards':{},'log':[]})
 desk.setdefault('cards',{}); desk.setdefault('log',[]); desk.pop('runs',None); desk.pop('preflight',None)   # 2026-09-29: never read
+if deskhold.migrate(desk): print("desk: moved the closures and deferrals into holds (keyed by wait)",file=sys.stderr)
 loopstate=load(f'{LOOP}/state.json',{'threads':{}})
 # live entries plus the archive (done entries older than 7 days, jev/loopstate.py): the desk still sees old done captions
 state={**load(f'{LOOP}/state-archive.json',{'threads':{}}).get('threads',{}),**loopstate.get('threads',{})}
@@ -264,23 +292,20 @@ def person_of(s):
         if p in s: return p
     return 'unknown'
 
-def _cmp(cid,s):
-    """Status as compared for closures and deferral binding. A tenant:<ref> card's status is a fact list that carries
-    "last entry <date> by <actor>": every reply changes it, so a closure or deferral written this morning stopped
-    matching the moment Tobias answered (T-122/T-123 came back on 2026-09-15). Compare tenant cards without that fact."""
-    if cid.startswith('tenant:'): return re.sub(r';\s*last entry [^;]*','',s or '')
-    # 2026-09-23: a promise: card's status carries the age in days ("ours last 2026-09-17 (5d, …"); the count ticks over
-    # during the day and reopened T-122/T-123 within the hour. Compare without it.
-    if cid.startswith('promise:'): return re.sub(r'\(\d+d,','(Nd,',s or '')
-    return s or ''
-def member_key(m):
-    # 2026-09-14: the caption is part of the key, so a member whose staged line changed (T-105 r3 -> r4) reopens the batch.
-    # 2026-10-19: except for a staged line itself. The line in an idle worker's input box is Claude Code's ghost text,
-    # the worker's own proposal, and it changes after every worker turn; keying on it reopened SEND×5 four times in one
-    # day with nothing new to send. A staged member keys on its state, a picker or sign-off still keys on its text.
-    if m.get('screen')=='staged_line_typed': return f"{m.get('ref')}|{m.get('task') or ''}|staged_line_typed"
-    return f"{m.get('ref')}|{m.get('task') or ''}|{m.get('status') or ''}"
+member_key=deskhold.member_key
 cards=[]
+failed_sources=[]   # 2026-10-22: a source that throws is a card, not silence (see source() below)
+def source(name):
+    """A context for one source block: an exception becomes one RUN card at the top of the person's bracket instead of
+    missing cards. Before this, every block swallowed its errors and printed only under DESK_DEBUG."""
+    class _S:
+        def __enter__(self): return self
+        def __exit__(self,et,ev,tb):
+            if et is None: return False
+            failed_sources.append((name,f"{et.__name__}: {str(ev)[:160]}"))
+            if os.environ.get('DESK_DEBUG'): print(f"source {name} failed: {ev}",file=sys.stderr)
+            return True
+    return _S()
 # 2026-10-06 (Tobias): threads listed in ignore.json never become cards (a teammate's sprint threads: he owns them end to
 # end, the desk kept surfacing them as FAST/gap cards). An explicit pin (fast:<ref>) still wins.
 try: IGNORE=json.load(open(f'{DESK}/ignore.json'))
@@ -292,119 +317,81 @@ def ignored(card):
     title=(card.get('title') or card.get('status') or '')
     return any(re.search(p,title,re.I) for p in (IGNORE.get('titles') or []))
 def dropped_today(ref):
-    """2026-10-20 (Tobias: "it shouldn't have landed on my desk again after I dropped it"): a drop holds for the day
-    and for the thread, not for one card id. The same thread was dropped as today:<ref>, came back within the hour as
-    today:<ref> with a new status fact, and then as promise:<ref>. Any card of the ref closed with `drop` today hides
-    every other card of that ref until tomorrow; an explicit pin (fast:<ref>) still wins."""
+    """Any wait of the thread dropped today hides every other wait of it until tomorrow (deskhold.hold does the same
+    for cards; this is for sources that look before they build)."""
     if not ref: return False
-    for k,v in desk['cards'].items():
-        c=v.get('closed') or {}
+    for k,h in desk.get('holds',{}).items():
+        c=(h or {}).get('closed') or {}
         if c.get('verb')=='drop' and c.get('date')==today and k.split(':',1)[-1]==ref: return True
     return False
-def add(card):
-    if ignored(card): return
-    cid=card['id']
-    if not cid.startswith('fast:') and not card.get('members') and dropped_today(card.get('ref')): return
-    prev=desk['cards'].get(cid,{})
-    if prev.get('closed'):
-        # a batch stays closed only today and only while its member set has not grown; new members reopen it.
-        # a single card stays closed only while its caption is the one it was closed with; a new caption reopens it.
-        # Tobias 2026-09-10: a SEND batch closed on 09-09 hid T-107's staged line for a day, so batch closures expire at midnight.
-        if not card.get('members'):
-            was=prev['closed'].get('status')
-            # 2026-09-14: a closure written before captions were recorded (status None) hid T-110 for six days; such a
-            # closure counts for its own day only.
-            if was is None:
-                if prev['closed'].get('date')==today: return
-            elif _cmp(cid,card.get('status') or '')==_cmp(cid,was): return
-        elif prev['closed'].get('date')==today:
-            done=set(prev['closed'].get('members') or [])
-            if {member_key(m) for m in card['members']} <= done: return
-    if prev.get('caption') and not card.get('status'): card['status']=prev['caption']
-    d=prev.get('defer')
-    if card.get('screen'):
-        # 2026-09-24: a card built from the worker's screen (picker, staged line, sign-off) is a terminal wait, not the
-        # thread wait a deferral parks; it neither borrows nor voids one. The hold on the thread stays as written.
-        card['seen']=prev.get('seen',0)+(0 if prev.get('lastSeen')==today else 1); cards.append(card); return
-    # 2026-09-14: loop:<ref>, gap:<ref> and bare <ref> are one thread and one act; a deferral on any of them parks all
-    # (T-119 sat parked as gap:T-119 and came back as loop:T-119 the moment its caption said "reply").
-    # 2026-09-17: a pinned card that carries a decision never borrows a sibling's wait; the decision ended it
-    if not d and not card.get('decided'):
-        _ref=card.get('ref') or ''
-        for _sib in (f'loop:{_ref}',f'gap:{_ref}',_ref):
-            _sd=desk['cards'].get(_sib,{}).get('defer') if _sib!=cid else None
-            if _sd:
-                _st=_sd.get('status'); _cur=card.get('status') or ''
-                if _st is not None:
-                    _st=re.sub(r'^loop done, thread TODO: ','',_st); _cur=re.sub(r'^loop done, thread TODO: ','',_cur)
-                    if _st!=_cur: continue
-                d={**_sd,'status':card.get('status'),'borrowed':_sib}; break
-    # a deferral belongs to the caption it was written for: when the loop writes a new caption the wait is over
-    # (2026-09-10: T-108 parked on deployed:production:2955 for the "ist live" reply hid a staged line of Tobias's).
-    # 2026-10-16: a batch deferral is bound to its member set (desk-close.py writes 'refs'): a new member voids it, a
-    # member's changed status or age does not (batch:TICKET:all voided itself on the daily age tick and on the desk's
-    # own Notion writes).
-    if d and cid.startswith('batch:') and d.get('refs') is not None:
-        _new=sorted({m.get('ref') for m in (card.get('members') or [])}-set(d['refs']))
-        if _new:
-            desk['cards'].setdefault(cid,{}).pop('defer',None); prev=desk['cards'][cid]
-            card['note']=f"deferral voided (new members {', '.join(_new)} since {d.get('since')}, was until {d.get('trigger')}): "+(card.get('note') or ''); d=None
-    elif d and d.get('status') is not None and _cmp(cid,card.get('status') or '')!=_cmp(cid,d['status']) and not card.get('rebuilt'):
-        import os as _os
-        if _os.environ.get('DESK_DEBUG'): print(f"VOID {cid}: card status={card.get('status')!r} bound={d['status']!r}",file=sys.stderr)
-        desk['cards'].setdefault(cid,{}).pop('defer',None); prev=desk['cards'][cid]
-        card['note']=f"deferral voided (caption changed since {d.get('since')}, was until {d.get('trigger')}): "+(card.get('note') or ''); d=None
-    if d:
-        trig=d.get('trigger','')
-        # 2026-10-12: older closes stored 'until <trigger> -> <act>' in the trigger field, so appstore:/deployed:/manual:
-        # never matched (four parked cards sat past their release). Normalise here and on write.
-        trig=re.sub(r'^(?:until\s+)+','',trig.strip())
-        if ' -> ' in trig:
-            trig,_act=trig.split(' -> ',1)
-            if not d.get('act'): d['act']=_act.strip()
-        trig=trig.strip()
-        fired=False
-        if re.match(r'\d{4}-\d{2}-\d{2}$',trig): fired = today>=trig
-        elif re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$',trig): fired = now.strftime('%Y-%m-%dT%H:%MZ')>=trig
-        elif trig.startswith('pr-merged:'):
-            n=trig.split(':')[1]; repo=ORBOT if 'orbot' in trig else ORBIT
-            st=gh(['pr','view',n,'--repo',repo,'--json','state'],20) or {}
-            fired = st.get('state')=='MERGED'
-        elif trig.startswith('appstore:'):
-            # appstore:<bundleId>>=<version> fires once the App Store lists that version or newer (iTunes lookup, DE storefront)
+def closed_today(ref):
+    """A thread whose wait got any verb today (the owe source leaves it alone until tomorrow)."""
+    return any((h or {}).get('closed',{}).get('date')==today and k.split(':',1)[-1]==ref for k,h in desk.get('holds',{}).items())
+HOLD_CHECK_DAYS=7
+def fire(card,d,prev):
+    """Check a deferral's trigger. Mutates the card when it fired (status, act, lane, score tier 'fired'). Returns True
+    when the hold ends now. A hold nothing can check (manual:, free text) is re-asked every HOLD_CHECK_DAYS so no wait
+    grows old unseen (2026-10-22: 14 of 21 parked holds were manual, 8 older than two weeks)."""
+    cid=card['id']; trig=d.get('trigger','')
+    # 2026-10-12: older closes stored 'until <trigger> -> <act>' in the trigger field, so appstore:/deployed:/manual:
+    # never matched (four parked cards sat past their release). Normalise here and on write.
+    trig=re.sub(r'^(?:until\s+)+','',trig.strip())
+    if ' -> ' in trig:
+        trig,_act=trig.split(' -> ',1)
+        if not d.get('act'): d['act']=_act.strip()
+    trig=trig.strip()
+    def released(status,act,lane_from=('STALE','NOTIFY','RUN','PROMISE'),lane_to='REPLY'):
+        card['status']=status; card['act']=act
+        card['lane']=lane_to if card['lane'] in lane_from else card['lane']
+        card['tier']='fired'; card['released']=True
+    fired=False
+    if re.match(r'\d{4}-\d{2}-\d{2}$',trig): fired = today>=trig
+    elif re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$',trig): fired = now.strftime('%Y-%m-%dT%H:%MZ')>=trig
+    elif trig.startswith('pr-merged:'):
+        n=trig.split(':')[1]; repo=ORBOT if 'orbot' in trig else ORBIT
+        st=gh(['pr','view',n,'--repo',repo,'--json','state'],20) or {}
+        fired = st.get('state')=='MERGED'
+    elif trig.startswith('appstore:'):
+        # appstore:<bundleId>>=<version> fires once the App Store lists that version or newer (iTunes lookup, DE storefront)
+        try:
+            import urllib.request
+            bid,ver=trig[len('appstore:'):].split('>=',1)
+            with urllib.request.urlopen(f'https://itunes.apple.com/lookup?bundleId={bid}&country=de',timeout=15) as r:
+                res=json.load(r).get('results') or []
+            live=(res[0].get('version') if res else '0') or '0'
+            fired=[int(x) for x in live.split('.')]>=[int(x) for x in ver.split('.')]
+            if fired: released(f"Cockpit {live} in the App Store (>= {ver}): customer not told",d.get('act') or f"Cockpit {live} is in the stores: tell the customer, then close the thread",lane_to='NOTIFY')
+        except Exception: fired=False
+    elif trig.startswith('deployed:'):
+        # deployed:<env>:<pr> fires once the PR's merge commit is inside the newest successful Deployment of env
+        try: _,env,prn=trig.split(':',2); rs=release_state(env,int(prn))
+        except Exception: rs={'landed':False}; env='?'; prn=''
+        fired=rs.get('landed',False)
+        release_watch.append({'id':cid,'ref':card.get('ref'),'thread':card.get('thread'),'pr':int(prn) if prn.isdigit() else None,'env':env,
+                              'landed':fired,'merged':rs.get('merged'),'deployAt':rs.get('deployAt'),'since':d.get('since') or prev.get('lastSeen'),'act':d.get('act','')})
+        if fired: released(f"landed on {env} {(rs.get('deployAt') or '')[:16]}Z (PR #{prn}): customer not told",d.get('act') or f"Release landed on {env} (PR #{prn}): tell the customer, then close the thread",lane_to='NOTIFY')
+    elif trig.startswith('a2a:'):
+        # 2026-10-13 (Tobias: "make sure the desk picks up a2a answers automatically"): GetTask on the hub is the authority:
+        # a completed task with a human reply fires and the card carries the reply; a cancelled task fires too.
+        _parts=trig.split(':'); tid=_parts[-1]; _agent=_parts[1] if len(_parts)==3 else None
+        _t=a2a_task(tid,_agent)
+        if _t and _t.get('state') in ('TASK_STATE_COMPLETED','TASK_STATE_CANCELED'):
+            fired=True
+            _who=_t.get('from') or _t.get('agent') or 'teammate'; _ts=(_t.get('timestamp') or '')[:16]
+            if _t.get('reply'):
+                _head=re.sub(r'\s+',' ',_t['reply']).strip()[:120]
+                _ch=', '.join(f"{k}={v}" for k,v in (_t.get('choices') or {}).items())
+                st=f"{_who} answered {_ts}Z"+(f" ({_ch})" if _ch else '')+f": {_head}"
+            else: st=f"a2a task {tid[:8]} {'cancelled' if _t['state'].endswith('CANCELED') else 'closed without a reply'}: decide without {_who}"
+            released(st,(d.get('act') or card.get('act') or '')+f" (a2a {tid[:8]} answered; full reply in cards.json a2a_reply)")
+            card['a2a_reply']=_t.get('reply'); card['a2a_choices']=_t.get('choices'); card['a2a_task']=tid
+        elif _t is None: card['note']=f"a2a task {tid[:8]} unreadable on the hub (still parked). "+(card.get('note') or '')
+    else:
+        # manual:<what> or free text: fires by itself on a customer message newer than the hold (2026-09-17, T-116), and
+        # is re-asked after HOLD_CHECK_DAYS of silence.
+        _tid=card.get('thread') or state.get(card.get('ref') or '',{}).get('threadId')
+        if _tid:
             try:
-                import urllib.request
-                bid,ver=trig[len('appstore:'):].split('>=',1)
-                with urllib.request.urlopen(f'https://itunes.apple.com/lookup?bundleId={bid}&country=de',timeout=15) as r:
-                    res=json.load(r).get('results') or []
-                live=(res[0].get('version') if res else '0') or '0'
-                fired=[int(x) for x in live.split('.')]>=[int(x) for x in ver.split('.')]
-                if fired:
-                    # 2026-09-16: an App Store release landed: same treatment as a deploy, the card comes back on top with the deferral's act
-                    card['status']=f"Cockpit {live} in the App Store (>= {ver}): customer not told"
-                    card['act']=d.get('act') or f"Cockpit {live} is in the stores: tell the customer, then close the thread"
-                    card['lane']='NOTIFY' if card['lane'] in ('NOTIFY','STALE','REPLY','RUN') else card['lane']
-                    card['score']=900; card['released']=True
-            except Exception: fired=False
-        elif trig.startswith('deployed:'):
-            # deployed:<env>:<pr> fires once the PR's merge commit is inside the newest successful Deployment of env
-            try: _,env,prn=trig.split(':',2); rs=release_state(env,int(prn))
-            except Exception: rs={'landed':False}
-            fired=rs.get('landed',False)
-            release_watch.append({'id':cid,'ref':card.get('ref'),'thread':card.get('thread'),'pr':int(prn) if prn.isdigit() else None,'env':env,
-                                  'landed':fired,'merged':rs.get('merged'),'deployAt':rs.get('deployAt'),'since':d.get('since') or prev.get('lastSeen'),'act':d.get('act','')})
-            if fired:
-                # a release landed: the card comes back on top, whatever its lane score was
-                card['status']=f"landed on {env} {(rs.get('deployAt') or '')[:16]}Z (PR #{prn}): customer not told"
-                card['act']=d.get('act') or f"Release landed on {env} (PR #{prn}): tell the customer, then close the thread"
-                card['lane']='NOTIFY' if card['lane'] in ('NOTIFY','STALE','REPLY','RUN') else card['lane']
-                card['score']=900; card['released']=True
-        elif trig.startswith('manual:') and (card.get('thread') or state.get(card.get('ref') or '',{}).get('threadId')):
-            # 2026-09-17 (T-116): a hold "until Sam answers" never fired when Sam answered, because a customer reply
-            # rewrites no caption and the desk read no Plain for parked threads. A manual hold on a thread now fires by itself
-            # when a customer-visible customer message is newer than the hold.
-            try:
-                _tid=card.get('thread') or state.get(card.get('ref'),{}).get('threadId')
                 _q='query($id:ID!){ thread(threadId:$id){ status timelineEntries(first:8){ edges{ node{ timestamp{ iso8601 } actor{ __typename } entry{ __typename ... on ChatEntry{ chatText: text } ... on EmailEntry{ textContent } ... on SlackMessageEntry{ slackText: text } ... on SlackReplyEntry{ replyText: text } } } } } } }'
                 _d=plain_gql(_q,{'id':_tid}) or {}
                 _since=(d.get('since') or '0000-00-00')
@@ -412,38 +399,43 @@ def add(card):
                     _x=_ed['node']; _e=_x['entry']
                     if _x['actor']['__typename']=='CustomerActor' and _e['__typename'] in MSG_ENTRIES and _x['timestamp']['iso8601'][:10]>_since:
                         _txt=re.sub(r'\s+',' ',(_e.get('chatText') or _e.get('textContent') or _e.get('slackText') or _e.get('replyText') or '').strip())[:90]
-                        card['status']=f"customer answered {_x['timestamp']['iso8601'][:16]}Z: {_txt}"
-                        card['act']=(d.get('act') or card.get('act') or '')+f" (hold was: {trig[7:][:60]})"
-                        card['lane']='REPLY' if card['lane'] in ('STALE','NOTIFY','RUN','PROMISE') else card['lane']
-                        card['score']=900; card['released']=True; fired=True; break
+                        released(f"customer answered {_x['timestamp']['iso8601'][:16]}Z: {_txt}",(d.get('act') or card.get('act') or '')+f" (hold was: {trig[7:][:60]})")
+                        fired=True; break
             except Exception: fired=False
-        elif trig.startswith('a2a:'):
-            # 2026-10-13 (Tobias: "make sure the desk picks up a2a answers automatically"): the desk reads the answer
-            # itself. The hub feed's waitingOnOthers was empty for an answered task, so the old check only dropped the
-            # hold and the card fell back to its ordinary score with its old act; a teammate's answered decision sat under
-            # a TASK card at score 20 until Tobias asked. GetTask on the hub is the authority: a completed task with a
-            # human reply fires and the card carries the reply (status, act from the deferral, score 900 like a deploy);
-            # a cancelled task fires too, since the wait is void; an open task or an unreadable hub keeps the card parked.
-            # Trigger forms: a2a:<taskId> (every registry human is tried) or a2a:<agent>:<taskId>.
-            _parts=trig.split(':'); tid=_parts[-1]; _agent=_parts[1] if len(_parts)==3 else None
-            _t=a2a_task(tid,_agent)
-            if _t and _t.get('state') in ('TASK_STATE_COMPLETED','TASK_STATE_CANCELED'):
-                fired=True
-                _who=_t.get('from') or _t.get('agent') or 'teammate'; _ts=(_t.get('timestamp') or '')[:16]
-                if _t.get('reply'):
-                    _head=re.sub(r'\s+',' ',_t['reply']).strip()[:120]
-                    _ch=', '.join(f"{k}={v}" for k,v in (_t.get('choices') or {}).items())
-                    card['status']=f"{_who} answered {_ts}Z"+(f" ({_ch})" if _ch else '')+f": {_head}"
-                else:
-                    card['status']=f"a2a task {tid[:8]} {'cancelled' if _t['state'].endswith('CANCELED') else 'closed without a reply'}: decide without {_who}"
-                card['act']=(d.get('act') or card.get('act') or '')+f" (a2a {tid[:8]} answered; full reply in cards.json a2a_reply)"
-                card['a2a_reply']=_t.get('reply'); card['a2a_choices']=_t.get('choices'); card['a2a_task']=tid
-                card['lane']='REPLY' if card['lane'] in ('STALE','NOTIFY','RUN','PROMISE') else card['lane']
-                card['score']=900; card['released']=True
-            elif _t is None:
-                card['note']=f"a2a task {tid[:8]} unreadable on the hub (still parked). "+(card.get('note') or '')
         if not fired:
-            card['deferred']=d; card['score']=-1
+            held_days=age_days((d.get('checkedAt') or d.get('since') or today)+'T00:00:00Z')
+            if held_days>=HOLD_CHECK_DAYS:
+                what=re.sub(r'^manual:\s*','',trig)[:70]
+                card['status']=f"hold check: {held_days}d on '{what}'"
+                card['act']=f"Still waiting on '{what}' ({held_days} days)? Defer again to keep the hold, or act: {(d.get('act') or card.get('act') or '')[:120]}"
+                card['tier']='person'; card['holdCheck']=True; fired=True
+    return fired
+def add(card):
+    if ignored(card): return
+    cid=card['id']
+    card['key']=deskhold.key_of(card); card['since']=deskhold.since_of(card)
+    prev=desk['cards'].get(cid,{})
+    if prev.get('caption') and not card.get('status'): card['status']=prev['caption']
+    if card.get('screen'):
+        # 2026-09-24: a card built from the worker's screen (picker, staged line, sign-off) is a terminal wait, not the
+        # thread wait a deferral parks; it neither borrows nor voids one. A closure on it still counts.
+        h=deskhold.hold(desk,card,today)
+        if h and h[0]=='closed': return
+        card['seen']=prev.get('seen',0)+(0 if prev.get('lastSeen')==today else 1); cards.append(card); return
+    h=deskhold.hold(desk,card,today)
+    if os.environ.get('DESK_DEBUG'): print(f"HOLD {cid} key={card['key']} since={str(card['since'])[:40]!r} -> {h and h[0]}",file=sys.stderr)
+    if h and h[0]=='closed': return
+    if h and h[0]=='void':
+        d=h[1]; desk['holds'].get(card['key'],{}).pop('defer',None)
+        card['note']=f"deferral voided ({d.get('why')} since {d.get('since')}, was until {d.get('trigger')}): "+(card.get('note') or '')
+        h=None
+    if h and h[0]=='parked':
+        d=h[1]
+        f=fire(card,d,prev)
+        if os.environ.get('DESK_DEBUG'): print(f"FIRE {cid} {d.get('trigger','')[:40]!r} -> {f} status={card.get('status','')[:50]!r}",file=sys.stderr)
+        # a fired hold stays recorded until a verb: the release, the answer or the hold check comes back on every
+        # gather until the person acts (a defer again resets the hold's clock, a close replaces it)
+        if not f: card['deferred']=d; card['score']=-1
     card['seen']=prev.get('seen',0)+(0 if prev.get('lastSeen')==today else 1)
     cards.append(card)
 
@@ -460,7 +452,7 @@ def _my_prs():
         _prh_doc=_p.load(900) or _p.build()
         return {int(n):{'ci':'red' if r.get('ci_red') else 'ok','labels':r.get('labels') or [],'review':'' if r.get('review') in (None,'-') else r['review'],'draft':bool(r.get('draft'))} for n,r in _prh_doc['prs'].items()}
     except Exception as _e:
-        print(json.dumps({'desk':'pr_health_failed','error':str(_e)[:160]}),file=sys.stderr)
+        failed_sources.append(('pr-health',str(_e)[:160]))
     out={}
     for p in gh(['pr','list','--repo',ORBIT,'--state','open','--author','@me','--limit','50','--json','number,labels,statusCheckRollup,reviewDecision,isDraft']) or []:
         checks=p.get('statusCheckRollup') or []
@@ -493,7 +485,7 @@ if os.environ.get('DESK_SCREENS','1')!='0':
         import sys as _sys3, os as _os3; _sys3.path.insert(0,_os3.path.expanduser('~/orbit-scratch/agent-loop/jev')); import desk_screens as _ds
         _screens=_ds.cached(900) or _ds.screen(state)   # the tick's screen cache when fresh
     except Exception as _e:
-        print(json.dumps({'desk':'screens_failed','error':str(_e)[:160]}),file=sys.stderr)
+        failed_sources.append(('screens',str(_e)[:160]))
 def _pr_facts(pr):
     """{'merged':bool,'review':str,'labels':[...],'draft':bool} for a PR of a live entry; merged PRs are not in my_prs."""
     if not pr: return None
@@ -505,7 +497,9 @@ def screen_card(ref,t,x):
     """One card from a classified screen, or 'hide' (agent working / waiting on HORST), or None (fall back to the caption rules)."""
     st=x.get('state'); pr=t.get('pr'); task=t.get('task') or ref; lvl,iw=impact_of(ref)
     base={'id':f'loop:{ref}','ref':ref,'impact':lvl,'age':age_days(t.get('updated') or ''),'pr':pr,'task':task,'workspace':t.get('workspace'),'host':t.get('host'),'terminal':t.get('terminal'),
-          'thread':(byref.get(ref) or {}).get('id') or t.get('threadId'),'note':(t.get('note') or '')[:400],'screen':st,'screenAt':x.get('capturedAt')}
+          'thread':(byref.get(ref) or {}).get('id') or t.get('threadId'),'note':(t.get('note') or '')[:400],'screen':st,'screenAt':x.get('capturedAt'),
+          # the wait: the screen state (a staged line's text is ghost text and changes every turn), plus the PR for PR-bound states
+          'since':f"screen:{st}:{pr or ''}"}
     if st=='mid_turn_working': return 'hide'
     pf=_pr_facts(pr)
     if st=='staged_line_typed':
@@ -514,11 +508,11 @@ def screen_card(ref,t,x):
                 'act':f'Send or drop the line staged in `{task}`: "{line[:120]}"','score':50+iw}
     if st=='picker_or_question_waiting':
         opts=x.get('options') or []; q=x.get('question') or ''
-        return {**base,'lane':'SEND','mins':1,'waits':'agent','status':f'sign-off: picker open: {(opts[0] if opts else q)[:50]}','picker':opts,'question':q,
+        return {**base,'lane':'SEND','mins':1,'waits':'agent','status':f'sign-off: picker open: {(opts[0] if opts else q)[:50]}','picker':opts,'question':q,'since':f"picker:{q[:80]}",
                 'act':f'Answer the picker in `{task}`: {q[:90]} → '+' / '.join(f'{i+1}. {o[:40]}' for i,o in enumerate(opts[:4])),'score':50+iw}
     if st=='sign_off_waiting':
         q=x.get('question') or ''
-        return {**base,'lane':'SEND','mins':1,'waits':'agent','status':f'sign-off: {q[:60]}','question':q,
+        return {**base,'lane':'SEND','mins':1,'waits':'agent','status':f'sign-off: {q[:60]}','question':q,'since':f"signoff:{q[:80]}",
                 'act':f'Answer `{task}`, it stopped for you: {q[:140]}','score':50+iw}
     if st=='gone' and x.get('sentinel') and not pr:
         return {**base,'lane':'RUN','mins':2,'waits':'nobody','status':'finished without a PR','act':f'Worker of {ref} finished without a PR: read its summary, then respawn or retire the entry','score':30+iw}
@@ -558,7 +552,7 @@ for ref,t in state.items():
             why='CI red' if pi['ci']=='red' else 'no auto-review label'
             add({'id':f'loop:{ref}','ref':ref,'lane':'RUN','mins':2,'impact':impact_of(ref)[0],'age':age_days(t.get('updated') or ''),'waits':'nobody',
                  'pr':t['pr'],'task':t.get('task'),'workspace':None,'host':None,'terminal':None,'thread':(byref.get(ref) or {}).get('id') or t.get('threadId'),
-                 'status':st,'note':note[:400],'act':f"#{t['pr']} has no agent and {why}: own it (fix CI / add auto-review) or spawn a babysit",'score':round((impact_of(ref)[1]+2)/2*10,1)})
+                 'status':st,'note':note[:400],'since':f"pr-open:{t['pr']}:{why}",'act':f"#{t['pr']} has no agent and {why}: own it (fix CI / add auto-review) or spawn a babysit",'score':round((impact_of(ref)[1]+2)/2*10,1)})
         continue
     if ph not in ('blocked','done'): continue
     if ph=='done' and not re.search(r'reply|open|pending|release|sync|rollout|deploy',st): continue
@@ -588,10 +582,11 @@ for ref,t in state.items():
     waitw={'customer':3,'person':2,'agent':2,'nobody':0}[waits]
     cod=iw+waitw+min(age/3,2)
     pr=t.get('pr')
+    # 2026-10-22: a card the caption alone put here (no screen, no PR fact) says so; the caption is a claim, the facts above outrank it
     card={'id':f'loop:{ref}','ref':ref,'lane':lane,'mins':mins,'impact':lvl,'age':age,'waits':waits,
           'pr':pr,'task':t.get('task'),'workspace':t.get('workspace'),'host':t.get('host'),'terminal':t.get('terminal'),
           'thread':(byref.get(ref) or {}).get('id') or t.get('threadId'),
-          'status':st,'note':note[:400],
+          'status':st,'note':('caption only (no terminal read, no PR fact): ' if _x is None else '')+note[:400],'since':st,'captionOnly':_x is None,
           'act':tpl.format(task=t.get('task') or ref,pr=f'#{pr}' if pr else '',status=st or '(no caption)',ref=ref,person=(person_of(st+note) if person_of(st+note)!='unknown' else (_jev.person(ref) or 'unknown'))),
           'score':round(cod/mins*10,1)}
     add(card)
@@ -624,18 +619,18 @@ def pr_next_move(p):
         d=age_days(_z(p.get('approvedAt'))) if p.get('approvedAt') else upd
         if d>=PR_WAIT_DAYS['approved'] or blocker:
             who='author merges' if p.get('authorMerges') else 'not merged'
-            return (f'approved {d}d ago, {who}'+(f' · {blocker}' if blocker else ''), f'Merge #{n}: HORST approved it {d}d ago and left the merge to you'+(f' ({blocker})' if blocker else ''), d)
+            return (f'approved {d}d ago, {who}'+(f' · {blocker}' if blocker else ''), f'Merge #{n}: HORST approved it {d}d ago and left the merge to you'+(f' ({blocker})' if blocker else ''), d, f"approved:{p.get('approvedAt') or ''}:{blocker}")
     if not draft and rounds==0 and rev=='' and 'auto-review' not in labels and age>=PR_WAIT_DAYS['noQueue']:
-        return (f'in no review queue for {age}d', f'Queue #{n} (add auto-review), make it a draft, or close it', age)
+        return (f'in no review queue for {age}d', f'Queue #{n} (add auto-review), make it a draft, or close it', age, 'no-queue')
     if not draft and rounds==0 and rev=='' and 'auto-review' in labels and upd>=PR_WAIT_DAYS['queueSilent']:
-        return (f'auto-review set, HORST silent {upd}d', f'Nudge the queue on #{n}: push a commit or re-add auto-review', upd)
+        return (f'auto-review set, HORST silent {upd}d', f'Nudge the queue on #{n}: push a commit or re-add auto-review', upd, 'queue-silent')
     if draft and idle is not None and idle>=PR_WAIT_DAYS['draftIdle']:
-        return (f'draft idle {idle}d', f'Finish #{n}, hand it to an agent, or close it', idle)
+        return (f'draft idle {idle}d', f'Finish #{n}, hand it to an agent, or close it', idle, 'draft-idle')
     if p.get('mergeable')=='CONFLICTING' and rev!='CHANGES_REQUESTED' and not hold and not draft:
         _b=', '.join(x for x in blocker.split(', ') if x and x!='conflicts with base')
-        return ('conflicts with base'+(f' · {_b}' if _b else ''), f'Resolve the conflicts on #{n} or hand them to its agent', upd)
+        return ('conflicts with base'+(f' · {_b}' if _b else ''), f'Resolve the conflicts on #{n} or hand them to its agent', upd, f'conflicts:{_b}')
     if upd>=PR_WAIT_DAYS['untouched']:
-        return (f'untouched {upd}d'+(f' ({rev})' if rev else ''), f'Decide #{n}: nothing moved for {upd} days (merge, rework, hand off, or close)', upd)
+        return (f'untouched {upd}d'+(f' ({rev})' if rev else ''), f'Decide #{n}: nothing moved for {upd} days (merge, rework, hand off, or close)', upd, f'untouched:{rev}')
     return None
 def pr_cards(repo,prefix,url):
     prs=_cached_prs(repo)
@@ -648,10 +643,10 @@ def pr_cards(repo,prefix,url):
         move=pr_next_move(p) if not p.get('needsHuman') else None   # needs-human has its own card (pr_health, with HORST's ask)
         if move:
             lref=loop_of.get(n)
-            if lref and desk['cards'].get(f'loop:{lref}',{}).get('defer'): continue   # a parked hold on the entry is the deliberate wait
-            st,act,age=move
+            if lref and any((h or {}).get('defer') for k,h in desk.get('holds',{}).items() if k.split(':',1)[-1]==lref): continue   # a parked hold on the entry is the deliberate wait
+            st,act,age,since=move
             add({'id':cid,'ref':ref,'lane':'REVIEW','mins':15,'impact':'-','age':age,'waits':'person','pr':n,'thread':None,'url':f'{url}{n}','repo':repo,'task':lref,
-                 'status':st,'note':p['title'],'act':act,'score':round((2+2+min(age/3,2))/15*10,1)})
+                 'status':st,'note':p['title'],'act':act,'since':since,'score':round((2+2+min(age/3,2))/15*10,1)})
             continue
         if n in covered or p.get('isDraft'): continue
         needs = p.get('reviewDecision')=='CHANGES_REQUESTED' or p.get('mergeable')=='CONFLICTING' or 'needs-human-review' in labels
@@ -659,7 +654,7 @@ def pr_cards(repo,prefix,url):
         st=', '.join(x for x in [p.get('reviewDecision') if p.get('reviewDecision')!='UNKNOWN' else None,p.get('mergeable') if p.get('mergeable')=='CONFLICTING' else None,'needs-human-review' if 'needs-human-review' in labels else None] if x)
         age=age_days(p['updatedAt'])
         add({'id':cid,'ref':ref,'lane':'REVIEW','mins':15,'impact':'-','age':age,'waits':'agent','pr':n,'thread':None,'url':f'{url}{n}','repo':repo,
-             'status':st,'note':p['title'],'act':f'Decide the fate of {ref} ({st}): rework, hand to an agent, or close','score':round((2+2+min(age/3,2))/15*10,1)})
+             'status':st,'note':p['title'],'since':st,'act':f'Decide the fate of {ref} ({st}): rework, hand to an agent, or close','score':round((2+2+min(age/3,2))/15*10,1)})
 pr_cards(ORBIT,'',GH)
 pr_cards(ORBOT,'orbot',f'{GHO}pull/')
 # A PR whose next move is the person's outranks its loop entry's worker card: the stalled worker is not the act, the PR is.
@@ -677,7 +672,7 @@ try:
         if _c.get('pr') and any(k.get('pr')==_c['pr'] and k.get('lane')=='REVIEW' for k in cards): continue   # the loop card already asks for the review
         add(_c)
 except Exception as _e:
-    print(json.dumps({'desk':'pr_health_failed','error':str(_e)[:160]}), file=sys.stderr)
+    failed_sources.append(('pr-health',str(_e)[:160]))
 
 # source 3 (harvested orbot issues, ORBOT lane) removed 2026-09-29: its act fed a run workspace, and runs[] is gone.
 
@@ -688,7 +683,7 @@ if feed:
         kind=t.get('kind') or 'lookup'; h=a2a_age_h(t)
         if kind=='message':
             add({'id':f"a2a:{t['taskId']}",'ref':f"@{t.get('from')}",'lane':'INBOX','mins':1,'impact':'P2','age':int(h//24),'waits':'agent','pr':None,'thread':None,'url':None,
-                 'a2a':{'taskId':t['taskId'],'from':t.get('from'),'kind':kind,'acked':bool(t.get('acked')),'points':0,'decision':None},
+                 'a2a':{'taskId':t['taskId'],'from':t.get('from'),'kind':kind,'acked':bool(t.get('acked')),'points':0,'decision':None},'since':t['taskId'],
                  'status':f"{'acked' if t.get('acked') else 'unseen'} · message · {h:.0f}h",'note':(t.get('text') or '')[:400],
                  'act':f"Read {t.get('from')}'s message ({h:.0f}h old): {a2a_head(t)}",'score':round((2+2+min(h/72,2))*10,1)})
             continue
@@ -698,12 +693,12 @@ if feed:
         pts=(t.get('decision') or {}).get('points') if isinstance(t.get('decision'),dict) else None
         n=len(pts) if pts else max(1,len(re.findall(r'(?m)^\s*\*?\d+[a-z]?[.)]',t.get('text') or '')))
         add({'id':f"a2a:{t['taskId']}",'ref':f"@{t.get('from')}",'lane':'INBOX','mins':2*n,'impact':'P1','age':int(h//24),'waits':'agent','pr':None,'thread':None,'url':None,
-             'a2a':{'taskId':t['taskId'],'from':t.get('from'),'kind':kind,'acked':bool(t.get('acked')),'points':n,'decision':t.get('decision')},
+             'a2a':{'taskId':t['taskId'],'from':t.get('from'),'kind':kind,'acked':bool(t.get('acked')),'points':n,'decision':t.get('decision')},'since':t['taskId'],
              'status':f"{'acked' if t.get('acked') else 'unseen'} · {n} point{'s' if n!=1 else ''} · {h:.0f}h",'note':(t.get('text') or '')[:400],
              'act':f"Answer {t.get('from')}'s decision ({n} point{'s' if n!=1 else ''}, {h:.0f}h old): {a2a_head(t)}",'score':round((4+2+min(h/72,2))/(2*n)*10,1)})
     if lookups_waiting:
         add({'id':'a2a:poller','ref':'a2a poller','lane':'RUN','mins':2,'impact':'P1','age':0,'waits':'agent','pr':None,'thread':None,'url':None,
-             'status':f'{len(lookups_waiting)} lookup(s) waiting over an hour; the poller is not answering','note':'\n'.join(a2a_head(t) for t in lookups_waiting[:5]),
+             'status':f'{len(lookups_waiting)} lookup(s) waiting over an hour; the poller is not answering','note':'\n'.join(a2a_head(t) for t in lookups_waiting[:5]),'since':today,
              'act':'Check the inbox poller (launchctl list | grep a2a-inbox, ~/.orbit-a2a/poll.log), then run /a2a-inbox','score':30.0})
 
 # ---------------------------------------------------------------- source 6: Plain threads whose fix is live but the customer was not told
@@ -731,7 +726,7 @@ def notify_cards():
             if fields.get('github_pr'): cands.append((n,fields))
         if not d['threads']['pageInfo']['hasNextPage']: break
         after=d['threads']['pageInfo']['endCursor']
-    refs=set()
+    out=[]
     for n,fields in cands:
         d=plain_gql(q2,{'id':n['id']})
         if not d or not d.get('thread'): continue
@@ -747,14 +742,15 @@ def notify_cards():
         if not mark or told: continue
         ref=n['ref']; lvl=fields.get('impact_level') if fields.get('impact_level') in IMPACT else 'P2'
         age=age_days(mark['at']); prs=mark['prs'] or '?'
-        add({'id':f'notify:{ref}','ref':ref,'lane':'NOTIFY','mins':3,'impact':lvl,'age':age,'waits':'customer',
+        out.append({'id':f'notify:{ref}','ref':ref,'lane':'NOTIFY','mins':3,'impact':lvl,'age':age,'waits':'customer',
              'pr':(mark['prs'].split(',')[0] or None),'task':None,'thread':n['id'],'url':PLAIN+n['id'],
-             'status':f"live on {mark['env']} since {mark['at'][:16]}Z; PR #{prs}; customer not told",'note':(n.get('title') or '')[:200],
+             'status':f"live on {mark['env']} since {mark['at'][:16]}Z; PR #{prs}; customer not told",'note':(n.get('title') or '')[:200],'since':f"deployed:{mark['env']}:{mark['at']}",
              'act':f"Tell {ref} the fix is live on {mark['env']} (PR #{prs}): draft the reply, then send",
              'score':round((IMPACT.get(lvl,1)+3+min(age/3,2))/3*10,1)})
-        refs.add(ref)
-    return refs
-notify_refs=notify_cards()
+    return out
+_nc=cached('notify',notify_cards) or []
+for _c in _nc: add(dict(_c))
+notify_refs={c['ref'] for c in _nc}
 # a loop REPLY card on the same thread is the older fact; the NOTIFY card carries the deploy
 cards[:]=[c for c in cards if not (c['lane']=='REPLY' and c['ref'] in notify_refs)]
 
@@ -762,8 +758,9 @@ cards[:]=[c for c in cards if not (c['lane']=='REPLY' and c['ref'] in notify_ref
 # todo-gap.py sorts every Plain TODO thread into buckets; B = the loop's entry is done (fix merged or shipped) but the
 # thread is still TODO: the customer was never told or the thread never closed. One NOTIFY card per thread, id gap:<ref>,
 # so a parked loop:<ref> deferral does not hide it. Asked for by Tobias 2026-09-10.
-try: subprocess.run(['python3',f'{DESK}/todo-gap.py'],capture_output=True,timeout=60)
-except Exception: pass
+try:
+    if FRESH or (file_age_s(f'{DESK}/todo-gap.md') or 1e9)>CACHE_S: subprocess.run(['python3',f'{DESK}/todo-gap.py'],capture_output=True,timeout=60)
+except Exception as _e: failed_sources.append(('todo-gap',str(_e)[:160]))
 try:
     gap_md=open(f'{DESK}/todo-gap.md').read()
     sec=re.search(r'^## B\..*?$(.*?)(?=^## |\Z)',gap_md,re.S|re.M)
@@ -773,10 +770,10 @@ try:
         lvl=lvl if lvl in IMPACT else 'P2'; t=state.get(ref,{}); age=age_days(t.get('updated') or '')
         add({'id':f'gap:{ref}','ref':ref,'lane':'NOTIFY','mins':3,'impact':lvl,'age':age,'waits':'customer',
              'pr':t.get('pr'),'task':None,'thread':tid,'url':url,
-             'status':f"loop done, thread TODO: {(t.get('status') or st)[:60]}",'note':title[:200],
+             'status':f"loop done, thread TODO: {(t.get('status') or st)[:60]}",'note':title[:200],'since':(t.get('status') or st),
              'act':f"Close the loop on {ref} ({title[:60]}): tell the customer where the fix stands, or close the thread",
              'score':round((IMPACT.get(lvl,1)+3+min(age/3,2))/3*10,1)})
-except Exception: pass
+except Exception as _e: failed_sources.append(('gap',str(_e)[:160])); gap_md=''
 
 
 # ---------------------------------------------------------------- source 8: snoozed threads that end with OUR message (PROMISE)
@@ -823,7 +820,7 @@ def promise_cards():
         who='you' if ours else cust or 'the customer'
         out.append({'id':f'promise:{ref}','ref':ref,'lane':'PROMISE','mins':3,'impact':lvl,'age':age,'waits':'customer',
              'pr':(fields.get('github_pr') or '').rsplit('/',1)[-1] or None,'task':None,'thread':n['id'],'url':PLAIN+n['id'],
-             'status':f"{'ours' if ours else 'customer'} last {last['at'][:10]} ({age}d, {detail}): {quote}",
+             'status':f"{'ours' if ours else 'customer'} last {last['at'][:10]} ({age}d, {detail}): {quote}",'since':last['at'],
              'note':f"{(n.get('title') or '')[:80]} · {cust} · {'we wrote last' if ours else 'customer wrote last, unanswered'}",
              'act':(f"{ref} ({(n.get('title') or '')[:50]}): {who} wrote last, {age} days ago, thread snoozed as {detail}. Tell {cust or 'the customer'} where it stands, close the loop, or hand it on"
                     if ours else f"{ref} ({(n.get('title') or '')[:50]}): {cust or 'the customer'} wrote last, {age} days ago, thread still snoozed. Answer or close"),
@@ -831,18 +828,17 @@ def promise_cards():
     out.sort(key=lambda c:-(c['_age'] or 0))
     return out
 try:
-    _pc=promise_cards(); _shown=0
+    _pc=[dict(c) for c in (cached('promise',promise_cards) or [])]; _shown=0
     for c in _pc:
         c.pop('_age',None)
         if c['ref'] in notify_refs or any(x['ref']==c['ref'] for x in cards) or dropped_today(c['ref']): continue
-        prev=desk['cards'].get(c['id'],{})
-        # a verdict binds to the last visible message: same status -> stays closed (add() checks); the cap counts only cards that will show
-        if prev.get('closed') and _cmp(c['id'],c['status'])==_cmp(c['id'],prev['closed'].get('status') or ''): add(c); continue
-        if prev.get('defer'): add(c); continue
+        # a verdict binds to the last visible message (since): a held card costs nothing against the cap
+        c['key']=deskhold.key_of(c); c['since']=deskhold.since_of(c)
+        if deskhold.hold(desk,c,today): add(c); continue
         if _shown>=PROMISE_CAP: continue
         add(c); _shown+=1
 except Exception as _e:
-    if os.environ.get('DESK_DEBUG'): print(f"promise_cards failed: {_e}",file=sys.stderr)
+    failed_sources.append(('promise_cards',str(_e)[:160]))
 
 # ---------------------------------------------------------------- scope (--tenant <id>)
 TENANT=None
@@ -851,8 +847,6 @@ if '--tenant' in sys.argv:
     TENANT=sys.argv[i+1] if i+1<len(sys.argv) else None
 # --today / --since <date>: the day's threads (Tobias, 2026-09-30: "a desk session but only with plain threads from today").
 # Days are Europe/Berlin days, the day Tobias works in; Plain stamps createdAt in UTC.
-import zoneinfo
-BERLIN=zoneinfo.ZoneInfo('Europe/Berlin')
 SINCE=None
 if '--today' in sys.argv: SINCE=now.astimezone(BERLIN).strftime('%Y-%m-%d')
 if '--since' in sys.argv:
@@ -973,7 +967,6 @@ def since_scope(date):
         if t.get('pr'): prs.add(int(t['pr']))
         for m in re.finditer(r'#(\d{3,5})',t.get('note') or ''): prs.add(int(m.group(1)))
     return refs,prs
-TODAY_BERLIN=now.astimezone(BERLIN).strftime('%Y-%m-%d')
 def berlin_day(iso):
     t=parse_iso(iso or ''); return t.astimezone(BERLIN).strftime('%Y-%m-%d') if t else ''
 READINESS_ACT=deskevent.READINESS_ACT   # one table for the gather and the live event path
@@ -1005,7 +998,7 @@ def fast_thread_cards(threads,prefix):
         if f.get('github_pr'): note_bits.append(f"PR {f['github_pr']}")
         if f.get('notion_ticket'): note_bits.append(f"notion {f['notion_ticket']}")
         add({'id':f"{prefix}:{ref}",'ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':age,'waits':who,
-             'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],
+             'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],'since':f"{th.get('status') or 'TODO'}|{th.get('customerAt') or ''}",
              'status':'; '.join(facts)[:300],'note':(th['title'][:120]+' · '+'; '.join(note_bits))[:300],
              'act':f"{ref} ({th['title'][:60]}, {th['email']}): {READINESS_ACT.get(rd,READINESS_ACT['needs-triage'])}",
              'score':deskevent.fast_score(lvl,who,age)})
@@ -1029,7 +1022,7 @@ def unanswered_cards(threads):
         facts.append(f"customer unanswered since {hm}")
         t=state.get(ref,{})
         add({'id':f'today:{ref}','ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':0,'waits':'customer',
-             'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],'unanswered':since,
+             'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],'unanswered':since,'key':f'unanswered:{ref}','since':since,
              'status':'; '.join(facts)[:300],
              'note':(th['title'][:120]+' · '+(f"loop: {t.get('phase')}, {(t.get('status') or '')[:60]}" if t else 'no loop entry'))[:300],
              'act':f"{ref} ({th['title'][:60]}, {th['email']}): customer waits for a first answer since {hm}: draft the reply",
@@ -1045,7 +1038,7 @@ if SCOPE:
     # ---------------------------------------------------------------- source 7a: the scope's open threads
     # A tenant sitting is the whole desk for that customer, a today sitting the whole desk for the day's threads.
     if tenant_threads is None:
-        print(f"WARNING: Plain unreachable, {SCOPE} scoped from the cache only (its open threads are missing)",file=sys.stderr)
+        print(f"WARNING: Plain unreachable, {SCOPE} scoped from the cache only (its open threads are missing)",file=sys.stderr); failed_sources.append(('scope-threads','Plain unreachable'))
     fast_thread_cards(tenant_threads,'tenant' if TENANT else 'today')
     day_threads=tenant_threads
 else:
@@ -1053,8 +1046,8 @@ else:
     # Tobias, 2026-10-09: "desk should ALWAYS prioritize new plain threads of the day, second new answers of today, then
     # everything else, without me needing to type /desk --today". One more Plain read per run (TODO + SNOOZED, the same
     # page plain-stats.py reads); a thread of today with no card becomes today:<ref>, the lift below ranks the rest.
-    day_threads=plain_threads_since(TODAY_BERLIN)
-    if day_threads is None: print("WARNING: Plain unreachable, today's threads are missing from the desk",file=sys.stderr)
+    day_threads=cached(f'day-threads-{TODAY_BERLIN}',lambda:plain_threads_since(TODAY_BERLIN))
+    if day_threads is None: print("WARNING: Plain unreachable, today's threads are missing from the desk",file=sys.stderr); failed_sources.append(('today-threads','Plain unreachable: the day\'s threads are missing'))
     # 2026-10-22 (a thread of 2026-10-22: the loop's own Sentry flag under an engineer's address came back as "customer waits for a
     # first answer" twice in a day): a thread a colleague opened is no customer event. No today card, no first-answer
     # card, no 1700/1800 lift; its loop entry still makes its card. config.json internalDomains.
@@ -1067,25 +1060,6 @@ else:
 TODAY_NEW={th['ref'] for th in day_threads or [] if berlin_day(th['createdAt'])==TODAY_BERLIN}
 TODAY_ANSWERED={th['ref'] for th in day_threads or [] if th['ref'] not in TODAY_NEW and berlin_day(th['customerAt'])==TODAY_BERLIN}
 
-# ---------------------------------------------------------------- source 7b: release deferrals without a live card
-# A card parked on deployed:<env>:<pr> must outlive its loop entry (the housekeeper drops done entries): when no
-# source produced the card this run, rebuild it from the deferral so the release check still runs and the board
-# release section still lists it. Tobias, 2026-09-10: bucket B lands on the board by default and resurfaces on release.
-seen_ids={c['id'] for c in cards}
-for cid,pc in list(desk['cards'].items()):
-    d=pc.get('defer') or {}
-    if not d.get('trigger','').startswith('deployed:') or cid in seen_ids or pc.get('closed'): continue
-    ref=pc.get('ref') or cid.split(':',1)[-1]; r=byref.get(ref) or {}; t=state.get(ref,{})
-    try: prn=int(d['trigger'].split(':')[2])
-    except Exception: prn=None
-    if SCOPE and not in_scope({'id':cid,'ref':ref,'pr':prn}): continue   # a rebuilt card honours --tenant / --today like every other
-    lvl,_=impact_of(ref)
-    add({'id':cid,'ref':ref,'lane':'NOTIFY','mins':3,'impact':lvl,'age':age_days((d.get('since') or today)+'T00:00:00Z'),'waits':'customer',
-         'pr':prn,'task':None,'thread':r.get('id') or t.get('threadId'),'url':None,
-         'status':f"release pending: {d['trigger']}",'note':(r.get('title') or '')[:200],'rebuilt':True,   # synthetic caption: never voids the bound deferral (T-119, 2026-09-15)
-         'act':d.get('act') or f"Release landed (PR #{prn}): tell {ref}, then close the thread",
-         'score':round((IMPACT.get(lvl,1)+3)/3*10,1)})
-
 # ---------------------------------------------------------------- source 7c: TODO threads nobody owns (OWE, 2026-10-12)
 # Tobias 2026-10-12: nineteen TODO threads sat off the desk because no source made a card for them: graded
 # ready-for-human / needs-info / in the loop queue / never swept, no loop entry, not opened today, not pinned.
@@ -1095,7 +1069,7 @@ for cid,pc in list(desk['cards'].items()):
 try:
     _carded={c.get('ref') for c in cards}|{x['ref'] for x in desk.get('pins',[])}
     # a thread whose card (today:/fast:/owe:/gap:) got its verb today stays off until tomorrow; today's threads have their own cards
-    _carded|={cid.split(':')[-1] for cid,pc in desk['cards'].items() if (pc.get('closed') or {}).get('date')==today}
+    _carded|={k.split(':',1)[-1] for k,h in desk.get('holds',{}).items() if ((h or {}).get('closed') or {}).get('date')==today}
     _carded|=set(TODAY_NEW)|set(TODAY_ANSWERED)
     for bucket,minage,base in (('D',0,60),('E',0,70),('J',0,55),('F',7,25)):
         sec=re.search(r'^## '+bucket+r'\..*?$(.*?)(?=^## |\Z)',gap_md,re.S|re.M)
@@ -1111,12 +1085,12 @@ try:
             why={'D':'ready-for-human, nobody listed it','E':'bot stalled (needs-triage), claim it here','J':'never swept','F':'needs-info, customer silent'}[bucket]
             add({'id':f'owe:{ref}','ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':age,'waits':'customer',
                  'pr':None,'task':None,'thread':tid,'url':url,
-                 'status':f"{why}: {st[:50]}",'note':title[:200],
+                 'status':f"{why}: {st[:50]}",'note':title[:200],'since':f"{bucket}:{st}",
                  'act':f"{ref} ({title[:60]}): {why}. Claim + validate, draft the reply, or hand it to a worker",
                  'score':base+IMPACT.get(lvl,1)+min(age,10)})
             _carded.add(ref)
 except Exception as _e:
-    if os.environ.get('DESK_DEBUG'): print(f"owe source failed: {_e}",file=sys.stderr)
+    failed_sources.append(('owe source',str(_e)[:160]))
 
 
 # ---------------------------------------------------------------- source 8: pinned refs (FAST lane)
@@ -1132,7 +1106,7 @@ for a in sys.argv[1:]:
         desk['pins'].append({'ref':f'{m.group(1).upper()}-{m.group(2)}','since':today})
     # 2026-10-06: a ref given again after its card got a verb is a re-pin (T-128 was dropped, then pinned once more
     # the same minute); clear the closure so the pin source below does not skip it.
-    if m: desk['cards'].get(f"fast:{m.group(1).upper()}-{m.group(2)}",{}).pop('closed',None)
+    if m: desk.get('holds',{}).get(f"pin:{m.group(1).upper()}-{m.group(2)}",{}).pop('closed',None)
 if '--unpin' in sys.argv:
     i=sys.argv.index('--unpin'); u=(sys.argv[i+1] if i+1<len(sys.argv) else '').upper()
     desk['pins']=[x for x in desk['pins'] if x['ref']!=u]
@@ -1142,7 +1116,7 @@ def plain_thread_by_ref(ref):
 keep=[]
 for i,pin in enumerate(desk['pins']):
     ref=pin['ref']; cid=f'fast:{ref}'
-    if desk['cards'].get(cid,{}).get('closed'): continue   # got its verb: unpinned
+    if desk.get('holds',{}).get(f'pin:{ref}',{}).get('closed'): continue   # got its verb: unpinned
     keep.append(pin)
     t=state.get(ref,{}); r=byref.get(ref); tid=(r or {}).get('id') or t.get('threadId'); title=(r or {}).get('title') or ''
     lvl='P2'; facts=[]
@@ -1166,7 +1140,7 @@ for i,pin in enumerate(desk['pins']):
             if ref in (tt.get('note') or '')+(tt.get('status') or ''): facts.append(f'loop entry {tref}: {(tt.get("status") or "")[:40]}'); break
         facts.append('read the ticket with notion-fetch in the session')
     if t: facts.append(f"loop {t.get('phase')}: {(t.get('status') or '')[:50]}")
-    add({'id':cid,'ref':ref,'lane':'FAST','decided':bool(pin.get('decision')),'mins':10,'impact':lvl,'age':age_days(pin.get('since','')+'T00:00:00Z'),'waits':'customer',
+    add({'id':cid,'ref':ref,'lane':'FAST','decided':bool(pin.get('decision')),'mins':10,'impact':lvl,'age':age_days(pin.get('since','')+'T00:00:00Z'),'waits':'customer','key':f'pin:{ref}','since':f"pin:{pin.get('since','')}",
          'pr':t.get('pr'),'task':None,'thread':tid,'url':None if tid else (f'https://www.notion.so/search?q={ref}' if ref.startswith('ORB-') else None),
          'status':'; '.join(facts)[:300],'note':title[:200],
          'act':(f"Decided {pin.get('since','')}: {pin['decision']}" if pin.get('decision') else f"Fast-track {ref}{(': '+title[:60]) if title else ''}: claim it, validate, draft the reply or hand it to a worker"),
@@ -1186,7 +1160,7 @@ for r in (_runs[-1:] if _runs else []):
     except Exception: nbugs=0
     if r['status']=='paused':
         add({'id':f"sweep:{r['runId']}",'ref':f"sweep {r['date']}",'lane':'SWEEP','mins':10,'impact':'P1','age':age,'waits':'person','pr':None,'thread':None,'url':r['page'] or None,
-             'status':f"paused at the fix pass since {r['date']}; {nbugs} fixable bugs, {len(decs)} open decisions",'note':r['report'],
+             'status':f"paused at the fix pass since {r['date']}; {nbugs} fixable bugs, {len(decs)} open decisions",'note':r['report'],'since':f"paused:{r['date']}",
              'act':f"Pick the fixes from the {r['date']} sweep (bucket 2 rows, resolve list, SHOP-77 reopen) and resume its fix pass in this session",
              'score':round((IMPACT['P1']+2+min(age,6))/10*10,1)})
     for d in decs:
@@ -1194,7 +1168,7 @@ for r in (_runs[-1:] if _runs else []):
         mine=('Tobias' in d['owners']) or not d['owners']
         if mine:
             add({'id':f"sweep-decision:{r['runId']}:{d['id']}",'ref':f"{d['id']} ({r['date']})",'lane':'SWEEP','mins':2,'impact':'P1','age':age,'waits':'person','pr':None,'thread':None,'url':r['page'] or None,
-                 'status':f"{d['id']}: {d['title'][:60]}",'note':d['text'][:300]+(f" (also @{', @'.join(others)})" if others else ''),
+                 'status':f"{d['id']}: {d['title'][:60]}",'note':d['text'][:300]+(f" (also @{', @'.join(others)})" if others else ''),'since':d['id'],
                  'act':f"Decide {d['id']} from the {r['date']} sweep: {d['title'][:80]}",'score':round((IMPACT['P1']+2+min(age,6))/2*10,1)})
 # 2026-09-16 (Tobias): the sweep's ticket files are the "bugs to be fixed" that got lost. Every ticket of the newest run
 # under ~/orbit-scratch/sentry-sweep-<date>/issues/NN-*.md with `Status: needs-triage|ready-for-agent` that no decision
@@ -1213,7 +1187,7 @@ for r in (_runs[-1:] if _runs else []):
         nn=os.path.basename(f)[:2]; title=(re.search(r'^#\s*(.+)$',head,re.M) or [None,os.path.basename(f)])[1]
         age=age_days(r['date']+'T00:00:00Z')
         add({'id':f"sweep-ticket:{r['date']}:{nn}",'ref':f"sweep ticket {nn} ({r['date']})",'lane':'RUN','mins':3,'impact':'P2','age':age,'waits':'nobody','pr':None,'thread':None,'url':None,
-             'status':f"sweep ticket {nn}: {title[:60]} (owner: {owner or 'unassigned'})",'note':f,
+             'status':f"sweep ticket {nn}: {title[:60]} (owner: {owner or 'unassigned'})",'note':f,'since':st,
              'act':f"Sweep ticket {nn} from {r['date']} has no owner and no PR: hand it to a worker, ticket it in Notion, or drop it",
              'score':round((IMPACT['P2']+1+min(age,6))/2*10,1)})
 
@@ -1270,7 +1244,7 @@ if not SCOPE:
             add({'id':f"local:{feat}:{nn}",'ref':f"{feat}/{nn}",'lane':'TICKET','mins':1 if kind_key=='local-agent' else 2,'impact':lvl,'age':age,'waits':'nobody' if kind_key=='local-agent' else 'person',
                  'pr':(prs[-1] if human and prs else None),'task':None,'thread':None,'url':None,'kind':kind_key,
                  'status':f"{head_word} · {st[:60]}"+(f" · from {tref}" if tref else '')+(f" · owner: {owner[:30]}" if human and owner else ''),
-                 'note':title[:200],
+                 'note':title[:200],'since':st,
                  'act':act+f" · {f.replace(HOME,'~')}",
                  'score':round((IMPACT.get(lvl,1)+1+min(age/14,3))/3*10,1)})
 
@@ -1288,7 +1262,7 @@ if not SCOPE:
             add({'id':f"ticket:{t['id']}",'ref':f"ORB-{t['id']}",'lane':'TICKET','mins':1,'impact':t.get('impact') or 'P2','age':t['age'],'waits':'nobody',
                  'pr':None,'task':None,'thread':(t['threads'][0]['threadId'] if t['threads'] else None),'url':t.get('url'),
                  'status':f"{t['status']} · {t['age']}d · {'no sprint' if not t.get('sprint') else 'Kanban'} · unassigned"+(f" · from {', '.join(r['ref'] for r in t['threads'])}" if t['threads'] else ''),
-                 'note':t['title'][:200],
+                 'note':t['title'][:200],'since':f"{t['status']}|{'sprint' if t.get('sprint') else 'no sprint'}",
                  'act':f"ORB-{t['id']} ({t['title'][:60]}) idles {t['age']}d: push it (ask {deskconfig.TICKET_OWNER} / assign), hand it to an agent, or archive it",
                  'score':round((IMPACT.get(t.get('impact') or '',1)+1+min(t['age']/14,3))/3*10,1)})
         for t in _tc['shippedUntold']:
@@ -1298,11 +1272,11 @@ if not SCOPE:
             ref=refs[0]; thr=next((r for r in t['threads'] if r['ref']==ref),{})
             add({'id':f"ticket-done:{t['id']}",'ref':ref,'lane':'NOTIFY','mins':3,'impact':t.get('impact') or 'P2','age':age_days(t.get('completedAt') or t.get('createdAt') or ''),'waits':'customer',
                  'pr':None,'task':None,'thread':thr.get('threadId'),'url':t.get('url'),
-                 'status':f"ORB-{t['id']} {t['status']}, thread {thr.get('status','')}: customer not told",'note':t['title'][:200],
+                 'status':f"ORB-{t['id']} {t['status']}, thread {thr.get('status','')}: customer not told",'note':t['title'][:200],'since':f"{t['status']}|{thr.get('status','')}",
                  'act':f"ORB-{t['id']} is {t['status']} ({t['title'][:50]}): tell the {ref} customer where it stands"+(", then close the thread" if t['status']!='Staging Released' else " (staging now, production with the next release)"),
                  'score':round((IMPACT.get(t.get('impact') or '',1)+3+1)/3*10,1)})
     except Exception as _e:
-        if os.environ.get('DESK_DEBUG'): print(f"tickets failed: {_e}",file=sys.stderr)
+        failed_sources.append(('tickets',str(_e)[:160]))
 
 # ---------------------------------------------------------------- source 1b: a PR's departures go back onto the Notion ticket (2026-10-07)
 # From the /deliver comparison (Leo's skill records a departure in the ticket and in a comment on it). Our launchpad workers
@@ -1344,7 +1318,7 @@ if not SCOPE:
         h=_hl.sha1(sec.encode()).hexdigest()[:8]
         add({'id':f'notion:{ref}','ref':ref,'lane':'RUN','mins':2,'impact':impact_of(ref)[0],'age':age_days(t.get('updated') or ''),'waits':'person',
              'pr':t['pr'],'task':t.get('task'),'workspace':None,'host':None,'terminal':None,'thread':None,'url':f'https://github.com/{ORBIT}/pull/{t["pr"]}',
-             'status':f"#{t['pr']} departures {h}",'note':sec[:400],'section':sec,
+             'status':f"#{t['pr']} departures {h}",'note':sec[:400],'section':sec,'since':h,
              'act':(f"File the follow-up ticket from PR #{t['pr']}'s body in Notion (notion-create-pages, Tasks data source, duplicate check first), then write the ORB id into the PR body" if 'Follow-up ticket' in sec else
                     f"Post PR #{t['pr']}'s departures onto the Notion ticket {ref} as a comment (notion-create-comment) and set its PR link"),
              'score':round((impact_of(ref)[1]+2)/2*10,1)})
@@ -1359,11 +1333,11 @@ if memory and not SCOPE:
         _ms=memory.queue_status()
         if _ms['queued'] and not _ms['openPr'] and (_ms['queued']>=MEMORY_PR_MIN or _ms['age']>=MEMORY_PR_AGE_DAYS):
             add({'id':'memory:pr','ref':'memory','lane':'RUN','mins':2,'impact':'P2','age':_ms['age'],'waits':'nobody','pr':None,'task':None,'thread':None,'url':None,
-                 'status':f"{_ms['queued']} queued for {', '.join(_ms['tenants'])}; oldest {_ms['oldest']}",'note':'',
+                 'status':f"{_ms['queued']} queued for {', '.join(_ms['tenants'])}; oldest {_ms['oldest']}",'note':'','since':f"queue:{_ms['queued']}",
                  'act':f"Open the orbot support-memory PR with the {_ms['queued']} facts you okayed ({', '.join(_ms['tenants'])}): python3 ~/orbit-scratch/desk/memory.py pr",
                  'score':round((2+0+min(_ms['age']/3,2))/2*10,1)})
     except Exception as _e:
-        if os.environ.get('DESK_DEBUG'): print(f"memory queue failed: {_e}",file=sys.stderr)
+        failed_sources.append(('memory queue',str(_e)[:160]))
 
 # ---------------------------------------------------------------- 9d. local tasks (Tobias, 2026-10-09)
 # Work with no Plain thread, no PR and no Notion ticket (a help-center sweep, a cleanup) still belongs on the desk.
@@ -1379,9 +1353,30 @@ if not SCOPE:
         if _t.get('done'): continue
         _age=age_days(_t.get('since','')+'T00:00:00Z'); _steps=_t.get('steps') or []
         add({'id':f"task:{_t['id']}",'ref':_t['id'][:24],'lane':'TASK','mins':_t.get('mins',10),'impact':_t.get('impact') or 'P2','age':_age,'waits':'nobody',
-             'pr':None,'task':None,'thread':None,'url':None,'status':_t['title'][:300],'note':'; '.join(_steps)[:200],
+             'pr':None,'task':None,'thread':None,'url':None,'status':_t['title'][:300],'note':'; '.join(_steps)[:200],'since':_t['title'],
              'act':f"{_t['title']}"+(f" ({len(_steps)} steps)" if _steps else '')+f": start it, hand it to an agent, or drop it (task.py show {_t['id']})",
              'score':round(20+min(_age,10),1)})
+
+# ---------------------------------------------------------------- source 7b: release deferrals without a live card
+# Runs after every source (2026-10-22: it ran before the task source and rebuilt a task's hold as a second card).
+# A card parked on deployed:<env>:<pr> must outlive its loop entry (the housekeeper drops done entries): when no
+# source produced the card this run, rebuild it from the deferral so the release check still runs and the board
+# release section still lists it. Tobias, 2026-09-10: bucket B lands on the board by default and resurfaces on release.
+seen_keys={c['key'] for c in cards}
+for key,h in list(desk.get('holds',{}).items()):
+    d=(h or {}).get('defer') or {}
+    if not d.get('trigger','').startswith('deployed:') or key in seen_keys or (h or {}).get('closed'): continue
+    cid=d.get('id') or f"notify:{key.split(':',1)[-1]}"; pc=desk['cards'].get(cid,{})
+    ref=pc.get('ref') or key.split(':',1)[-1]; r=byref.get(ref) or {}; t=state.get(ref,{})
+    try: prn=int(d['trigger'].split(':')[2])
+    except Exception: prn=None
+    if SCOPE and not in_scope({'id':cid,'ref':ref,'pr':prn}): continue   # a rebuilt card honours --tenant / --today like every other
+    lvl,_=impact_of(ref)
+    add({'id':cid,'ref':ref,'lane':'NOTIFY','mins':3,'impact':lvl,'age':age_days((d.get('since') or today)+'T00:00:00Z'),'waits':'customer',
+         'pr':prn,'task':None,'thread':r.get('id') or t.get('threadId'),'url':None,
+         'status':f"release pending: {d['trigger']}",'note':(r.get('title') or '')[:200],'rebuilt':True,'key':key,'since':d.get('since_wait',d.get('status')),   # synthetic caption: never voids the bound deferral (T-119, 2026-09-15)
+         'act':d.get('act') or f"Release landed (PR #{prn}): tell {ref}, then close the thread",
+         'score':round((IMPACT.get(lvl,1)+3)/3*10,1)})
 
 # ---------------------------------------------------------------- batches
 def batch(lane,key=lambda c:'all',title=None,mins_each=1,waits='agent',act=None,pred=lambda c:True):
@@ -1395,30 +1390,40 @@ def batch(lane,key=lambda c:'all',title=None,mins_each=1,waits='agent',act=None,
               'age':max(c['age'] for c in cs),'waits':waits,'pr':one['pr'] if one else None,'thread':one['thread'] if one else None,'url':(one or {}).get('url'),
               'members':[{k2:c.get(k2) for k2 in ('ref','pr','task','workspace','host','terminal','thread','status','act','url','staged','picker','question','prefilled','screen')} for c in cs],
               'status':'; '.join(f"{c['ref']}: {c['status'][:40]}" for c in cs)[:300],'note':'','act':(one['act'] if one else (act or title).format(n=len(cs),k=k)),'score':max(c['score'] for c in cs)}
+        best=max(cs,key=lambda c:c['score']); card['tier']=best.get('tier'); card['base']=best.get('base')
         add(card)
-# 2026-09-18 (Tobias): "put the decisions on the top of my desk". desk.json "top" is an ordered list of card ids that
-# rank above everything, pins included (2000-i). It runs BEFORE the batches so a batch inherits the lift.
-# An id that matches no live card does nothing, so an answered decision drops out by itself; parked cards stay parked.
-for c in cards:
-    if c['score']<0: continue
-    if c.get('ref') in TODAY_NEW: c['score']=deskevent.lift_new(c['score'])
-    elif c.get('ref') in TODAY_ANSWERED: c['score']=deskevent.lift_answered(c['score'])
-# 2026-10-20 (Tobias: "when something waits for me, like a babysat PR that needs input, put it higher up or even first;
-# my PRs sit stuck for a long time"): a card where an agent or a PR stopped for a person gets its own bracket, 100 plus
-# the base score, above every card that waits on nobody and above customer cards without an event today, under today's
-# customer events (1700+) and desk.json top (2000+). Before this a REVIEW card scored 3 (15 minutes divide it) and sat
-# under help-center tasks at 20. The SEND batch inherits the bracket from its members; the bottom list still sinks a card.
-WAITS_ON_ME={'SEND','REVIEW','INBOX','STUCK'}
-for c in cards:
-    if 0<=c['score']<100 and c['lane'] in WAITS_ON_ME: c['score']=round(100+c['score'],1)
+        if card.get('holdCheck') or card.get('released'): rank(card)   # a batch's own fired hold ranks the batch
+# ---------------------------------------------------------------- rank (2026-10-22: tiers, no minutes divisor)
+# Before: base = (impact + who-waits + age) / minutes x 10, then hand-set brackets on top (today 1700/1800, waits-on-me
+# 100+, pins 1000, fired 900, top 2000, bottom 0.5). The divisor put a 15-minute review at 3 under a 2-minute task at 20
+# (2026-10-20) and every bracket was a patch on it. Now a card ranks in a tier, in order: desk.json top (2026-09-18:
+# "put the decisions on the top of my desk") · a thread opened today · a customer message today (2026-10-09) · a pin
+# (2026-09-10) · a hold that fired (a release, an answer) · an agent or a PR stopped for the person (SEND, REVIEW,
+# INBOX, STUCK; 2026-10-20) · a customer waits · a person waits · nobody waits · desk.json bottom (2026-10-15). Inside a
+# tier: impact, then age (capped), then a source's own nudge (deskhold.base_score). A batch takes its best member's tier
+# and base; the brackets run before the batches so a batch inherits them. Minutes stay on the card for the pane only.
+def rank(c):
+    if c.get('score',0)<0: return
+    if c.get('holdCheck'): tier='person'
+    elif c.get('released') or c.get('tier')=='fired': tier='fired'
+    else: tier=deskhold.tier_of(c,TODAY_NEW,TODAY_ANSWERED,desk.get('top',[]),desk.get('bottom',[]))
+    c['tier']=tier
+    c['base']=deskhold.base_score(c.get('impact'),c.get('age'),c.get('bonus',0))
+    c['score']=deskhold.score(tier,c['base'])
+for c in cards: rank(c)
+# desk.json top keeps its list order; bottom its reverse (2026-10-15: "put this task last in the queue")
 for _i,_cid in enumerate(desk.get('top',[])):
     for c in cards:
-        if c['id']==_cid and c['score']>=0: c['score']=2000-_i
-# desk.json "bottom": the mirror of "top" (Tobias, 2026-10-15: "put this task last in the queue"). A listed card stays
-# live but ranks under everything else, in list order; a card that gets its verb leaves the list with the next close.
+        if c['id']==_cid and c['score']>=0: c['score']=deskhold.score('top',999-_i)
 for _i,_cid in enumerate(desk.get('bottom',[])):
     for c in cards:
-        if c['id']==_cid and c['score']>=0: c['score']=round(0.5-_i*0.001,3)
+        if c['id']==_cid and c['score']>=0: c['score']=deskhold.score('bottom',999-_i)
+# 2026-10-22: a source that failed is one card in the person's bracket, not missing cards (class D of the deep dive)
+for _name,_err in failed_sources:
+    _c={'id':f'source:{_name}','ref':f'source {_name}','lane':'RUN','mins':2,'impact':'P1','age':0,'waits':'person','pr':None,'task':None,'thread':None,'url':None,
+        'status':f'source {_name} failed: {_err[:80]}','note':_err,'since':today,'bonus':50,
+        'act':f"The desk source '{_name}' failed this run ({_err[:100]}): its cards are missing until it runs again. Fix it or drop this for today",'score':0}
+    add(_c); rank(_c)
 batch('SEND',act='Go through the {n} lines you typed but never sent: send / edit / drop each',mins_each=1,waits='agent')
 batch('TICKET',act='Work through the {n} follow-up tickets we filed that nobody moves: push, hand to an agent, or archive each',mins_each=1,waits='nobody',pred=lambda c:not c.get('kind'))
 batch('TICKET',key=lambda c:'local-agent',act='Hand the {n} local tickets with a ready brief to workers, ticket them in Notion, or drop them',mins_each=1,waits='nobody',pred=lambda c:c.get('kind')=='local-agent')
@@ -1446,8 +1451,14 @@ if memory:
 
 # ---------------------------------------------------------------- persist
 for c in cards:
-    desk['cards'][c['id']]={**desk['cards'].get(c['id'],{}),'seen':c['seen'],'lastSeen':today,'lane':c['lane'],'act':c['act'],'ref':c['ref'],'status':c.get('status')}
-    if c.get('deferred'): desk['cards'][c['id']]['defer']=c['deferred']
+    desk['cards'][c['id']]={**desk['cards'].get(c['id'],{}),'seen':c['seen'],'lastSeen':today,'lane':c['lane'],'act':c['act'],'ref':c['ref'],'status':c.get('status'),'key':c.get('key'),'since':c.get('since')}
+    if c.get('deferred'): desk.setdefault('holds',{}).setdefault(c['key'],{})['defer']=c['deferred']
+# 2026-10-22: a top or bottom id that matched no live card for seven days is stale (five sweep decisions from 18 Sep sat in top)
+def _stale(cid):
+    ls=desk['cards'].get(cid,{}).get('lastSeen')
+    return not ls or age_days(ls+'T00:00:00Z')>7
+for _k in ('top','bottom'):
+    if desk.get(_k): desk[_k]=[i for i in desk[_k] if not _stale(i)]
 _seen=set(); release_watch=[r for r in release_watch if not ((r['ref'],r['pr'],r['env']) in _seen or _seen.add((r['ref'],r['pr'],r['env'])))]
 if not SCOPE: json.dump({'generatedAt':now.isoformat(),'rows':release_watch},open(f'{DESK}/release-watch.json','w'),indent=1,ensure_ascii=False)   # a tenant sitting sees a subset; the board files stay whole
 import fcntl

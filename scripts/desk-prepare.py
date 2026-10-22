@@ -174,6 +174,10 @@ def holder_block(t, rows):
 
 
 def fingerprint(card):
+    """The wait the brief is written for (2026-10-22: key + since, so an age tick or a reworded act does not rebuild a
+    brief; a card without a key, from an older gather, binds to its caption as before)."""
+    if card.get('key'):
+        return hashlib.sha1(f"{card['key']}|{card.get('since') or ''}|{card.get('lane') or ''}".encode()).hexdigest()[:12]
     return hashlib.sha1(f"{card.get('status') or ''}|{card.get('act') or ''}".encode()).hexdigest()[:12]
 
 
@@ -312,7 +316,7 @@ def prepare(card, dry=False):
         options.sort(key=lambda o: o['label'] != 'Send it')
     brief = {
         'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'fingerprint': fingerprint(card),
-        'status': card.get('status'), 'act': card.get('act'),
+        'status': card.get('status'), 'act': card.get('act'), 'key': card.get('key'), 'since': card.get('since'),
         'why': so.get('why', ''), 'decide': so.get('decide', ''), 'then': so.get('then', ''),
         'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options,
         'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),

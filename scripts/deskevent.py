@@ -19,7 +19,7 @@ Event types:
 DESK_DIR overrides ~/orbit-scratch/desk, so a test runs against a copy and never touches the live files.
 """
 import datetime, fcntl, json, os, re, sys, zoneinfo
-import deskconfig
+import deskconfig, deskhold
 
 DESK = os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk')
 LOOP = os.path.expanduser('~/orbit-scratch/agent-loop')
@@ -28,7 +28,7 @@ BERLIN = zoneinfo.ZoneInfo('Europe/Berlin')
 GATHER_LOCK_S = 3 * 60   # the pane's .gather marker counts this long (register.tsx GATHER_LOCK_MS)
 STALE_RUN = 75           # same exit as desk.py when a run must not write: the caller tries again
 
-IMPACT = {'P0': 8, 'RBP': 6, 'RBS': 5, 'P1': 4, 'P2': 2}
+IMPACT = deskhold.IMPACT
 READINESS_ACT = {
     'ready-for-agent': 'validate the Hermes brief and hand it to a worker (the loop never picked it up)',
     'ready-for-human': 'read the Hermes brief, then draft the reply or take the decision it waits on',
@@ -41,20 +41,16 @@ THREAD_PREFIXES = ('today:', 'tenant:', 'owe:')   # cards built from the TODO th
 
 
 def fast_score(lvl, who, age):
-    """The score fast_thread_cards gives a thread card before the lift."""
-    return round((IMPACT.get(lvl, 1) + {'customer': 3, 'person': 2, 'nobody': 0}[who] + min(age / 3, 2)) / 10 * 10, 1)
-
-
-def lift_new(score): return round(1800 + min(score, 99) / 100, 2)        # a thread opened today
-def lift_answered(score): return round(1700 + min(score, 99) / 100, 2)   # a customer message today
+    """The score fast_thread_cards gives a thread card: the customer tier with the card's base (deskhold)."""
+    return deskhold.score({'customer': 'customer', 'person': 'person', 'nobody': 'nobody'}.get(who, 'nobody'), deskhold.base_score(lvl, age))
 
 
 def relift(score, new):
-    """The lift a live card gets from a live event, never a step down: desk.json top (2000+) and a card already in
-    the bracket keep their score; a 1700 card whose thread turns out to be new moves up with its base score."""
-    if score >= 2000 or score >= (1800 if new else 1700): return score
-    if score >= 1700: return lift_new(round((score - 1700) * 100, 2))
-    return (lift_new if new else lift_answered)(score)
+    """The tier a live card gets from a live event, never a step down: desk.json top and a card already in the tier
+    keep their score; a card in the answered tier whose thread turns out to be new moves up with its base."""
+    tier = deskhold.TIER['new' if new else 'answered']
+    if score >= deskhold.TIER['top'] * 1000 or score >= tier * 1000: return score
+    return deskhold.score('new' if new else 'answered', int(score) % 1000)
 
 
 def parse_iso(iso):
@@ -121,8 +117,7 @@ def _hm(iso):
 def apply(ev, now=None):
     """Apply one event. Returns (exit code, one line for stdout)."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    today_utc = now.strftime('%Y-%m-%d')
-    today = now.astimezone(BERLIN).strftime('%Y-%m-%d')
+    today = now.astimezone(BERLIN).strftime('%Y-%m-%d')   # the desk's one clock (deskhold.today_berlin)
     kind = ev.get('type') or ''
     if kind not in ('thread.created', 'thread.customer_message', 'thread.status_changed', 'thread.fields_changed',
                     'luna.reply_sent', 'triage.writeback_done'):
@@ -147,7 +142,8 @@ def apply(ev, now=None):
     if not isinstance(data, dict) or 'cards' not in data:
         return 0, 'skip: no cards.json yet, the full gather writes the first one'
     live, parked = data['cards'], data.get('parked') or []
-    desk = load(f'{DESK}/desk.json', {}).get('cards', {})
+    deskfile = load(f'{DESK}/desk.json', {})
+    deskhold.migrate(deskfile)   # read-only here: the gather writes the migrated file
     scope = data.get('scope') or ''
     prefix = 'tenant' if scope.startswith('tenant ') else 'today'
     if prefix == 'tenant' and ev.get('tenantId') and scope != f"tenant {ev['tenantId']}":
@@ -163,25 +159,23 @@ def apply(ev, now=None):
         return {'id': cid, 'ref': ref, 'lane': 'FAST', 'mins': 10, 'impact': lvl, 'age': 0, 'waits': 'customer',
                 'pr': None, 'task': None, 'thread': thread or None, 'url': plain_link(thread) if thread else None,
                 'status': caption(status, customer_at, opened_at),
+                'since': f"{status or 'TODO'}|{customer_at or ''}",   # the same wait fast_thread_cards builds
                 'note': (title[:120] + ' · ' + f"{rd}; owner nobody")[:300],
                 'act': f"{ref} ({title[:60]}, {email}): {READINESS_ACT.get(rd, READINESS_ACT['needs-triage'])}",
                 'score': fast_score(lvl, 'customer', 0), 'seen': 1, 'live': kind}
 
     def held(card):
-        """desk.json still holds this card: closed on this caption today, or deferred on this caption."""
-        prev = desk.get(card['id']) or {}
-        cl = prev.get('closed') or {}
-        if cl and (cl.get('status') == card['status'] or (cl.get('status') is None and cl.get('date') == today_utc)): return 'closed'
-        d = prev.get('defer') or {}
-        if d and (d.get('status') is None or d.get('status') == card['status']): return 'parked'
-        return None
+        """desk.json still holds this wait: closed on this occurrence, or parked on it (deskhold, the one hold)."""
+        card['key'] = deskhold.key_of(card); card['since'] = deskhold.since_of(card)
+        h = deskhold.hold(deskfile, card, today)
+        return h[0] if h and h[0] in ('closed', 'parked') else None
 
     def waiting_card(new):
         """The card unanswered_cards() in desk.py makes: the customer's message is the newest one, so a loop entry,
         a worker or another card of the thread hides nothing."""
         card = thread_card(at, at if new else None, ev.get('status') or 'TODO')
         card['act'] = f"{ref} ({title[:60]}, {email}): customer waits for a first answer since {_hm(at)}: draft the reply"
-        card['unanswered'] = at
+        card['unanswered'] = at; card['key'] = f'unanswered:{ref}'; card['since'] = at
         why = held(card)
         if why:
             out.append(f"skip: {cid} is {why} on this caption"); return
@@ -216,7 +210,7 @@ def apply(ev, now=None):
                     hold['status'] = f"customer answered {at[:16]}Z (live)"
                     hold['act'] = (hold.get('act') or '') + f" (hold was: {trig[7:][:60]})"
                     hold['lane'] = 'REPLY' if hold['lane'] in ('STALE', 'NOTIFY', 'RUN', 'PROMISE') else hold['lane']
-                    hold['score'] = 900; hold['released'] = True; hold.pop('deferred', None); hold['live'] = kind
+                    hold['score'] = deskhold.score('fired', int(hold.get('base') or 0)); hold['released'] = True; hold.pop('deferred', None); hold['live'] = kind
                     live.append(hold); out.append(f"{hold['id']} released from its manual hold")
                 else:
                     out.append(f"{hold['id']} stays parked ({trig[:40] or 'hold'}); the full gather decides")

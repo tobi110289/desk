@@ -38,7 +38,24 @@ Since 2026-10-08 the desk mod records verbs: every `desk-close.py <id> <verb> "<
 
 The desk never waits on a dispatched run. Their output lands as cards in the next sitting (newly blocked loop entries; harvested issues wait on GitHub). A dispatched agent has no MCP servers: the loop uses its GraphQL curl path for Plain, the harvest needs only `gh`.
 
-Score = (impact weight + who-waits weight + age weight, age capped at six days) ÷ minutes × 10. Impact: P0 8, RBP 6, RBS 5, P1 4, P2 2. Who waits: customer 3, person 2, agent 2, nobody 0. Cheap, high-value cards float; a batch scores like its most urgent member and costs the sum of its members. A card where an agent or a PR stopped for the person (SEND, REVIEW, INBOX, STUCK) ranks in its own bracket, 100 plus its score: above every card that waits on nobody and above customer cards without an event today, under today's customer events and the top list (2026-10-20: a PR that asked for a human sat at 3, under tasks at 20).
+Rank (2026-10-22): a card sits in a tier, and inside the tier impact, then age (capped at 30 days), then a source's own nudge order it (`deskhold.base_score`; score = tier × 1000 + base). The tiers, top first: desk.json `top` · a thread opened today · a customer message today · a pin · a hold that fired (a release landed, an answer came, a hold check is due) · an agent or a PR stopped for the person (SEND, REVIEW, INBOX, STUCK) · a customer waits · a person waits · nobody waits · desk.json `bottom`. Minutes no longer divide the score (a 15-minute review sat at 3 under a 2-minute task at 20); they stay on the card for the pane. A batch takes its best member's tier and base. A `top` or `bottom` id that matched no live card for seven days leaves the list.
+
+## Holds: closed, parked, live (`deskhold.py`, 2026-10-22)
+
+Every card names its wait: `key` (`<kind>:<entity>`: the kind of wait and the thread, PR or source id, so nine card prefixes on one thread share a key when they describe the same wait; a loop entry is one wait, `loop:<ref>`, whatever lane its caption lands in) and `since` (the fact that started this occurrence: the customer's message time, HORST's approval, the deploy, the loop caption, the file's Status line). The display text is free to carry anything; nothing binds to it. desk.json keeps `holds[key]`.
+
+- A **close** (do, decide, delegate) holds while the wait's `since` is the one it was closed with. A new customer message, a new caption, a new HORST round is a new wait and the card comes back.
+- A **drop** holds every wait of the entity for the day (a thread dropped as `today:` does not come back as `promise:` within the hour). A pin (`fast:`) still wins.
+- A **defer** holds while `since` is unchanged and until its trigger fires. The triggers below are checked on every gather. A trigger nothing can check (`manual:`, free text) fires by itself on a customer message newer than the hold, and after seven days of silence it comes back as a **hold check** (`hold check: Nd on '<trigger>'`, the person tier): defer again to keep the hold, or act. Nothing waits unseen for weeks any more (2026-10-22: 14 of 21 parked holds were manual, 8 older than two weeks).
+- A **batch** binds to its member set: a new member reopens a closed batch and voids its hold; a member's changed text or age does not.
+- A loop card and its thread's reply card (`gap:`) share a hold while both are bound to the same caption; a caption written in the same call as a close (`--caption`) rebinds every hold of the thread to the new caption.
+- Records written before 2026-10-22 were moved into `holds` by key; a closure from then holds on its old display text, a deferral adopts the card's `since` the first time it matches.
+
+The one clock is the Europe/Berlin day (the gather, the close script and the live feed; the gather used UTC before and a drop after Berlin midnight counted for the wrong day). The close script writes the verb into the card in cards.json, so the pane shows it without a copy of the hold logic.
+
+A source that throws is one RUN card `source:<name>` in the person tier (the Plain reads, the PR health, the screens, the tickets, the todo-gap page, the memory queue): its cards are missing until it runs again, and the card says so. Before this a failed source was silence.
+
+The Plain-heavy sources (deploy notes, promises, the day's threads, the todo-gap page) are cached for 20 minutes in `desk/cache/`; the live feed moves the pane between two reads; `desk.py --fresh` (the pane's forced gather) reads everything again.
 
 ## A brief, not a draft
 

@@ -434,38 +434,29 @@ const linksOf = (card: Raw): DeskLink[] => {
   return links;
 };
 
-// A closure counts only while the card's status is the one it was closed with: desk.py reopens a single card on a new
-// caption (2026-10-19: a thread came back as "customer waits for a first answer" and the pane still showed it as ✓ do).
-const verbOf = (
-  entry: Raw | undefined,
-  today: string,
-  status: string,
-): string | null => {
-  const closed = entry?.closed as Raw | undefined;
-  const defer = entry?.defer as Raw | undefined;
-
-  if (closed?.date === today) {
-    const was = closed.status;
-    if (typeof was !== "string" || was === status) {
-      return text(closed.verb) || "do";
-    }
-  }
-
-  return defer?.since === today ? "defer" : null;
+// 2026-10-22: the pane holds no copy of the hold logic. desk-close.py writes the verb into the card in cards.json, and
+// the next gather removes the card; until then the card shows its verb. (Before this the pane recomputed the closure
+// from desk.json and drifted from the gather: 2026-10-19 a reopened card still showed ✓ do.)
+const verbOf = (card: Raw): string | null => {
+  const verb = text(card.verb);
+  return verb === "" ? null : verb;
 };
 
-// A prepared brief counts only while the card's caption (status + act) is the one it was written for.
+// A prepared brief counts only while the card's wait (key + since) is the one it was written for; a brief from before
+// the wait keys binds to the caption (status + act) as it did then.
 const preparedOf = (
   card: Raw,
   briefs: Record<string, Raw>,
 ): PreparedBrief | null => {
   const b = briefs[text(card.id)];
-  if (
-    b === undefined ||
-    b.error !== undefined ||
-    text(b.status) !== text(card.status) ||
-    text(b.act) !== text(card.act)
-  ) {
+  if (b === undefined || b.error !== undefined) {
+    return null;
+  }
+  const bound =
+    b.key !== undefined
+      ? text(b.key) === text(card.key) && text(b.since) === text(card.since)
+      : text(b.status) === text(card.status) && text(b.act) === text(card.act);
+  if (!bound) {
     return null;
   }
 
@@ -494,7 +485,6 @@ const toView = (
 ): DeskView => {
   const cache = JSON.parse(cardsJson) as Raw;
   const desk = JSON.parse(deskJson) as Raw;
-  const state = (desk.cards ?? {}) as Record<string, Raw>;
   const log = (desk.log ?? []) as Raw[];
 
   const cards = ((cache.cards ?? []) as Raw[]).map((card): DeskCard => {
@@ -522,7 +512,7 @@ const toView = (
       age: typeof card.age === "number" ? card.age : 0,
       links: linksOf(card),
       members,
-      verb: verbOf(state[id], today, text(card.status)),
+      verb: verbOf(card),
     };
   });
 
@@ -838,7 +828,13 @@ async function runGather($: EngineInterface, when: "due" | "now") {
   try {
     const key = await $.env.get("PLAIN_API_KEY");
     const { scopeArgs } = await read($, view);
-    const argv = ["python3", `${dir}/desk.py`, ...scopeArgs];
+    // a forced gather reads every source afresh; a due one may reuse the per-source caches (desk.py --fresh)
+    const argv = [
+      "python3",
+      `${dir}/desk.py`,
+      ...(when === "now" ? ["--fresh"] : []),
+      ...scopeArgs,
+    ];
     const init = {
       env: key ? { PLAIN_API_KEY: key } : undefined,
       timeoutMs: 4 * 60_000,

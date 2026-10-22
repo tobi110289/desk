@@ -21,6 +21,7 @@ This is my working setup, published as a worked example. It runs against my comp
 | `skill/CARDS.md`         | Sources, lanes and the recipe for each lane                                                                                                                              |
 | `scripts/desk.py`        | Gathers from every source, ranks, writes `cards.json`                                                                                                                    |
 | `scripts/desk-close.py`  | Records a verb (the mod calls it through `desk_close`)                                                                                                                   |
+| `scripts/deskhold.py`    | The one hold logic: a card's wait (`key`, `since`), closed / parked / live, the ranking tiers; used by the gather, the close script and the live feed                        |
 | `scripts/desk-score.py`  | How often the prepared briefs guessed the user's pick and draft right (`desk-close.py` writes the ledger)                                                                |
 | `scripts/desk-events.py` | The client for the support bot's live event feed (see Live events)                                                                                                       |
 | `scripts/` (rest)        | Plain numbers for the pane, Notion ticket classes, support memory, the send path, local tasks                                                                            |
