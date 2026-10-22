@@ -986,10 +986,9 @@ def fast_thread_cards(threads,prefix):
         cst=(r.get('state') or '').lower()
         if 'wontfix' in cst or 'duplicate' in cst: rd='wontfix' if 'wontfix' in cst else 'duplicate'
         if rd in ('wontfix','duplicate'): who='nobody'   # nobody waits on a close; the readiness field or the sweep grade says so
-        # 2026-09-30: the caption is the deferral's anchor (add() voids a hold when it changes), so it carries only what the
-        # customer or Plain's status can change: the thread status and the newest CUSTOMER entry. Our own notes, field
-        # writes and readiness flips live in the act and the note, never in the caption (T-126/T-127 came back one
-        # rerun after their defer because the validation note moved "last entry").
+        # 2026-09-30: the wait (since) is the thread status plus the newest CUSTOMER entry: our own notes, field writes
+        # and readiness flips never reopen a closed or parked card (T-126/T-127 came back one rerun after their defer
+        # because the validation note moved "last entry"). Since 2026-10-22 the display text is free; `since` carries it.
         last=f"customer wrote {th['customerAt'][:10]}" if th.get('customerAt') else (f"last entry {th['newestAt'][:10]} by {th['newestActor'].replace('Actor','').lower() or '?'}" if th['newestAt'] else 'no timeline')
         facts=[f"Plain {th.get('status') or 'TODO'}", last]
         if th.get('createdAt'): facts.append(f"opened {parse_iso(th['createdAt']).astimezone(BERLIN).strftime('%Y-%m-%d %H:%M')} Berlin")
@@ -1016,9 +1015,9 @@ def unanswered_cards(threads):
         hm=parse_iso(since).astimezone(datetime.timezone.utc).strftime('%H:%MZ')
         facts=[f"Plain {th.get('status') or 'TODO'}",f"customer wrote {th['customerAt'][:10]}"]
         if th.get('createdAt'): facts.append(f"opened {parse_iso(th['createdAt']).astimezone(BERLIN).strftime('%Y-%m-%d %H:%M')} Berlin")
-        # 2026-10-19: the status is the closure key. a today card was closed with `do` once the loop had spawned a
-        # worker, its status line stayed the same, and the "customer waits for a first answer" card never came back that
-        # day. The wait is a fact of its own, so it goes into the status and a closure of the other variant does not hide it.
+        # 2026-10-19: a today card was closed with `do` once the loop had spawned a worker, and the "customer waits for a
+        # first answer" card never came back that day. The first answer is a wait of its own (key unanswered:<ref>,
+        # since = the unanswered message), so a verb on the thread's reply wait does not hide it.
         facts.append(f"customer unanswered since {hm}")
         t=state.get(ref,{})
         add({'id':f'today:{ref}','ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':0,'waits':'customer',
