@@ -22,5 +22,12 @@
   "ticketOwner": "Lee",
   "internalDomains": [
     "example.com"
-  ]
+  ],
+  "team": [
+    "Pat",
+    "Lee"
+  ],
+  "slackUsers": {
+    "SLACK_USER_ID_OF_PAT": "Pat"
+  }
 }

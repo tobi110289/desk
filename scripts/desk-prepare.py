@@ -9,6 +9,10 @@ start from the brief; Claude only checks the brief is still current before it ca
 
 A customer-text card (REPLY, NOTIFY, PROMISE, FAST) whose brief carries a draft, no open checks and replyReady gets the
 options Send it · Edit then send · I sent it already · Defer · Drop, Send it first; any other brief keeps the lane's set.
+Ready is a property of the draft alone (2026-10-22, from the score ledger: the brief said "validate first" while the
+person pressed Send on a draft with nothing to refute): every claim backed, or no refutable claim; the thread's claim
+or validation state does not block it. The material opens with who holds the thread (assignee, triage claim, last
+internal note, teammates named in the newest customer message), and a thread a teammate holds is theirs to answer.
 
 A brief is bound to the card's caption (status + act). When the caption changes the brief is stale and the next
 pass writes a new one. Batch cards and lanes that take the session over are never prepared.
@@ -80,7 +84,7 @@ SCHEMA = {
         'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence line in the context that backs it'},
         'openChecks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'claims the draft needs that the context does not back; Claude verifies these live before desk_card'},
         'resolved': {'type': 'boolean', 'description': 'true when the context shows the card is already resolved (reply sent, PR merged, line submitted)'},
-        'replyReady': {'type': 'boolean', 'description': 'true only when `draft` is customer text ready to send as it stands: every claim in checks, openChecks empty, the thread at a stage where a reply is the move'},
+        'replyReady': {'type': 'boolean', 'description': 'true when `draft` is customer text the person could send as it stands: every claim in checks or no refutable claim at all, openChecks empty, a reply is the move, no teammate holds the thread'},
     },
     'required': ['why', 'decide', 'then', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady'],
 }
@@ -102,6 +106,7 @@ def sh(argv, timeout=60, env=None):
 
 
 PLAIN_Q = '''query($id: ID!, $n: Int!){ thread(threadId:$id){ ref title status statusDetail{ __typename } threadFields{ key stringValue }
+ assignedTo{ __typename ... on User{ fullName } ... on MachineUser{ fullName } }
  customer{ fullName email{ email } } timelineEntries(first: $n){ edges{ node{ timestamp{ iso8601 }
  actor{ __typename ... on UserActor{ user{ fullName } } ... on MachineUserActor{ machineUser{ fullName } } ... on CustomerActor{ customer{ fullName } } }
  entry{ __typename ... on NoteEntry{ noteText: text } ... on EmailEntry{ subject textContent } ... on ChatEntry{ chatText: text }
@@ -127,6 +132,7 @@ def plain_timeline(thread_id, n=14, width=2500):
         return '(thread not found)'
     lines = [f"{t['ref']} {t['status']}/{(t.get('statusDetail') or {}).get('__typename')} · {t['title']} · customer {t['customer']['fullName']} <{(t['customer'].get('email') or {}).get('email')}>",
              '; '.join(f"{f['key']}={f['stringValue']}" for f in t.get('threadFields') or [])]
+    rows = []
     for e in t['timelineEntries']['edges']:
         n_ = e['node']; a = n_.get('actor') or {}; en = n_.get('entry') or {}
         who = ((a.get('user') or {}).get('fullName') or (a.get('machineUser') or {}).get('fullName') or (a.get('customer') or {}).get('fullName') or a.get('__typename'))
@@ -134,8 +140,37 @@ def plain_timeline(thread_id, n=14, width=2500):
         if en.get('subject') and en.get('textContent'):
             text = f"[{en['subject']}] {text}"
         text = re.sub(r'\n{3,}', '\n\n', text or '').strip()
-        lines.append(f"\n--- {n_['timestamp']['iso8601'][:16]} {en.get('__typename', '').replace('Entry', '')} {who}\n{text[:width]}{'…' if len(text) > width else ''}")
-    return '\n'.join(lines)
+        rows.append({'at': n_['timestamp']['iso8601'][:16], 'kind': en.get('__typename', '').replace('Entry', ''), 'who': who, 'actor': a.get('__typename') or '', 'text': text})
+        lines.append(f"\n--- {rows[-1]['at']} {rows[-1]['kind']} {who}\n{text[:width]}{'…' if len(text) > width else ''}")
+    return holder_block(t, rows) + '\n'.join(lines)
+
+
+def holder_block(t, rows):
+    """Who holds the thread, on top of the material (2026-10-22: a brief recommended "Draft the reply" while the customer
+    had tagged a teammate and the answer was that teammate's). The Plain assignee, the triage claim, the last internal
+    note, and every teammate (config.json team) named in the newest customer message, quoted history cut, after our last reply."""
+    sys.path.insert(0, DESK)
+    import deskconfig
+    f = {x['key']: x.get('stringValue') for x in t.get('threadFields') or []}
+    a = t.get('assignedTo') or {}
+    out = [f"assignee: {a.get('fullName') or 'nobody'}" + (f" ({a['__typename']})" if a.get('__typename') else ''),
+           f"triage claim: {f.get('triage_owner') or 'none'}" + (f" since {f['triage_claimed_at'][:16]}" if f.get('triage_claimed_at') else '')]
+    notes = [r for r in rows if r['kind'] == 'Note' and r['actor'] == 'UserActor']
+    if notes:
+        n = notes[0]  # newest first in the Plain page
+        out.append(f"last internal note: {n['who']} at {n['at']}: {n['text'][:200].replace(chr(10), ' ')}")
+    visible = [r for r in rows if r['kind'] != 'Note' and r['kind'] != 'ThreadStatusTransitioned']
+    newest_cust = next((r for r in visible if r['actor'] == 'CustomerActor'), None)
+    ours_after = any(r['actor'] != 'CustomerActor' and r['at'] > newest_cust['at'] for r in visible) if newest_cust else False
+    own = (newest_cust['who'] or '').split(' ')[0] if newest_cust else ''
+    body = newest_cust['text'] if newest_cust else ''
+    body = re.sub(r'<@([A-Z0-9]+)>', lambda m: '@' + deskconfig.SLACK_USERS.get(m.group(1), m.group(1)), body)   # a Slack mention is the teammate's name
+    body = re.split(r'\n(?:>|Von:|From:|Am .{6,80} schrieb|On .{6,80} wrote|-{3,} ?Original)', body, 1)[0]   # the quoted history is not the message
+    body = re.split(r'\n\s*(?:Viele Grüße|Beste Grüße|Liebe Grüße|Mit freundlichen Grüßen|Freundliche Grüße|Schöne Grüße|Danke und Gruß|Gruß|Grüße|VG|LG|MfG|Best regards|Kind regards|Regards|Thanks|--\s*$)', body, 1)[0]   # nor the signature
+    tagged = [p for p in deskconfig.TEAM if p.strip() != own and re.search(r'(?<![A-Za-z])@?' + re.escape(p.strip()) + r'(?![A-Za-z])', body)]
+    if tagged:
+        out.append(f"the newest customer message names {', '.join(tagged)}" + (' and we have not replied since: the answer may be theirs' if not ours_after else '; we replied after it'))
+    return '## Who holds this thread\n' + '\n'.join(out) + '\n\n## Timeline\n'
 
 
 def fingerprint(card):
@@ -205,10 +240,13 @@ def material(card):
 def prompt(card, ctx):
     opts = OPTIONS.get(card['lane'], [])
     if card['lane'] in REPLY_LANES:
-        rule = (f"- The options depend on the draft. When `draft` is a customer reply ready to send (every claim backed in `checks`, `openChecks` empty, "
-                f"and a reply is the right move at this stage), set `replyReady` true and use this set with \"Send it\" first: {json.dumps(DRAFTED, ensure_ascii=False)}. "
-                f"Otherwise (open checks, the thread unclaimed, a Hermes brief not yet validated, or the move is no reply) set `replyReady` false and use the lane's set, "
-                f"in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use the labels verbatim.")
+        rule = (f"- The options depend on the draft. When `draft` is a customer reply the person could send as it stands, set `replyReady` true and use this set with \"Send it\" first: {json.dumps(DRAFTED, ensure_ascii=False)}. "
+                f"Ready means: every claim in the draft is backed by a line in the context (`checks`), or the draft makes no claim a check could refute (a how-to taken from the material, an acknowledgement, a question back). "
+                f"An unclaimed thread or an unvalidated brief does not make it unready: the send claims the thread. `openChecks` holds only claims the draft itself states; a doubt about the case that the draft does not state goes into `fact` or `then`. "
+                f"Otherwise (an open check the draft depends on, or the move is no reply) set `replyReady` false and use the lane's set, "
+                f"in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use the labels verbatim.\n"
+                f"- Who holds the thread decides before the draft does: when the material's \"Who holds this thread\" block shows a teammate assigned, or the newest customer message names a teammate and we have not replied since, the answer is theirs. "
+                f"Recommend Defer (trigger: that teammate answers) or the lane's drop option, name the holder in `why`, and leave `draft` empty unless the material shows the teammate handed it back.")
     else:
         rule = f"- The options are this lane's fixed set, in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use these labels verbatim. Set `replyReady` false."
     return f"""You prepare ONE card of a support desk for the person who runs it. You cannot use tools: everything you may rely on is in this message. Answer with the JSON the schema asks for.

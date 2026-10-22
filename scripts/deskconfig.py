@@ -15,6 +15,10 @@ SEND_HOST = CFG.get('sendHost', '')
 SEND_ENV_FILE = CFG.get('sendEnvFile', '')
 ASK_PATTERN = CFG.get('askPattern') or r'human gates|policy|prioritis'
 PEOPLE = CFG.get('people') or []
+# 2026-10-22: the teammates by first name, for "the customer tagged a colleague"; `people` also holds customer contacts we wait on
+TEAM = CFG.get('team') or []
+# Slack user id -> teammate first name, so a Slack mention (<@U…>) in a customer message reads as that teammate
+SLACK_USERS = CFG.get('slackUsers') or {}
 # 2026-10-22: a thread whose requester writes from one of these mail domains is a colleague's thread (a Sentry auto-flag
 # the loop filed under an engineer's address, an internal test), never a customer waiting for a first answer.
 INTERNAL_DOMAINS = [d.lower().lstrip('@') for d in (CFG.get('internalDomains') or [])]
