@@ -1055,6 +1055,10 @@ else:
     # page plain-stats.py reads); a thread of today with no card becomes today:<ref>, the lift below ranks the rest.
     day_threads=plain_threads_since(TODAY_BERLIN)
     if day_threads is None: print("WARNING: Plain unreachable, today's threads are missing from the desk",file=sys.stderr)
+    # 2026-10-22 (a thread of 2026-10-22: the loop's own Sentry flag under an engineer's address came back as "customer waits for a
+    # first answer" twice in a day): a thread a colleague opened is no customer event. No today card, no first-answer
+    # card, no 1700/1800 lift; its loop entry still makes its card. config.json internalDomains.
+    else: day_threads=[th for th in day_threads if not deskconfig.is_internal(th.get('email'))]
     fast_thread_cards(day_threads,'today')
     unanswered_cards(day_threads)
 # A thread opened today ranks above everything but desk.json "top"; a thread with a customer message today ranks right

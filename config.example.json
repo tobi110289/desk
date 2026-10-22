@@ -2,7 +2,10 @@
   "plainWorkspace": "w_YOUR_PLAIN_WORKSPACE_ID",
   "theme": "default",
   "repo": "your-org/your-app",
-  "projects": ["~/your-app", "~/worktrees/your-app"],
+  "projects": [
+    "~/your-app",
+    "~/worktrees/your-app"
+  ],
   "botRepo": "your-org/your-support-bot",
   "a2aHub": "https://a2a.example.com",
   "notionTasks": "collection://00000000-0000-0000-0000-000000000000",
@@ -11,6 +14,13 @@
   "sendEnvFile": "/srv/your-adapter/.env",
   "liveEvents": false,
   "askPattern": "Pat|Lee |human gates|policy|prioritis",
-  "people": ["Pat", "Lee", "Kim"],
-  "ticketOwner": "Lee"
+  "people": [
+    "Pat",
+    "Lee",
+    "Kim"
+  ],
+  "ticketOwner": "Lee",
+  "internalDomains": [
+    "example.com"
+  ]
 }

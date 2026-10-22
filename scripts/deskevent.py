@@ -19,6 +19,7 @@ Event types:
 DESK_DIR overrides ~/orbit-scratch/desk, so a test runs against a copy and never touches the live files.
 """
 import datetime, fcntl, json, os, re, sys, zoneinfo
+import deskconfig
 
 DESK = os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk')
 LOOP = os.path.expanduser('~/orbit-scratch/agent-loop')
@@ -73,7 +74,6 @@ def load(p, default):
 def plain_link(thread):
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import deskconfig
         return deskconfig.PLAIN_THREAD + thread
     except Exception:
         return None
@@ -137,6 +137,8 @@ def apply(ev, now=None):
         ref, title, email = r, title or t or '', email or e or ''
     if not ref:
         return 0, f"skip: {kind} without a ref (thread {thread[:12] or '?'} not readable)"
+    if deskconfig.is_internal(email):
+        return 0, f"skip: {ref} requester {email} is internal (config internalDomains), no customer event"
     at = ev.get('at') or now.isoformat()
 
     lock = open(f'{DESK}/.desk.lock', 'w'); fcntl.flock(lock, fcntl.LOCK_EX)   # desk.py and desk-close.py hold it too
