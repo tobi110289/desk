@@ -63,7 +63,7 @@ With `"liveEvents": true` in `config.json`, the pane hears about a new Plain thr
 
 ## Pane keys
 
-`1` to `9` select a card, `w` works it, `a` to `j` pick an option, `p` folds the Plain numbers, `h` hides the pane.
+`1` to `9` select a card (ctrl+↑ / ctrl+↓ walk the list), `w` works it, `a` to `j` pick an option, `p` folds the Plain numbers, `h` hides the pane.
 
 ## Setup (for a fork)
 

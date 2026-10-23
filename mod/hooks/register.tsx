@@ -580,6 +580,19 @@ const pendingOf = (desk: DeskView, id: string) =>
     (d) => d.cardId === id && (d.state === "queued" || d.state === "running"),
   ) ?? null;
 
+/** Move the selection one row up or down the list (wrapping); ctrl+↑/↓ from the prompt press these (2026-10-23). */
+async function moveSelection($: EngineInterface, step: 1 | -1) {
+  const desk = await read($, view);
+  if (desk.cards.length === 0) {
+    return;
+  }
+  const row = rowOf(desk, await read($, picked));
+  const next = desk.cards[(row + step + desk.cards.length) % desk.cards.length];
+  if (next !== undefined) {
+    await update($, picked, () => next.id);
+  }
+}
+
 // The card the pane shows: the picked one while it is on the desk, else the top open card.
 const rowOf = (desk: DeskView, id: string) => {
   const row = desk.cards.findIndex((card) => card.id === id);
@@ -2259,6 +2272,27 @@ export const register: Register = (on) => {
             <Text dimColor> ◆ prepared · </Text>
             {desk.cards.length - open}
             <Text dimColor> done</Text>
+            {/* ctrl+↑ / ctrl+↓ (the engine's diff-list chords, free while no diff panel is up) walk the list */}
+            <Text dimColor> · </Text>
+          </Text>
+          <Button
+            key="select-up"
+            plain
+            dimColor
+            action="app:diffFileListUp"
+            label="▲"
+            onPress={() => void moveSelection($, -1)}
+          />
+          <Button
+            key="select-down"
+            plain
+            dimColor
+            action="app:diffFileListDown"
+            label="▼"
+            onPress={() => void moveSelection($, 1)}
+          />
+          <Text dimColor>ctrl+↑↓</Text>
+          <Text wrap="wrap">
             {desk.decisions.some(
               (d) => d.state === "queued" || d.state === "running",
             ) && (
