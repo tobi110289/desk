@@ -21,6 +21,7 @@ This is my working setup, published as a worked example. It runs against my comp
 | `skill/CARDS.md`         | Sources, lanes and the recipe for each lane                                                                                                                              |
 | `scripts/desk.py`        | Gathers from every source, ranks, writes `cards.json`                                                                                                                    |
 | `scripts/desk-close.py`  | Records a verb (the mod calls it through `desk_close`)                                                                                                                   |
+| `scripts/desk-decide.py` | Records a pick taken on the pane; `desk-execute.py` runs the queue in the background; `deskanchor.py` and `deskclass.py` are their shared tables                          |
 | `scripts/deskhold.py`    | The one hold logic: a card's wait (`key`, `since`), closed / parked / live, the ranking tiers; used by the gather, the close script and the live feed                        |
 | `scripts/desk-score.py`  | How often the prepared briefs guessed the user's pick and draft right (`desk-close.py` writes the ledger)                                                                |
 | `scripts/desk-events.py` | The client for the support bot's live event feed (see Live events)                                                                                                       |
@@ -37,6 +38,10 @@ This is my working setup, published as a worked example. It runs against my comp
 5. The pane ranks again in the background.
 
 Two checks run when Claude ends a turn. A reply that says a message went out while no send ran is sent back. So is a turn that ends on an answered card without a verb.
+
+## Picks run in the background
+
+Since 2026-10-23 a prepared card shows its options on the pane, and a key press records the pick as a file (`scripts/desk-decide.py`, `decisions/<id>.json`) instead of a prompt. `scripts/desk-execute.py` drains the queue without the session: it reads the brief's anchors again (`scripts/deskanchor.py`: the newest message on the thread, the PR's head and review state) and bounces the pick when the world moved, else it sends, marks done, drops or defers and records the verb. The pane shows the last picks with their state (waiting, running, done, bounced, failed) and lists the picks that need the session under NEEDS YOU; `w` on such a card hands it to Claude with the option already chosen. `scripts/deskclass.py` is the one table that says which option is a script, a model run or session work. `luna-send.py` refuses a send under a decision record whose option is not a send, so no background run sends on its own.
 
 ## Plain words on the pane
 

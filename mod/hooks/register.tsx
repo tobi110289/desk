@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from "claude-code";
 import type {
   DeskBrief,
   DeskCard,
+  DeskDecision,
   DeskFeed,
   DeskLink,
   DeskOption,
@@ -112,6 +113,14 @@ const CLOSE_TOOL = /^mcp__desk__desk_close$/;
 const VERBS = ["do", "decide", "delegate", "defer", "drop"];
 // Hotkeys for the options on a card; 1-9, p and w are taken.
 const OPTION_KEYS = "abcdefghij";
+/** A pick's state on the pane: waiting, running, done, bounced (the world moved, nothing ran), failed. */
+const STATE_GLYPH: Record<DeskDecision["state"], string> = {
+  queued: "◌",
+  running: "◍",
+  done: "✓",
+  bounced: "↩",
+  failed: "✗",
+};
 const SUMMARY_MODEL = "sonnet";
 // Lanes whose draft is customer text: the plain-words ban holds, the cap on numbered items does not.
 const REPLY_LANES = ["REPLY", "NOTIFY", "PROMISE", "FAST"];
@@ -239,6 +248,7 @@ const EMPTY: DeskView = {
   scope: "",
   scopeArgs: [],
   due: [],
+  decisions: [],
 };
 
 /**
@@ -477,11 +487,31 @@ const preparedOf = (
   };
 };
 
+const decisionOf = (d: Raw): DeskDecision => ({
+  cardId: text(d.cardId),
+  ref: text(d.ref),
+  lane: text(d.lane),
+  option: text(d.option),
+  verb: text(d.verb),
+  kind: (["script", "model", "session"].includes(text(d.class))
+    ? text(d.class)
+    : "session") as DeskDecision["kind"],
+  state: (["queued", "running", "done", "bounced", "failed"].includes(
+    text(d.state),
+  )
+    ? text(d.state)
+    : "failed") as DeskDecision["state"],
+  pickedAt: text(d.pickedAt),
+  finishedAt: text(d.finishedAt),
+  result: text(d.result),
+});
+
 const toView = (
   cardsJson: string,
   deskJson: string,
   today: string,
   briefs: Record<string, Raw> = {},
+  decisions: Raw[] = [],
 ): DeskView => {
   const cache = JSON.parse(cardsJson) as Raw;
   const desk = JSON.parse(deskJson) as Raw;
@@ -529,8 +559,17 @@ const toView = (
     due: Object.entries(preflight)
       .filter(([, one]) => one.due === true)
       .map(([name, one]) => `${name} (${text(one.reason)})`),
+    decisions: decisions
+      .map(decisionOf)
+      .sort((a, b) => (a.pickedAt < b.pickedAt ? 1 : -1)),
   };
 };
+
+/** The open pick of a card: queued or running, whatever its class. */
+const pendingOf = (desk: DeskView, id: string) =>
+  desk.decisions.find(
+    (d) => d.cardId === id && (d.state === "queued" || d.state === "running"),
+  ) ?? null;
 
 // The card the pane shows: the picked one while it is on the desk, else the top open card.
 const rowOf = (desk: DeskView, id: string) => {
@@ -556,6 +595,9 @@ let isClosedThisTurn = false;
 let gatherRun: Promise<void> | null = null;
 // The desk-prepare.py pass in flight.
 let prepareRun: Promise<void> | null = null;
+// The desk-execute.py drain in flight, and whether a pick landed while it ran.
+let executeRun: Promise<void> | null = null;
+let executeAgain = false;
 // The live event loop in flight, and its desk.py --event step: the gather waits for the step, the step for the gather.
 let liveRun: Promise<void> | null = null;
 let applyRun: Promise<void> | null = null;
@@ -644,7 +686,16 @@ async function refresh($: EngineInterface, isForced = false) {
       (entry) => entry.kind === "file" && entry.name.endsWith(".json"),
     );
     const briefsAt = Math.max(0, ...briefFiles.map((entry) => entry.mtimeMs));
-    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${briefsAt}:${berlinDate(time)}`;
+    // decisions/<id>.json, written by desk-decide.py and desk-execute.py
+    const decisionsDir = `${home}/orbit-scratch/desk/decisions`;
+    const decisionFiles = (
+      await $.fs.list(decisionsDir).catch(() => [])
+    ).filter((entry) => entry.kind === "file" && entry.name.endsWith(".json"));
+    const decisionsAt = Math.max(
+      0,
+      ...decisionFiles.map((entry) => entry.mtimeMs),
+    );
+    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${briefsAt}:${decisionsAt}:${decisionFiles.length}:${berlinDate(time)}`;
 
     if (next === stamp && !isForced) {
       return;
@@ -664,7 +715,23 @@ async function refresh($: EngineInterface, isForced = false) {
         // a half-written brief: the next refresh reads it
       }
     }
-    const fresh = toView(cardsJson, deskJson, berlinDate(time), briefs);
+    const decisions: Raw[] = [];
+    for (const entry of decisionFiles) {
+      try {
+        decisions.push(
+          JSON.parse(await $.fs.read(`${decisionsDir}/${entry.name}`)) as Raw,
+        );
+      } catch {
+        // a half-written record: the next refresh reads it
+      }
+    }
+    const fresh = toView(
+      cardsJson,
+      deskJson,
+      berlinDate(time),
+      briefs,
+      decisions,
+    );
     stamp = next;
     await update($, view, () => fresh);
     // A card that left the desk, or got its verb elsewhere, is no longer worked and keeps no brief.
@@ -879,6 +946,96 @@ function prepare($: EngineInterface) {
     .finally(() => {
       prepareRun = null;
     });
+}
+
+// 2026-10-23: a pick on a prepared card is a decision record, not a prompt. desk-execute.py drains the script-class
+// records in the background; a bounced one loses its brief, so the prepare pass that follows writes a new one.
+function execute($: EngineInterface) {
+  if (executeRun !== null) {
+    executeAgain = true;
+    return;
+  }
+  executeRun = (async () => {
+    const home = (await $.env.get("HOME")) ?? "";
+    const key = await $.env.get("PLAIN_API_KEY");
+    await $.process.run(
+      ["python3", `${home}/orbit-scratch/desk/desk-execute.py`],
+      { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 8 * 60_000 },
+    );
+    await refresh($, true);
+    prepare($);
+  })()
+    .catch((error: unknown) => {
+      try {
+        $.ui.log(`execute failed: ${String(error)}`.slice(0, 200), {
+          to: "debug",
+        });
+      } catch {
+        // the next pick runs it again
+      }
+    })
+    .finally(() => {
+      executeRun = null;
+      if (executeAgain) {
+        executeAgain = false;
+        execute($);
+      }
+    });
+}
+
+/** The prompt that hands one card with a chosen option to the session (today's path, and the session-class queue). */
+async function handToSession(
+  $: EngineInterface,
+  cardId: string,
+  option: DeskOption,
+) {
+  pendingAnswer = cardId;
+  await update($, picked, () => cardId);
+  await update($, working, () => cardId);
+  await update($, picks, (p) => ({ ...p, [cardId]: option.label }));
+  await $.prompt.submit({
+    text:
+      `Re desk card ${cardId}: ${option.label} (${option.verb}). ` +
+      "Execute it now per the lane recipe, then record it with desk_close.",
+    asUser: true,
+  });
+}
+
+/**
+ * A pick on a prepared card, from the pane: desk-decide.py records it and names its class. A script-class pick
+ * starts the background drain; a session-class pick waits under "needs you" for `w`; a pick the script refuses
+ * (no fresh brief, exit 3) goes to the session at once like a `w` would.
+ */
+async function decide($: EngineInterface, card: DeskCard, option: DeskOption) {
+  const home = (await $.env.get("HOME")) ?? "";
+  const ran = await $.process.run(
+    [
+      "python3",
+      `${home}/orbit-scratch/desk/desk-decide.py`,
+      card.id,
+      option.label,
+    ],
+    { timeoutMs: 20_000 },
+  );
+  const kind = ran.stdout.trim();
+  if (ran.exitCode === 0) {
+    await refresh($, true);
+    if (kind === "script") {
+      execute($);
+    }
+    return;
+  }
+  if (ran.exitCode === 3) {
+    await handToSession($, card.id, option);
+    return;
+  }
+  try {
+    $.ui.log(`decide: ${(ran.stdout + ran.stderr).trim()}`.slice(0, 200), {
+      to: "debug",
+    });
+  } catch {
+    // nothing recorded; the pane still shows the options
+  }
 }
 
 async function isLiveOn($: EngineInterface) {
@@ -1824,8 +1981,42 @@ export const register: Register = (on) => {
                       : card.prepared.draft}
                   </Text>
                 )}
+                {/* 2026-10-23: the brief's options are the pane's; a press records the pick without the session */}
+                {card.verb === null && pendingOf(desk, card.id) === null && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>PICK (runs in the background)</Text>
+                    {card.prepared.options.map((option, i) => (
+                      <Button
+                        key={`prepared-opt-${i}`}
+                        hotkey={OPTION_KEYS[i]}
+                        variant={i === 0 ? "primary" : undefined}
+                        label={`${OPTION_KEYS[i]}  ${option.label}${i === 0 ? "  ★" : ""}`}
+                        onPress={() => void decide($, card, option)}
+                      />
+                    ))}
+                  </Box>
+                )}
               </Box>
             )}
+            {(() => {
+              const pending = pendingOf(desk, card.id);
+              if (pending === null) {
+                return null;
+              }
+              return (
+                <Box marginTop={1} flexDirection="column">
+                  <Text dimColor>PICKED</Text>
+                  <Text wrap="wrap" color={C("cyan")}>
+                    {STATE_GLYPH[pending.state]} {pending.option}
+                    {pending.kind === "session"
+                      ? " · needs you: press w to hand it to Claude"
+                      : pending.state === "running"
+                        ? " · running in the background"
+                        : " · queued for the background"}
+                  </Text>
+                </Box>
+              );
+            })()}
             {card.status !== "" && (
               <Box marginTop={1} flexDirection="column">
                 <Text dimColor>STATUS</Text>
@@ -1913,8 +2104,20 @@ export const register: Register = (on) => {
                   key="work"
                   variant="primary"
                   hotkey="w"
-                  label="Work this card"
+                  label={
+                    pendingOf(desk, card.id)?.kind === "session"
+                      ? "Hand the pick to Claude"
+                      : "Work this card"
+                  }
                   onPress={async () => {
+                    const pending = pendingOf(desk, card.id);
+                    if (pending !== null && pending.kind === "session") {
+                      await handToSession($, card.id, {
+                        label: pending.option,
+                        verb: pending.verb,
+                      });
+                      return;
+                    }
                     await update($, picked, () => card.id);
                     await update($, working, () => card.id);
                     await $.prompt.submit({
@@ -1956,6 +2159,21 @@ export const register: Register = (on) => {
             <Text dimColor> ◆ prepared · </Text>
             {desk.cards.length - open}
             <Text dimColor> done</Text>
+            {desk.decisions.some(
+              (d) => d.state === "queued" || d.state === "running",
+            ) && (
+              <Text>
+                <Text dimColor> · </Text>
+                <Text color={C("cyan")}>
+                  {
+                    desk.decisions.filter(
+                      (d) => d.state === "queued" || d.state === "running",
+                    ).length
+                  }
+                </Text>
+                <Text dimColor> picked</Text>
+              </Text>
+            )}
           </Text>
         </Box>
         {listOpen && desk.cards.length === 0 && (
@@ -1973,15 +2191,25 @@ export const register: Register = (on) => {
                 <Text color={C(isSelected ? "cyan" : undefined)}>
                   {isSelected ? theme.selected : " "}
                 </Text>
-                {/* ◆ = a prepared brief waits for this card; · = not prepared */}
-                <Text
-                  color={C(
-                    one.prepared !== null && !isDone ? "green" : undefined,
-                  )}
-                  dimColor={one.prepared === null || isDone}
-                >
-                  {one.prepared !== null && !isDone ? theme.prepared : "·"}
-                </Text>
+                {/* ◆ = a prepared brief waits for this card; ◌ ◍ = a pick waits or runs; · = not prepared */}
+                {(() => {
+                  const pending = pendingOf(desk, one.id);
+                  if (pending !== null && !isDone) {
+                    return (
+                      <Text color={C("cyan")}>{STATE_GLYPH[pending.state]}</Text>
+                    );
+                  }
+                  return (
+                    <Text
+                      color={C(
+                        one.prepared !== null && !isDone ? "green" : undefined,
+                      )}
+                      dimColor={one.prepared === null || isDone}
+                    >
+                      {one.prepared !== null && !isDone ? theme.prepared : "·"}
+                    </Text>
+                  );
+                })()}
                 <Button
                   key={`pick-${row}`}
                   plain
@@ -2006,6 +2234,59 @@ export const register: Register = (on) => {
               </Box>
             );
           })}
+        {(() => {
+          const needsYou = desk.decisions.filter(
+            (d) => d.kind === "session" && d.state === "queued",
+          );
+          const results = desk.decisions
+            .filter((d) => !(d.kind === "session" && d.state === "queued"))
+            .slice(0, 8);
+          if (needsYou.length === 0 && results.length === 0) {
+            return null;
+          }
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              {needsYou.length > 0 && (
+                <Text dimColor>
+                  NEEDS YOU · {needsYou.length} pick
+                  {needsYou.length === 1 ? "" : "s"} wait for the session (select
+                  the card, then w)
+                </Text>
+              )}
+              {needsYou.map((d) => (
+                <Text wrap="truncate-end" key={`needs-${d.cardId}`}>
+                  <Text color={C("yellow")}>▸ </Text>
+                  <Text bold>{d.ref}</Text>
+                  <Text dimColor> · {d.option}</Text>
+                </Text>
+              ))}
+              {results.length > 0 && <Text dimColor>PICKS</Text>}
+              {results.map((d) => (
+                <Text wrap="truncate-end" key={`result-${d.cardId}`}>
+                  <Text
+                    color={C(
+                      d.state === "done"
+                        ? "green"
+                        : d.state === "bounced"
+                          ? "yellow"
+                          : d.state === "failed"
+                            ? "red"
+                            : "cyan",
+                    )}
+                  >
+                    {STATE_GLYPH[d.state]}{" "}
+                  </Text>
+                  <Text bold>{d.ref}</Text>
+                  <Text dimColor>
+                    {" "}
+                    {d.option}
+                    {d.result !== "" ? ` · ${d.result}` : ""}
+                  </Text>
+                </Text>
+              ))}
+            </Box>
+          );
+        })()}
         <Text dimColor>{rule}</Text>
         {stats && (
           <Box flexDirection="column" marginTop={0}>

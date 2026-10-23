@@ -6,7 +6,7 @@ string. The card's key and since come from cards.json, so this script holds no c
 the verb into the card in cards.json, so the pane shows it at once without a logic copy of its own."""
 import re, json, sys, os, datetime
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__))); import deskhold
-P=os.path.expanduser('~/orbit-scratch/desk/desk.json'); CARDS=os.path.join(os.path.dirname(P),'cards.json')
+P=os.path.join(os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk'),'desk.json'); CARDS=os.path.join(os.path.dirname(P),'cards.json')
 import fcntl
 _lock=open(os.path.join(os.path.dirname(P),'.desk.lock'),'w'); fcntl.flock(_lock,fcntl.LOCK_EX)   # desk.py checks desk.json under the same lock before it writes
 d=json.load(open(P)); cid,verb=sys.argv[1],sys.argv[2]
@@ -62,6 +62,16 @@ if new_caption is not None:
             deskhold.rebind(d,ref,old,new_caption)
             d.setdefault('captions',{})[ref]={'status':new_caption,'at':datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
     except Exception as e: print('caption not written:',e)
+# 2026-10-23: a pick the pane recorded (desk-decide.py) that the session executed is done once the card has its verb
+if verb!='caption':
+    try:
+        dp=os.path.join(os.path.dirname(P),'decisions',re.sub(r'[^A-Za-z0-9._-]','_',cid)+'.json'); rec=json.load(open(dp))
+        if rec.get('state') in ('queued','running') and not os.environ.get('DESK_DECISION'):
+            rec['state']='done'; rec['finishedAt']=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            rec['result']=(f"{verb} in the session: "+' '.join(sys.argv[3:]))[:300]
+            tmp=dp+'.tmp'; json.dump(rec,open(tmp,'w'),ensure_ascii=False,indent=1); os.replace(tmp,dp)
+    except FileNotFoundError: pass
+    except Exception as e: print('decision not marked:',e)
 d['log'].append({'date':today,'id':cid,'verb':verb,'note':' '.join(sys.argv[3:]) if verb!='defer' else f"until {sys.argv[3]}"})
 json.dump(d,open(P,'w'),indent=1,ensure_ascii=False); print(f"{cid} → {verb}")
 # the pane reads the verb from the card itself until the next gather removes it

@@ -33,6 +33,9 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskanchor  # noqa: E402
+
 HOME = os.path.expanduser('~')
 DESK = f'{HOME}/orbit-scratch/desk'
 BRIEFS = f'{DESK}/briefs'
@@ -85,6 +88,8 @@ SCHEMA = {
         'openChecks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'claims the draft needs that the context does not back; Claude verifies these live before desk_card'},
         'resolved': {'type': 'boolean', 'description': 'true when the context shows the card is already resolved (reply sent, PR merged, line submitted)'},
         'replyReady': {'type': 'boolean', 'description': 'true when `draft` is customer text the person could send as it stands: every claim in checks or no refutable claim at all, openChecks empty, a reply is the move, no teammate holds the thread'},
+        'deferTrigger': {'type': 'string', 'description': "when a Defer is among the sensible options: the one machine-checkable trigger it would use (a date YYYY-MM-DD, 'customer replies', 'manual:<person> answers …', 'deployed:<env>:<pr>', 'merged:<pr>'); empty when no defer makes sense. Never 'later'."},
+        'deferAct': {'type': 'string', 'description': 'what to do when that trigger fires, one imperative sentence; empty when deferTrigger is empty'},
     },
     'required': ['why', 'decide', 'then', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady'],
 }
@@ -262,6 +267,7 @@ The desk's rules for a card (from its skill):
 - Every claim in a customer text must be backed by a line in the context. Put each claim and its evidence into `checks`. A claim you need but cannot back goes into `openChecks` and NOT into the draft; the person's agent verifies it live.
 - When the context shows the card is already resolved (reply already sent, PR merged, line already submitted), say so in `fact`, set `resolved` true and leave `draft` empty.
 - When the card is a REVIEW card, `draft` is the recommended move and the one-line reason; when it is a RUN card, `draft` is the exact command or action.
+- `deferTrigger` and `deferAct`: when a Defer is a sensible pick, name the one trigger it would wait on (a date, "customer replies", "manual:<person> answers …", "deployed:<env>:<pr>", "merged:<pr>") and the act when it fires, so a Defer picked on the pane runs without a question. Empty when no defer makes sense.
 - `draft` holds only the text that would go out (or the command, or the decision). No remarks about the draft inside it: those belong in `fact` or `openChecks`.
 - Keep `fact` to one sentence. Keep `draft` under 1200 characters.
 - Every brief has a fixed shape so the person sees why the card is there, what to decide and for what. `why`: one sentence, what put the card on the desk, since when, and who waits ("Dana wrote at 09:11 today and has had no answer", "this file has sat untriaged since 26 Aug, nobody waits"). `decide`: the one question in one sentence ("Send Dana this answer as Luna?"). `then`: one or two sentences, what the recommended option sets in motion and what is at stake if nothing happens ("Luna sends it now; the thread stays open until she confirms on staging"). Keep `why` and `decide` under 160 characters and `then` under 300.
@@ -282,6 +288,7 @@ def prepare(card, dry=False):
     cid = card['id']
     t0 = datetime.datetime.now()
     ctx = material(card)
+    anc = deskanchor.anchor(card)   # read before the model runs: a message that lands during the run is "after the brief"
     p = prompt(card, ctx)
     ctx_path = brief_path(cid).replace('.json', '.ctx.md')
     with open(ctx_path, 'w') as f:
@@ -321,6 +328,9 @@ def prepare(card, dry=False):
         'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options,
         'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),
         'replyReady': ready, 'preparedAt': now_iso(), 'model': MODEL, 'costUsd': out.get('total_cost_usd'), 'ms': out.get('duration_ms'),
+        'deferTrigger': (so.get('deferTrigger') or '').strip(), 'deferAct': (so.get('deferAct') or '').strip(),
+        # 2026-10-23: the facts the brief stands on; desk-execute.py reads them again before it acts on a pane pick
+        'anchor': anc,
         'context': ctx_path,
     }
     json.dump(brief, open(brief_path(cid), 'w'), ensure_ascii=False, indent=1)

@@ -19,7 +19,8 @@ The adapter listens on 127.0.0.1:8787 on the VPS only; every call goes `ssh <sen
 the adapter's .env on the box (config.json sendEnvFile, ORBOT_OPERATOR_API_TOKEN) and never leaves the box: the curl reads it there.
 Exit 0 = sent and verified; 3 = refused before queueing (guard 422, flag off, auth) → fall back per CARDS.md; 4 = queued
 but not sent within --wait (poll again with --status); 5 = failed / needs_human_recovery / max_turns_reached /
-not_sent (the adapter refused the send, e.g. draft score) / superseded (another operator reply took its place).
+not_sent (the adapter refused the send, e.g. draft score) / superseded (another operator reply took its place);
+6 = refused by the decision guard (DESK_DECISION names a record that is not a running send, see desk-execute.py).
 """
 import json, sys, os, subprocess, time, shlex, re
 
@@ -72,6 +73,26 @@ def status(action_id):
     return code, d
 
 
+SEND_OPTIONS = ('Send it', 'Reply with a status')
+
+
+def decision_guard():
+    """2026-10-23: under desk-execute.py (DESK_DECISION names the record) a send runs only for a record that is running
+    and whose option is a send. A headless child that calls this script for any other pick is refused here."""
+    rec_path = os.environ.get('DESK_DECISION')
+    if not rec_path:
+        return None
+    try:
+        rec = json.load(open(rec_path))
+    except Exception as e:
+        return f'DESK_DECISION set but unreadable ({e}): not sending'
+    if rec.get('state') != 'running':
+        return f"decision {rec.get('cardId')} is {rec.get('state')}, not running: not sending"
+    if rec.get('option') not in SEND_OPTIONS:
+        return f"decision {rec.get('cardId')} picked {rec.get('option')!r}, which is no send: not sending"
+    return None
+
+
 def main(argv):
     if '--status' in argv:
         code, d = status(argv[argv.index('--status') + 1]); print(json.dumps(d, indent=1, ensure_ascii=False)); return 0 if code == 200 else 3
@@ -83,6 +104,8 @@ def main(argv):
     if not path: print('--file <draft.txt> is required (the draft on the clipboard: pbpaste > draft.txt)'); return 2
     text = open(path, encoding='utf-8').read().strip()
     if not text: print('empty draft'); return 2
+    refused = decision_guard()
+    if refused: print(refused); return 6
     ref = opt('--ref') or (target if re.match(r'^T-\d+$', target) else None)
     tid = thread_id(target)
     if '--allow-terminal-readiness' not in argv:

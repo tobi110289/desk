@@ -44,6 +44,25 @@ export type DeskView = {
   scopeArgs: string[];
   /** Executors the pre-flight names as due, each with its reason. */
   due: string[];
+  /** The picks the pane recorded (decisions/<id>.json), newest first. */
+  decisions: DeskDecision[];
+};
+
+/**
+ * A pick taken on the pane from a prepared brief (desk-decide.py). `script` runs in the background without the
+ * session, `model` is a headless run, `session` waits under "needs you" until `w` hands it to the session.
+ */
+export type DeskDecision = {
+  cardId: string;
+  ref: string;
+  lane: string;
+  option: string;
+  verb: string;
+  kind: "script" | "model" | "session";
+  state: "queued" | "running" | "done" | "bounced" | "failed";
+  pickedAt: string;
+  finishedAt: string;
+  result: string;
 };
 
 export type DeskOption = { label: string; verb: string };
