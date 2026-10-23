@@ -408,6 +408,12 @@ const isPaneHidden = atom(
   false,
 );
 const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
+/**
+ * 2026-10-23: auto mode. Off: a session-class pick waits under NEEDS YOU for `w`. On: when the session is idle, it takes
+ * the oldest queued pick by itself, and the next one as soon as a card closes, until the queue is empty. The switch is
+ * the file desk/.auto ("on …" / "off …"), so every session and the pane in each of them see the same state.
+ */
+const isAuto = atom({ plugin: "desk", key: "isAuto" } as const, false);
 /** The option label the user pressed per card, until its close: desk-close.py scores it against the prepared brief. */
 const picks = atom({ plugin: "desk", key: "picks" } as const, {});
 const brief = atom({ plugin: "desk", key: "brief" } as const, null);
@@ -698,6 +704,11 @@ async function refresh($: EngineInterface, isForced = false) {
       0,
       ...decisionFiles.map((entry) => entry.mtimeMs),
     );
+    // the auto switch follows the file, so a toggle in another session shows here within a poll
+    const autoOn = (
+      await $.fs.read(`${home}/orbit-scratch/desk/.auto`).catch(() => "")
+    ).startsWith("on");
+    await update($, isAuto, () => autoOn);
     const harvestPath = `${home}/orbit-scratch/desk/harvest.json`;
     const harvestAt = await $.fs.stat(harvestPath).then(
       (stat) => stat.mtimeMs,
@@ -1019,6 +1030,46 @@ async function handToSession(
   });
 }
 
+/** Auto mode: hand the oldest queued session-class pick to the session when it is idle. */
+async function autoNext($: EngineInterface) {
+  if (!(await read($, isAuto))) {
+    return;
+  }
+  if (
+    (await read($, isBusy)) ||
+    (await read($, working)) !== null ||
+    pendingAnswer !== null
+  ) {
+    return;
+  }
+  const desk = await read($, view);
+  const next = [...desk.decisions]
+    .reverse() // oldest pick first
+    .find(
+      (d) =>
+        d.kind === "session" &&
+        d.state === "queued" &&
+        desk.cards.some((card) => card.id === d.cardId && card.verb === null),
+    );
+  if (next === undefined) {
+    return;
+  }
+  await handToSession($, next.cardId, { label: next.option, verb: next.verb });
+}
+
+async function setAuto($: EngineInterface, on: boolean) {
+  const home = (await $.env.get("HOME")) ?? "";
+  const path = `${home}/orbit-scratch/desk/.auto`;
+  // the file holds "on <time>" or "off <time>": every session reads the same switch
+  await $.fs
+    .write(path, `${on ? "on" : "off"} ${new Date().toISOString()}`)
+    .catch(() => undefined);
+  await update($, isAuto, () => on);
+  if (on) {
+    await autoNext($);
+  }
+}
+
 /**
  * A pick on a prepared card, from the pane: desk-decide.py records it and names its class. A script-class pick
  * starts the background drain; a session-class pick waits under "needs you" for `w`; a pick the script refuses
@@ -1040,6 +1091,8 @@ async function decide($: EngineInterface, card: DeskCard, option: DeskOption) {
     await refresh($, true);
     if (kind === "script" || kind === "model") {
       execute($);
+    } else {
+      await autoNext($);
     }
     return;
   }
@@ -1746,6 +1799,9 @@ export const register: Register = (on) => {
     if (card) {
       void summarize($, card, e.answer);
     }
+    // auto mode: the next queued pick, once this card's close is on disk
+    await refresh($, true);
+    await autoNext($);
 
     return r;
   });
@@ -1861,6 +1917,7 @@ export const register: Register = (on) => {
     const isRunning = await read($, isGathering);
     const liveFeed = await read($, feed);
     const busy = await read($, isBusy);
+    const auto = await read($, isAuto);
     const beat = wave(await read($, tick));
     if (busy) {
       startTicker($);
@@ -1914,6 +1971,14 @@ export const register: Register = (on) => {
               {isRunning ? "ranking… " : ""}
               {desk.generatedAt.slice(11, 16)}Z
             </Text>
+            <Button
+              key="auto"
+              plain
+              hotkey="t"
+              dimColor={!auto}
+              label={auto ? "t auto on" : "t auto off"}
+              onPress={() => void setAuto($, !auto)}
+            />
             {/* 2026-10-23: what the cards taught, asked in one memory question when the person wants it */}
             {desk.harvestPending > 0 && !busy && (
               <Button
@@ -2284,8 +2349,10 @@ export const register: Register = (on) => {
               {needsYou.length > 0 && (
                 <Text dimColor>
                   NEEDS YOU · {needsYou.length} pick
-                  {needsYou.length === 1 ? "" : "s"} wait for the session (select
-                  the card, then w)
+                  {needsYou.length === 1 ? "" : "s"}{" "}
+                  {auto
+                    ? "for the session · auto on: Claude takes them one by one"
+                    : "wait for the session (select the card, then w · t for auto)"}
                 </Text>
               )}
               {needsYou.map((d) => (

@@ -189,6 +189,8 @@ declare module "claude-code" {
       isPrsOpen: boolean;
       /** True from the pane's close to its next open; the band then offers it back on ctrl+k. */
       isPaneHidden: boolean;
+      /** Auto mode (`t`, file desk/.auto): the session takes queued session-class picks by itself when idle. */
+      isAuto: boolean;
       /** null until checked; then whether the session root lies inside a desk project (config `projects` or `repo`). */
       isHome: boolean | null;
       plain: PlainStats | null;
