@@ -469,8 +469,10 @@ const preparedOf = (
   if (b === undefined || b.error !== undefined) {
     return null;
   }
+  // 2026-10-23: a card with a wait key binds only a brief written for that key; a brief from before the keys
+  // (status + act) is stale on such a card, and a pick on it would bounce as soon as a pass rewrote it.
   const bound =
-    b.key !== undefined
+    text(card.key) !== ""
       ? text(b.key) === text(card.key) && text(b.since) === text(card.since)
       : text(b.status) === text(card.status) && text(b.act) === text(card.act);
   if (!bound) {

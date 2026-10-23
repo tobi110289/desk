@@ -63,7 +63,8 @@ def main(argv):
         print(f'{cid} is not on the desk'); return 3
     if card.get('verb'):
         print(f'{cid} already has its verb ({card["verb"]})'); return 3
-    bound = (brief.get('key') == card.get('key') and brief.get('since') == card.get('since')) if brief.get('key') else \
+    # the same rule as the pane's preparedOf: a keyed card binds only a brief written for that key and since
+    bound = (brief.get('key') == card.get('key') and brief.get('since') == card.get('since')) if card.get('key') else \
         (brief.get('status') == card.get('status') and brief.get('act') == card.get('act'))
     if not bound:
         print(f'the brief for {cid} is for an older wait: work it through the session (w)'); return 3
