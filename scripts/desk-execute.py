@@ -166,8 +166,10 @@ def card_of(cid):
     return next((c for c in cache.get('cards', []) if c.get('id') == cid), None)
 
 
-def bounce(path, rec, reason):
+def bounce(path, rec, reason, dry=False):
     """Nothing ran. The brief goes away so the next prepare pass writes a fresh one; the card stays on the desk."""
+    if dry:
+        rec['state'] = 'queued'; write_json(path, rec); log(f"{rec['cardId']}: dry, would bounce: {reason}"); return
     for g in (rec.get('briefFile') or '', (rec.get('briefFile') or '').replace('.json', '.ctx.md')):
         try:
             if g: os.remove(g)
@@ -374,20 +376,20 @@ def run_one(path, dry=False, force_class=False, rehearse=False):
         cid = rec['cardId']
         card = card_of(cid)
         if card is None:
-            bounce(path, rec, 'the card left the desk before this ran'); return 'bounced'
+            bounce(path, rec, 'the card left the desk before this ran', dry); return 'bounced'
         if card.get('verb'):
-            bounce(path, rec, f"the card already has its verb ({card['verb']})"); return 'bounced'
+            bounce(path, rec, f"the card already has its verb ({card['verb']})", dry); return 'bounced'
         if rec.get('key') and (card.get('key') != rec.get('key') or card.get('since') != rec.get('since')):
-            bounce(path, rec, 'the card waits on something new since the pick'); return 'bounced'
+            bounce(path, rec, 'the card waits on something new since the pick', dry); return 'bounced'
         try:
             brief = json.load(open(rec['briefFile']))
         except Exception:
-            bounce(path, rec, 'the brief is gone; a new one is on its way'); return 'bounced'
+            bounce(path, rec, 'the brief is gone; a new one is on its way', dry); return 'bounced'
         if brief.get('fingerprint') != rec.get('fingerprint'):
-            bounce(path, rec, 'the brief was replaced after the pick'); return 'bounced'
+            bounce(path, rec, 'the brief was replaced after the pick', dry); return 'bounced'
         reasons = deskanchor.changed(rec.get('anchor') or {}, deskanchor.anchor(card))
         if reasons:
-            bounce(path, rec, '; '.join(reasons)); return 'bounced'
+            bounce(path, rec, '; '.join(reasons), dry); return 'bounced'
         try:
             if rec.get('class') == 'model':
                 run_model(path, rec, brief, card, dry, rehearse)
