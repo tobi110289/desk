@@ -325,7 +325,7 @@ def run_model(path, rec, brief, card, dry, rehearse):
                         '--tools', 'Bash,Read,Glob,Grep', '--permission-mode', 'bypassPermissions',
                         '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'json',
                         '--json-schema', json.dumps(VERDICT), p],
-                       capture_output=True, text=True, timeout=10 * 60, env=env, cwd=DESK)
+                       capture_output=True, text=True, timeout=7 * 60, env=env, cwd=DESK)   # the mod cuts the drain at 10 min
     with open(f'{stem}.out.json', 'w') as f:
         f.write(r.stdout or '')
     try:
@@ -416,6 +416,17 @@ def main(argv):
         try:
             r = json.load(open(p))
         except Exception:
+            continue
+        if r.get('state') == 'running' and not os.path.exists(f'{p}.lock'):
+            # a drain the mod cut off (ten-minute cap) left the record running with no runner behind it; never re-run
+            # a send blindly: the person picks again from a fresh brief
+            try:
+                t0 = datetime.datetime.strptime(r.get('startedAt') or '', '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+                stale = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds() > 12 * 60
+            except Exception:
+                stale = True
+            if stale:
+                finish(p, r, 'failed', 'the background run was cut off before it finished; pick again')
             continue
         if r.get('state') == 'queued' and r.get('class') in ('script', 'model'):
             todo.append(p)

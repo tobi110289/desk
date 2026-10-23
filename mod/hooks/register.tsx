@@ -1002,7 +1002,8 @@ function execute($: EngineInterface) {
     const key = await $.env.get("PLAIN_API_KEY");
     await $.process.run(
       ["python3", `${home}/orbit-scratch/desk/desk-execute.py`],
-      { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 15 * 60_000 },
+      // $.process.run allows ten minutes at most; a larger value is refused and the drain never starts (2026-10-23).
+      { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 10 * 60_000 },
     );
     await refresh($, true);
     prepare($);
