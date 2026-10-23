@@ -249,6 +249,7 @@ const EMPTY: DeskView = {
   scopeArgs: [],
   due: [],
   decisions: [],
+  harvestPending: 0,
 };
 
 /**
@@ -512,6 +513,7 @@ const toView = (
   today: string,
   briefs: Record<string, Raw> = {},
   decisions: Raw[] = [],
+  harvestPending = 0,
 ): DeskView => {
   const cache = JSON.parse(cardsJson) as Raw;
   const desk = JSON.parse(deskJson) as Raw;
@@ -562,6 +564,7 @@ const toView = (
     decisions: decisions
       .map(decisionOf)
       .sort((a, b) => (a.pickedAt < b.pickedAt ? 1 : -1)),
+    harvestPending,
   };
 };
 
@@ -695,7 +698,12 @@ async function refresh($: EngineInterface, isForced = false) {
       0,
       ...decisionFiles.map((entry) => entry.mtimeMs),
     );
-    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${briefsAt}:${decisionsAt}:${decisionFiles.length}:${berlinDate(time)}`;
+    const harvestPath = `${home}/orbit-scratch/desk/harvest.json`;
+    const harvestAt = await $.fs.stat(harvestPath).then(
+      (stat) => stat.mtimeMs,
+      () => 0,
+    );
+    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${briefsAt}:${decisionsAt}:${decisionFiles.length}:${harvestAt}:${berlinDate(time)}`;
 
     if (next === stamp && !isForced) {
       return;
@@ -725,12 +733,22 @@ async function refresh($: EngineInterface, isForced = false) {
         // a half-written record: the next refresh reads it
       }
     }
+    let harvestPending = 0;
+    try {
+      const items = (JSON.parse(await $.fs.read(harvestPath)) as Raw).items;
+      harvestPending = ((items ?? []) as Raw[]).filter(
+        (one) => one.asked !== true,
+      ).length;
+    } catch {
+      // no harvest file yet
+    }
     const fresh = toView(
       cardsJson,
       deskJson,
       berlinDate(time),
       briefs,
       decisions,
+      harvestPending,
     );
     stamp = next;
     await update($, view, () => fresh);
@@ -1896,6 +1914,23 @@ export const register: Register = (on) => {
               {isRunning ? "ranking… " : ""}
               {desk.generatedAt.slice(11, 16)}Z
             </Text>
+            {/* 2026-10-23: what the cards taught, asked in one memory question when the person wants it */}
+            {desk.harvestPending > 0 && !busy && (
+              <Button
+                key="harvest"
+                plain
+                hotkey="m"
+                label={`m harvest ${desk.harvestPending}`}
+                onPress={async () => {
+                  await $.prompt.submit({
+                    text:
+                      "Harvest the desk's learned lines: follow the Harvest step of " +
+                      `${SKILL}/SKILL.md (desk-harvest.py list, one MEMORY question, memory.py propose per pick, desk-harvest.py mark --all).`,
+                    asUser: true,
+                  });
+                }}
+              />
+            )}
             {/* The pane goes away until ctrl+k, /desk-pane, the next gather or the next desk_card opens it again. */}
             <Button
               key="hide"

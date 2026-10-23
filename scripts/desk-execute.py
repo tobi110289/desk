@@ -37,6 +37,8 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 import deskanchor  # noqa: E402
 import deskclass  # noqa: E402
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location('desk_harvest', f'{HERE}/desk-harvest.py'); deskharvest = _ilu.module_from_spec(_spec); _spec.loader.exec_module(deskharvest)
 
 DESK = os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk')
 DECISIONS = f'{DESK}/decisions'
@@ -82,12 +84,28 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
-def finish(path, rec, state, result):
+def finish(path, rec, state, result, brief=None, card=None):
     rec['state'] = state
     rec['result'] = result[:300]
     rec['finishedAt'] = now_iso()
     write_json(path, rec)
     log(f"{rec['cardId']} {rec['option']!r} → {state}: {result[:160]}")
+    if state == 'done':
+        harvest(rec, brief, card)
+
+
+def harvest(rec, brief, card):
+    """What the brief and the run learned goes to the harvest queue; the person answers one question for all of it."""
+    lines = list((brief or {}).get('learned') or []) + list(rec.get('learned') or [])
+    if not lines:
+        return
+    mem = (card or {}).get('memory') or {}
+    try:
+        n = deskharvest.add(rec['cardId'], lines, rec.get('ref') or '', mem.get('tenant') or '', mem.get('customer') or '')
+        if n:
+            log(f"{rec['cardId']}: {n} learned lines queued for the harvest")
+    except Exception as e:
+        log(f"{rec['cardId']}: harvest failed: {e}")
 
 
 def sh(argv, timeout=180, env=None):
@@ -195,17 +213,17 @@ def run_script(path, rec, brief, card, dry):
         caption = f'replied as Luna {at}; done' if lane != 'PROMISE' else None
         note = f'replied as Luna {at} (pane pick): {fact}' if lane == 'PROMISE' else f'replied as Luna {at} (pane pick)'
         close(rec, verb, note, caption=caption, env=env)
-        finish(path, rec, 'done', f'sent as Luna {at}')
+        finish(path, rec, 'done', f'sent as Luna {at}', brief, card)
         return
     if label == 'I sent it already':
         at = hhmm()
         close(rec, 'do', 'Tobias sent it himself (pane pick)', caption=f'replied {at}; done' if thread else None, env=env)
-        finish(path, rec, 'done', 'recorded: sent by hand'); return
+        finish(path, rec, 'done', 'recorded: sent by hand', brief, card); return
     if label == 'Nobody to tell (mark done)':
         if thread:
             mark_done(thread)
         close(rec, 'do', 'nobody to tell (pane pick)', caption='done; nobody to tell' if thread else None, env=env)
-        finish(path, rec, 'done', 'thread set to done, nobody to tell'); return
+        finish(path, rec, 'done', 'thread set to done, nobody to tell', brief, card); return
     if label == 'Close the loop (nothing owed)':
         if thread:
             try:
@@ -213,15 +231,15 @@ def run_script(path, rec, brief, card, dry):
             except Exception as e:
                 log(f"{rec['cardId']}: note failed: {e}")
         close(rec, 'do', f'nothing owed (pane pick): {fact}', env=env)
-        finish(path, rec, 'done', 'closed, nothing owed'); return
+        finish(path, rec, 'done', 'closed, nothing owed', brief, card); return
     if label.startswith('Drop'):
         close(rec, 'drop', f'dropped from the pane: {fact or label}', env=env)
-        finish(path, rec, 'done', 'dropped'); return
+        finish(path, rec, 'done', 'dropped', brief, card); return
     if label in deskclass.DEFER:
         trigger = (brief.get('deferTrigger') or '').strip()
         act = (brief.get('deferAct') or '').strip() or card.get('act') or ''
         close(rec, 'defer', '', trigger=trigger, act=act, env=env)
-        finish(path, rec, 'done', f'deferred until {trigger}'); return
+        finish(path, rec, 'done', f'deferred until {trigger}', brief, card); return
     raise RuntimeError(f'no script for {label!r}')
 
 
@@ -325,7 +343,7 @@ def run_model(path, rec, brief, card, dry, rehearse):
     if rec['cardId'].startswith(('loop:', 'gap:')) and not caption:
         caption = (v.get('result') or label)[:49]
     close(rec, rec.get('verb') or 'do', (v.get('note') or v.get('result') or label)[:300], caption=caption, env={'DESK_DECISION': path})
-    finish(path, rec, 'done', v.get('result') or 'done')
+    finish(path, rec, 'done', v.get('result', brief, card) or 'done')
 
 
 def run_one(path, dry=False, force_class=False, rehearse=False):

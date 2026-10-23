@@ -86,6 +86,12 @@ if verb!='caption':
 # desk-score.py reads the ledger. A caption is not a close and is not scored.
 if verb!='caption':
     try:
+        _dec={}; _secs=None
+        try:
+            _dec=json.load(open(os.path.join(os.path.dirname(P),'decisions',re.sub(r'[^A-Za-z0-9._-]','_',cid)+'.json')))
+            _t0=datetime.datetime.strptime(_dec.get('pickedAt',''),'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+            _secs=int((datetime.datetime.now(datetime.timezone.utc)-_t0).total_seconds())
+        except Exception: pass
         bp=os.path.join(os.path.dirname(P),'briefs',re.sub(r'[^A-Za-z0-9._-]','_',cid)+'.json'); b=json.load(open(bp))
         if not b.get('error'):
             opts=b.get('options') or []
@@ -94,6 +100,9 @@ if verb!='caption':
                     'preparedAt':b.get('preparedAt'),'model':b.get('model'),
                     'guess':{'option':(opts[0].get('label') if opts else None),'verb':(opts[0].get('verb') if opts else None),'options':[o.get('label') for o in opts],
                              'draft':b.get('draft') or '','replyReady':bool(b.get('replyReady')),'resolved':bool(b.get('resolved')),'openChecks':len(b.get('openChecks') or [])},
-                    'did':{'pick':pick,'verb':verb,'note':' '.join(sys.argv[3:])}},ensure_ascii=False)+'\n')
+                    'did':{'pick':pick,'verb':verb,'note':' '.join(sys.argv[3:])},
+                    # 2026-10-23: where the pick came from and how long it waited (pane pick → verb)
+                    'via':'pane' if os.environ.get('DESK_DECISION') else 'session','class':_dec.get('class'),
+                    'secs':_secs},ensure_ascii=False)+'\n')
     except FileNotFoundError: pass
     except Exception as e: print('not scored:',e)

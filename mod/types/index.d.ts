@@ -46,6 +46,8 @@ export type DeskView = {
   due: string[];
   /** The picks the pane recorded (decisions/<id>.json), newest first. */
   decisions: DeskDecision[];
+  /** Learned lines (harvest.json) not yet asked; `m` asks them in one memory question. */
+  harvestPending: number;
 };
 
 /**
