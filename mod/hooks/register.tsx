@@ -960,7 +960,7 @@ function execute($: EngineInterface) {
     const key = await $.env.get("PLAIN_API_KEY");
     await $.process.run(
       ["python3", `${home}/orbit-scratch/desk/desk-execute.py`],
-      { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 8 * 60_000 },
+      { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 15 * 60_000 },
     );
     await refresh($, true);
     prepare($);
@@ -1020,7 +1020,7 @@ async function decide($: EngineInterface, card: DeskCard, option: DeskOption) {
   const kind = ran.stdout.trim();
   if (ran.exitCode === 0) {
     await refresh($, true);
-    if (kind === "script") {
+    if (kind === "script" || kind === "model") {
       execute($);
     }
     return;

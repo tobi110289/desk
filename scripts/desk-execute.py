@@ -7,12 +7,16 @@ after the brief, a thread that moved, a PR with new commits. Any change bounces 
 is removed so the next prepare pass writes a new one, and the pane shows why. A decision also bounces when the card
 left the desk or already has its verb.
 
-Classes (deskclass.py): `script` runs here with no model; `model` is phase 2 (until then such picks go through the
-session); `session` records are never touched here, the session executes them and desk-close.py marks them done.
+Classes (deskclass.py): `script` runs here with no model; `model` is one headless `claude -p` (Bash, Read, Glob and
+Grep, no MCP, DESK_EXECUTE_MODEL, default sonnet) that gets the brief, its raw material, the lane recipe and the one
+option, acts, and answers with a JSON verdict (done, result, note, caption, learned) which this script records with
+desk-close.py; the model never closes a card itself and cannot send as Luna (the guard below). `session` records are
+never touched here, the session executes them and desk-close.py marks them done.
 
-  desk-execute.py              drain every queued script decision, up to 3 at a time
+  desk-execute.py              drain every queued script and model decision, up to 3 at a time
   desk-execute.py --one <file> run one record (any class but session), for a look by hand
   desk-execute.py --dry        say what would run
+  desk-execute.py --rehearse   model runs only look and report (done=false), nothing is executed: a test of the chain
 
 The state of a record goes queued → running → done | bounced | failed; every write is atomic. The mod starts a drain
 after every pick and shows decisions/*.json as the results strip. Env: PLAIN_API_KEY, DESK_DIR (tests).
@@ -39,6 +43,20 @@ DECISIONS = f'{DESK}/decisions'
 BRIEFS = f'{DESK}/briefs'
 DRAFTS = f'{DESK}/drafts'
 LOCK_S = 10 * 60
+MODEL = os.environ.get('DESK_EXECUTE_MODEL', 'sonnet')
+LOOP = os.path.expanduser('~/orbit-scratch/agent-loop')
+LOOP_SKILL = os.path.expanduser('~/.claude/skills/plain-agent-loop/SKILL.md')
+VERDICT = {
+    'type': 'object',
+    'properties': {
+        'done': {'type': 'boolean', 'description': 'true only when the option was carried out in full and verified'},
+        'result': {'type': 'string', 'description': 'one plain sentence for the pane: what happened, or why nothing did (under 160 characters, no paths, ids or code words)'},
+        'note': {'type': 'string', 'description': 'the close note for the desk log: what was done, with the identifiers the log may carry (PR numbers, terminal or workspace names, times); under 300 characters'},
+        'caption': {'type': 'string', 'description': "the loop caption under 50 characters when the lane recipe names one (e.g. 'rework sent 14:02Z; agent on HORST round'); empty otherwise"},
+        'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': 'facts about the tenant or requester the memory lacked, one line each with its source; usually empty'},
+    },
+    'required': ['done', 'result', 'note', 'caption', 'learned'],
+}
 log_lock = threading.Lock()
 
 
@@ -207,7 +225,110 @@ def run_script(path, rec, brief, card, dry):
     raise RuntimeError(f'no script for {label!r}')
 
 
-def run_one(path, dry=False, force_class=False):
+def _read(path, n=12000):
+    try:
+        return open(path).read()[:n]
+    except Exception as e:
+        return f'(unreadable: {e})'
+
+
+def recipe(lane, cid):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('desk_prepare', f'{HERE}/desk-prepare.py')
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod.recipe(lane, cid)
+
+
+def loop_entry(card):
+    try:
+        st = json.load(open(f'{LOOP}/state.json'))['threads']
+    except Exception:
+        return None
+    ref = card.get('ref') or ''
+    e = st.get(ref)
+    if e is None and card.get('pr'):
+        e = next((v for v in st.values() if str(v.get('pr')) == str(card['pr'])), None)
+    return e
+
+
+def model_prompt(rec, brief, card, rehearse):
+    label = rec['option']
+    parts = [f"""You carry out ONE decision the person took on their support desk. The desk prepared the card (the brief below) and the
+person picked the option {label!r}. Do exactly what that option means per the lane recipe, nothing else, then answer with
+the JSON verdict the schema asks for. You run headless on the person's laptop with Bash, Read, Glob and Grep. No one answers questions.
+
+Hard rules:
+- Never send or post anything a customer can see, never write to Plain (no reply, note, status or field), never merge a PR,
+  never push to develop, staging or production, never write to a production or staging database, never run claude, and never
+  run desk-close.py, desk-decide.py or desk-execute.py: the desk records the verb from your verdict.
+- The option names the one outward act you may do (a message to an agent's terminal, a worker spawn, closing a PR with a
+  comment, running the command a RUN card names). Anything else that would be needed means done=false with the reason.
+- When a precondition the recipe names is missing (no validated brief on the thread, the terminal is not idle, the command
+  touches production), do not improvise: done=false, result says what is missing in plain words.
+- Verify what you did (read the terminal back, check the PR state, read the spawn script's last line) before done=true.
+- `result` is read on a pane by someone who has not opened any file: plain words, no paths, ids, hashes or code words.
+"""]
+    if rehearse:
+        parts.append('REHEARSAL: this is a test of the plumbing. Look at everything you would need, but execute NOTHING outward '
+                     '(no superset send, no spawn, no gh pr close, no command). Answer done=false and put in `result` the one '
+                     'sentence that says what you would do and whether every precondition holds.\n')
+    parts.append('## The card\n' + json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'waits', 'status', 'note', 'act', 'pr', 'repo', 'thread', 'url')}, ensure_ascii=False, indent=1))
+    parts.append('## The brief (prepared ahead, the person picked from its options)\n' + json.dumps(
+        {k: brief.get(k) for k in ('why', 'decide', 'then', 'fact', 'draft', 'checks', 'openChecks', 'options', 'preparedAt')}, ensure_ascii=False, indent=1))
+    parts.append(f'## The picked option\n{label} (verb {rec.get("verb")})')
+    parts.append('## The lane recipe (CARDS.md)\n' + (recipe(card.get('lane') or '', card['id']) or '(no recipe section)'))
+    entry = loop_entry(card)
+    if entry:
+        parts.append('## The agent loop entry for this card (state.json; workspace, host, terminal, phase)\n' + json.dumps(entry, ensure_ascii=False, indent=1)[:4000])
+    if label.startswith('Hand'):
+        parts.append('## How workers are spawned and reached (plain-agent-loop skill, Superset constants)\n' + '\n'.join(_read(LOOP_SKILL, 40000).splitlines()[28:62]))
+        parts.append('## spawn-worker.sh and worker-prompt.sh (usage headers)\n' + '\n'.join(_read(f'{LOOP}/spawn-worker.sh', 6000).splitlines()[:30])
+                     + '\n\n' + '\n'.join(_read(f'{LOOP}/worker-prompt.sh', 4000).splitlines()[:12]))
+        parts.append('Terminals of a running worker: `superset terminals list --workspace <ws> [--host <host>] --json`, read one back with '
+                     '`superset terminals read <id> …`, send with `superset terminals send <id> --text "…"` (only when the screen shows it idle).')
+    ctx = (brief.get('context') or '')
+    if ctx:
+        parts.append('## Raw material the brief was written from\n' + _read(ctx, 30000))
+    return '\n\n'.join(parts)
+
+
+def run_model(path, rec, brief, card, dry, rehearse):
+    label = rec['option']
+    if dry:
+        finish(path, rec, 'queued', f'dry: would run a {MODEL} run for {label}'); return
+    p = model_prompt(rec, brief, card, rehearse)
+    os.makedirs(f'{DECISIONS}/runs', exist_ok=True)
+    stem = f"{DECISIONS}/runs/{os.path.basename(path)[:-5]}"
+    with open(f'{stem}.prompt.md', 'w') as f:
+        f.write(p)
+    env = {k: v for k, v in os.environ.items() if k != 'CLAUDE_CODE_PLUGIN_DIRS'}
+    env.update({'DESK_DECISION': path, 'DESK_PREPARE': '1'})
+    r = subprocess.run(['claude', '-p', '--model', MODEL, '--effort', 'medium', '--no-session-persistence',
+                        '--tools', 'Bash,Read,Glob,Grep', '--permission-mode', 'bypassPermissions',
+                        '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'json',
+                        '--json-schema', json.dumps(VERDICT), p],
+                       capture_output=True, text=True, timeout=10 * 60, env=env, cwd=DESK)
+    with open(f'{stem}.out.json', 'w') as f:
+        f.write(r.stdout or '')
+    try:
+        out = json.loads(r.stdout)
+    except Exception:
+        raise RuntimeError(f'model run gave no JSON (exit {r.returncode}): {(r.stderr or r.stdout)[-200:]}')
+    if out.get('is_error') or not out.get('structured_output'):
+        raise RuntimeError(f"model run failed: {str(out.get('result'))[:200]}")
+    v = out['structured_output']
+    rec['learned'] = [str(x) for x in (v.get('learned') or [])][:10]
+    rec['costUsd'] = out.get('total_cost_usd')
+    if not v.get('done'):
+        finish(path, rec, 'failed', f"not done: {v.get('result') or 'no reason given'}"); return
+    caption = (v.get('caption') or '').strip() or None
+    if rec['cardId'].startswith(('loop:', 'gap:')) and not caption:
+        caption = (v.get('result') or label)[:49]
+    close(rec, rec.get('verb') or 'do', (v.get('note') or v.get('result') or label)[:300], caption=caption, env={'DESK_DECISION': path})
+    finish(path, rec, 'done', v.get('result') or 'done')
+
+
+def run_one(path, dry=False, force_class=False, rehearse=False):
     lock = f'{path}.lock'
     for _ in (1, 2):
         try:
@@ -229,6 +350,8 @@ def run_one(path, dry=False, force_class=False):
             return 'session'
         if rec.get('class') == 'model' and not deskclass.MODEL_BUILT:
             return 'model'
+        if rec.get('class') not in ('script', 'model'):
+            return rec.get('class')
         rec['state'] = 'running'; rec['startedAt'] = now_iso(); write_json(path, rec)
         cid = rec['cardId']
         card = card_of(cid)
@@ -248,7 +371,10 @@ def run_one(path, dry=False, force_class=False):
         if reasons:
             bounce(path, rec, '; '.join(reasons)); return 'bounced'
         try:
-            run_script(path, rec, brief, card, dry)
+            if rec.get('class') == 'model':
+                run_model(path, rec, brief, card, dry, rehearse)
+            else:
+                run_script(path, rec, brief, card, dry)
         except Exception as e:
             finish(path, rec, 'failed', str(e)); return 'failed'
         return rec.get('state')
@@ -261,10 +387,11 @@ def main(argv):
     if '-h' in argv or '--help' in argv:
         print(__doc__); return 0
     dry = '--dry' in argv
+    rehearse = '--rehearse' in argv
     os.makedirs(DECISIONS, exist_ok=True)
     if '--one' in argv:
         path = argv[argv.index('--one') + 1]
-        print(run_one(path, dry, force_class=True)); return 0
+        print(run_one(path, dry, force_class=True, rehearse=rehearse)); return 0
     paths = sorted(glob.glob(f'{DECISIONS}/*.json'), key=os.path.getmtime)
     todo = []
     for p in paths:
@@ -272,12 +399,12 @@ def main(argv):
             r = json.load(open(p))
         except Exception:
             continue
-        if r.get('state') == 'queued' and r.get('class') == 'script':
+        if r.get('state') == 'queued' and r.get('class') in ('script', 'model'):
             todo.append(p)
     if not todo:
         print('execute: nothing queued'); return 0
     with ThreadPoolExecutor(max_workers=min(3, len(todo))) as ex:
-        states = list(ex.map(lambda p: run_one(p, dry), todo))
+        states = list(ex.map(lambda p: run_one(p, dry, rehearse=rehearse), todo))
     print('execute: ' + ', '.join(f'{os.path.basename(p)[:-5]} {s}' for p, s in zip(todo, states)))
     return 0
 

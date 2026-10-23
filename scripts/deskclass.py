@@ -13,12 +13,13 @@ SCRIPT = SEND | {'I sent it already', 'Nobody to tell (mark done)', 'Drop', 'Dro
                  'Close the loop (nothing owed)'}
 DEFER = {'Defer', 'Defer until a trigger'}
 MODEL = {'Hand to a worker', 'Hand the rework to its agent', 'Hand it to agents', 'Hand to a worker / ticket',
-         'Go (agent runs it now)', 'Close the PR', 'Close as read', 'Reply with a note'}
+         'Go (agent runs it now)', 'Close the PR'}
 # everything else: 'Edit then send', 'Review it now', 'Claim + validate now', 'Draft the reply', 'Start it now',
-# 'Answer now', 'Answer', 'Show me the command first', 'Drop (reply as human: declined)', …
+# 'Answer now', 'Answer', 'Show me the command first', 'Drop (reply as human: declined)', 'Close as read',
+# 'Reply with a note' (the a2a answers carry the person's words), …
 
-# phase 1 (2026-10-23): the model class is not built yet; its options go through the session like before
-MODEL_BUILT = False
+# 2026-10-23 phase 2: the model class runs as a headless claude -p in desk-execute.py (run_model)
+MODEL_BUILT = True
 
 
 def classify(brief, label):
