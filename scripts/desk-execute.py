@@ -153,6 +153,7 @@ def close(rec, verb, note, caption=None, trigger=None, act=None, env=None):
     code, out = sh(argv, 60, env)
     if code:
         raise RuntimeError(f'desk-close failed: {out[:200]}')
+    rec['closed'] = True   # the card is closed from here on: a later error must not undo that in the record
     if 'Not closed' in out:
         raise RuntimeError(out[:200])
     return out
@@ -345,7 +346,7 @@ def run_model(path, rec, brief, card, dry, rehearse):
     if rec['cardId'].startswith(('loop:', 'gap:')) and not caption:
         caption = (v.get('result') or label)[:49]
     close(rec, rec.get('verb') or 'do', (v.get('note') or v.get('result') or label)[:300], caption=caption, env={'DESK_DECISION': path})
-    finish(path, rec, 'done', v.get('result', brief, card) or 'done')
+    finish(path, rec, 'done', v.get('result') or 'done', brief, card)
 
 
 def run_one(path, dry=False, force_class=False, rehearse=False):
@@ -396,6 +397,10 @@ def run_one(path, dry=False, force_class=False, rehearse=False):
             else:
                 run_script(path, rec, brief, card, dry)
         except Exception as e:
+            if rec.get('closed'):
+                # 2026-10-26: a crash after desk-close (a typo in the done path) marked a finished hand-off failed, and the
+                # pane showed a closed card with nothing to press. The close is the fact; the error goes into the result.
+                finish(path, rec, 'done', f'closed; then an error after the close: {e}'); return 'done'
             finish(path, rec, 'failed', str(e)); return 'failed'
         return rec.get('state')
     finally:

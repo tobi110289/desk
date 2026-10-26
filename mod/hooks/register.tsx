@@ -2209,6 +2209,11 @@ export const register: Register = (on) => {
               </Box>
             )}
             <Box marginTop={1} gap={1} alignItems="center">
+              {card.verb !== null && (
+                <Text dimColor>
+                  {`closed (${card.verb}) · the next gather drops it · pick another row (ctrl+↑/↓)`}
+                </Text>
+              )}
               {busy && card.verb === null && current === null && (
                 <Text color={C("yellow")}>
                   Claude is working, wait for the turn to end before the next
