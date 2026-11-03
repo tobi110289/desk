@@ -13,7 +13,11 @@ SCRIPT = SEND | {'I sent it already', 'Nobody to tell (mark done)', 'Drop', 'Dro
                  'Close the loop (nothing owed)'}
 DEFER = {'Defer', 'Defer until a trigger'}
 MODEL = {'Hand to a worker', 'Hand the rework to its agent', 'Hand it to agents', 'Hand to a worker / ticket',
-         'Go (agent runs it now)', 'Close the PR'}
+         'Go (agent runs it now)', 'Close the PR',
+         # 2026-11-03: single SEND and TICKET cards. A line goes to its worker's terminal, a ticket file gets its Status:
+         # both are Bash work with the lane recipe. Notion moves (push, archive, ticket it) need the Notion MCP: session.
+         'Send as staged', 'Drop the line', 'Ready for an agent', 'Ready for a person', "Won't fix",
+         'Close (PR landed)'}
 # everything else: 'Edit then send', 'Review it now', 'Claim + validate now', 'Draft the reply', 'Start it now',
 # 'Answer now', 'Answer', 'Show me the command first', 'Drop (reply as human: declined)', 'Close as read',
 # 'Reply with a note' (the a2a answers carry the person's words), …
@@ -23,6 +27,8 @@ MODEL_BUILT = True
 
 
 def classify(brief, label):
+    if label == 'Drop' and brief.get('lane') == 'TICKET':
+        return 'model'   # a local ticket file gets Status: wontfix, not just a closed card
     if label in SCRIPT:
         if label in SEND and not (brief.get('replyReady') and (brief.get('draft') or '').strip()):
             return 'session'   # a send without a checked draft is composed in the session

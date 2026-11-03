@@ -1423,11 +1423,19 @@ for _name,_err in failed_sources:
         'status':f'source {_name} failed: {_err[:80]}','note':_err,'since':today,'bonus':50,
         'act':f"The desk source '{_name}' failed this run ({_err[:100]}): its cards are missing until it runs again. Fix it or drop this for today",'score':0}
     add(_c); rank(_c)
-batch('SEND',act='Go through the {n} lines you typed but never sent: send / edit / drop each',mins_each=1,waits='agent')
-batch('TICKET',act='Work through the {n} follow-up tickets we filed that nobody moves: push, hand to an agent, or archive each',mins_each=1,waits='nobody',pred=lambda c:not c.get('kind'))
-batch('TICKET',key=lambda c:'local-agent',act='Hand the {n} local tickets with a ready brief to workers, ticket them in Notion, or drop them',mins_each=1,waits='nobody',pred=lambda c:c.get('kind')=='local-agent')
-batch('TICKET',key=lambda c:'local-call',act='Your call on {n} local tickets filed needs-triage: read each file and set its Status, or defer it',mins_each=2,waits='person',pred=lambda c:c.get('kind')=='local-call')
-batch('TICKET',key=lambda c:'local-human',act='Clear the {n} local tickets that wait for a person: close the ones whose PR landed, do or defer the rest',mins_each=2,waits='person',pred=lambda c:c.get('kind')=='local-human')
+# 2026-11-03 (Tobias): "i like to look at them one by one if there are edits or decisions to make. batch ONLY for cases
+# where its dropping unnecessary lines, or calling multiple workers to babysit, stuff that usually can go through as is."
+# A batch now holds only members whose move is known before anyone reads them; every other member stays the single card
+# its source built (loop:<ref>, ticket:<id>, local:<feat>:<nn>), gets a prepared brief and is decided on its own.
+#   SEND   batched: the lines the desk wrote itself for an idle worker (address HORST's review / fix red CI, then babysit).
+#          single: a worker's own proposed line, a picker, a sign-off: each is a decision about that PR.
+#   TICKET batched: local files at ready-for-human whose named PR merged (close the file). Single: every other ticket.
+#   STALE  batched: loop entries with no caption (keep or drop the line).
+def _landed(c):
+    try: return bool(c.get('pr')) and pr_merge(c['pr']).get('state')=='MERGED'
+    except Exception: return False
+batch('SEND',key=lambda c:'babysit',act='Send the {n} babysit lines the desk wrote for idle workers (HORST changes or red CI), as written',mins_each=1,waits='agent',pred=lambda c:bool(c.get('prefilled')))
+batch('TICKET',key=lambda c:'local-landed',act='Close the {n} local ticket files whose PR merged: set Status: done on each',mins_each=1,waits='nobody',pred=lambda c:c.get('kind')=='local-human' and _landed(c))
 batch('STALE',act='Sweep {n} loop entries with no caption: keep (write the caption) or drop each',mins_each=1,waits='nobody',pred=lambda c:not (c.get('status') or '').strip())   # 2026-09-16: captioned entries stay single cards; the batch hid 13 live rows behind one 'drop'
 live=[c for c in cards if c['score']>=0]
 live.sort(key=lambda c:(-c['score'],c['ref']))

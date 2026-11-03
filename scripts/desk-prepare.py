@@ -43,7 +43,7 @@ SKILL = os.path.expanduser('~/.claude/skills/desk')
 LOCK_S = 5 * 60
 MODEL = os.environ.get('DESK_PREPARE_MODEL', 'sonnet')
 # lanes whose recipe has a prepare step that scripts can feed; SEND/STALE/TICKET are batches, SWEEP runs and sweep tickets take the session over
-LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST', 'REVIEW', 'RUN', 'INBOX', 'TASK', 'SWEEP'}
+LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST', 'REVIEW', 'RUN', 'INBOX', 'TASK', 'SWEEP', 'SEND', 'TICKET'}   # SEND, TICKET: single since 2026-11-03
 SKIP_ID = re.compile(r'^(batch:|sweep:|sweep-ticket:|prh:|memory:)')
 # the fixed option sets per lane (CARDS.md lanes table); the model picks the order, never the set
 OPTIONS = {
@@ -56,7 +56,22 @@ OPTIONS = {
     'INBOX': ['Answer now', 'Defer', 'Drop (reply as human: declined)', 'Close as read', 'Reply with a note'],
     'TASK': ['Start it now', 'Hand it to agents', 'Defer', 'Drop'],
     'SWEEP': ['Answer', 'Defer', 'Drop (accepted risk, recorded)'],
+    # 2026-11-03: a worker's own line, a picker or a sign-off is its own card; the draft is the line to type
+    'SEND': ['Send as staged', 'Edit then send', 'Drop the line', 'Defer'],
 }
+# TICKET cards differ by kind (desk.py source 9 / 9b); the batch held them until 2026-11-03
+TICKET_OPTIONS = {
+    'notion': ['Push (ask the owner / assign)', 'Hand to an agent', 'Archive', 'Defer'],
+    'local-agent': ['Hand to a worker', 'Ticket it in Notion', 'Drop', 'Defer'],
+    'local-call': ['Ready for an agent', 'Ready for a person', "Won't fix", 'Defer'],
+    'local-human': ['Close (PR landed)', 'Do it now', 'Hand to a worker', 'Defer'],
+}
+
+
+def options_of(card):
+    if card.get('lane') == 'TICKET':
+        return TICKET_OPTIONS.get(card.get('kind') or 'notion', TICKET_OPTIONS['notion'])
+    return OPTIONS.get(card.get('lane'), [])
 # 2026-10-14: a customer-text card whose reply is drafted and checked puts the send on the pane, first. The pick is the
 # send approval; no second question. OPTIONS above stay the set while checks are open or the thread is not yet claimed.
 REPLY_LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST'}
@@ -73,7 +88,10 @@ VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'de
          'Draft the reply': 'delegate', 'Hand to a worker': 'delegate', 'Hand the rework to its agent': 'delegate',
          'Review it now': 'do', 'Close the PR': 'drop', 'Go (agent runs it now)': 'do', 'Show me the command first': 'decide',
          'Answer now': 'decide', 'Drop (reply as human: declined)': 'drop', 'Close as read': 'do', 'Reply with a note': 'delegate',
-         'Start it now': 'do', 'Hand it to agents': 'delegate', 'Answer': 'decide', 'Drop (accepted risk, recorded)': 'drop'}
+         'Start it now': 'do', 'Hand it to agents': 'delegate', 'Answer': 'decide', 'Drop (accepted risk, recorded)': 'drop',
+         'Send as staged': 'delegate', 'Drop the line': 'drop', 'Push (ask the owner / assign)': 'delegate', 'Hand to an agent': 'delegate',
+         'Archive': 'drop', 'Ticket it in Notion': 'delegate', 'Ready for an agent': 'decide', 'Ready for a person': 'decide',
+         "Won't fix": 'drop', 'Close (PR landed)': 'do', 'Do it now': 'do'}
 SCHEMA = {
     'type': 'object',
     'properties': {
@@ -248,7 +266,7 @@ def material(card):
 
 
 def prompt(card, ctx):
-    opts = OPTIONS.get(card['lane'], [])
+    opts = options_of(card)
     if card['lane'] in REPLY_LANES:
         rule = (f"- The options depend on the draft. When `draft` is a customer reply the person could send as it stands, set `replyReady` true and use this set with \"Send it\" first: {json.dumps(DRAFTED, ensure_ascii=False)}. "
                 f"Ready means: every claim in the draft is backed by a line in the context (`checks`), or the draft makes no claim a check could refute (a how-to taken from the material, an acknowledgement, a question back). "
@@ -316,7 +334,7 @@ def prepare(card, dry=False):
         return
     so = out['structured_output']
     ready = drafted(card['lane'], so)
-    allowed = DRAFTED if ready else OPTIONS.get(card['lane'], [])
+    allowed = DRAFTED if ready else options_of(card)
     options = [{'label': o['label'], 'verb': VERBS.get(o['label'], 'do'), 'why': o.get('why', '')} for o in so.get('options', []) if o.get('label') in allowed]
     for label in allowed:  # the fixed set stays complete, recommended ones first
         if all(o['label'] != label for o in options):
