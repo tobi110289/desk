@@ -1471,7 +1471,7 @@ if memory:
 
 # ---------------------------------------------------------------- persist
 for c in cards:
-    desk['cards'][c['id']]={**desk['cards'].get(c['id'],{}),'seen':c['seen'],'lastSeen':today,'lane':c['lane'],'act':c['act'],'ref':c['ref'],'status':c.get('status'),'key':c.get('key'),'since':c.get('since')}
+    desk['cards'][c['id']]={**desk['cards'].get(c['id'],{}),'seen':c['seen'],'lastSeen':today,'firstSeen':desk['cards'].get(c['id'],{}).get('firstSeen') or today,'lane':c['lane'],'act':c['act'],'ref':c['ref'],'status':c.get('status'),'key':c.get('key'),'since':c.get('since')}   # firstSeen 2026-11-09: latency was a lower bound without it
     if c.get('deferred'): desk.setdefault('holds',{}).setdefault(c['key'],{})['defer']=c['deferred']
 # 2026-10-22: a top or bottom id that matched no live card for seven days is stale (five sweep decisions from 18 Sep sat in top)
 def _stale(cid):

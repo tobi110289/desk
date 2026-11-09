@@ -72,7 +72,7 @@ if verb!='caption':
             tmp=dp+'.tmp'; json.dump(rec,open(tmp,'w'),ensure_ascii=False,indent=1); os.replace(tmp,dp)
     except FileNotFoundError: pass
     except Exception as e: print('decision not marked:',e)
-d['log'].append({'date':today,'id':cid,'verb':verb,'note':' '.join(sys.argv[3:]) if verb!='defer' else f"until {sys.argv[3]}"})
+d['log'].append({'date':today,'id':cid,'verb':verb,'lane':next((x.get('lane') for x in cardsdoc.get('cards',[])+cardsdoc.get('parked',[]) if x.get('id')==cid),None),'note':' '.join(sys.argv[3:]) if verb!='defer' else f"until {sys.argv[3]}"})   # lane 2026-11-09: close rows had no lane, so per-lane rates came from guesses
 json.dump(d,open(P,'w'),indent=1,ensure_ascii=False); print(f"{cid} → {verb}")
 # the pane reads the verb from the card itself until the next gather removes it
 if verb!='caption':

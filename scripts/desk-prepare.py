@@ -68,10 +68,18 @@ TICKET_OPTIONS = {
 }
 
 
+MACHINE_TRIGGER = re.compile(r'^(?:trigger:\s*)?(?:\d{4}-\d{2}-\d{2}|deployed:|merged:|pr-merged:|appstore:|a2a:)')
+
+
 def options_of(card):
     if card.get('lane') == 'TICKET':
         return TICKET_OPTIONS.get(card.get('kind') or 'notion', TICKET_OPTIONS['notion'])
-    return OPTIONS.get(card.get('lane'), [])
+    opts = list(OPTIONS.get(card.get('lane'), []))
+    # 2026-11-09 (all desk history): 10 of 25 model-class runs failed on "Hand the rework to its agent" because no agent
+    # terminal existed. The option exists only while the card names a live terminal or workspace.
+    if card.get('lane') == 'REVIEW' and not (card.get('terminal') or card.get('workspace')):
+        opts = [o for o in opts if o != 'Hand the rework to its agent']
+    return opts
 # 2026-10-14: a customer-text card whose reply is drafted and checked puts the send on the pane, first. The pick is the
 # send approval; no second question. OPTIONS above stay the set while checks are open or the thread is not yet claimed.
 REPLY_LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST'}
@@ -224,6 +232,13 @@ def fingerprint(card):
     return hashlib.sha1(f"{card.get('status') or ''}|{card.get('act') or ''}".encode()).hexdigest()[:12]
 
 
+def errors_before(cid):
+    try:
+        return int(json.load(open(brief_path(cid))).get('errors') or 0)
+    except Exception:
+        return 0
+
+
 def brief_path(cid):
     return f"{BRIEFS}/{re.sub(r'[^A-Za-z0-9._-]', '_', cid)}.json"
 
@@ -233,7 +248,17 @@ def fresh(card):
         b = json.load(open(brief_path(card['id'])))
     except Exception:
         return False
-    return b.get('fingerprint') == fingerprint(card) and not b.get('error')
+    if b.get('fingerprint') != fingerprint(card):
+        return False
+    if not b.get('error'):
+        return True
+    # 2026-11-09: the same cards failed 23 passes in a row on one API outage (93 errors). After an error the card waits
+    # 15, 30, then 60 minutes before the next try.
+    try:
+        waited = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.strptime(b['preparedAt'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)).total_seconds() / 60
+    except Exception:
+        return False
+    return waited < min(60, 15 * (2 ** (int(b.get('errors', 1)) - 1)))
 
 
 def recipe(lane, cid):
@@ -313,13 +338,14 @@ The desk's rules for a card (from its skill):
 - `deferTrigger` and `deferAct`: when a Defer is a sensible pick, name the one trigger it would wait on (a date, "customer replies", "manual:<person> answers …", "deployed:<env>:<pr>", "merged:<pr>") and the act when it fires, so a Defer picked on the pane runs without a question. Empty when no defer makes sense.
 - `learned`: what the material shows about the tenant or the requester that the memory block does not have (a role, an address form, who owns a config, a rollout state). One plain line each with its source and confidence in parentheses. The person answers one memory question for all cards at once, so write only what is worth a line in the support memory; usually empty.
 - `draft` holds only the text that would go out (or the command, or the decision). No remarks about the draft inside it: those belong in `fact` or `openChecks`.
+- A card whose material shows it already came back from a defer (`deferred` on the card) does not get Defer first again: it is acted on or dropped (111 of 321 defers were deferred again).
 - `seen` is the number of days the desk has shown this card. From 7 on, `why` says so in plain words ("on the desk for 12 days") and the recommendation weighs whether the card should still exist: Drop or Defer with a real trigger beats another day on the list.
 - Keep `fact` to one sentence. Keep `draft` under 1200 characters.
 - Every brief has a fixed shape so the person sees why the card is there, what to decide and for what. `why`: one sentence, what put the card on the desk, since when, and who waits ("Dana wrote at 09:11 today and has had no answer", "this file has sat untriaged since 26 Aug, nobody waits"). `decide`: the one question in one sentence ("Send Dana this answer as Luna?"). `then`: one or two sentences, what the recommended option sets in motion and what is at stake if nothing happens ("Luna sends it now; the thread stays open until she confirms on staging"). Keep `why` and `decide` under 160 characters and `then` under 300.
 - Plain words on the pane: the person reads `why`, `decide`, `then`, `fact` and `draft` without opening any file, often at the end of a long day. `fact` is one plain sentence under 140 characters: what the case is and what changed. `draft` on a batch or task card is at most three numbered lines; each names the thing in product words (what a user sees or cannot do), says whether it is still true, and ends with the verb. A reply draft is one short paragraph of customer text; it keeps the customer-text rules above and skips the three-line cap. Never put into `fact` or `draft`: file paths, function, hook or variable names, commit hashes, entity ids or UUIDs, status enum values, ticket folder slugs, backticked code. PR numbers, thread refs, ticket ids, dates and amounts may stay. `checks` and `openChecks` are for the agent and may carry identifiers; `why`, `decide`, `then`, `fact` and `draft` may not. The desk refuses a brief that breaks this.
 
 ## The card
-{json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'mins', 'waits', 'age', 'seen', 'status', 'note', 'act', 'pr', 'url')}, ensure_ascii=False, indent=1)}
+{json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'mins', 'waits', 'age', 'seen', 'deferred', 'status', 'note', 'act', 'pr', 'url')}, ensure_ascii=False, indent=1)}
 
 ## The lane recipe (CARDS.md)
 {recipe(card['lane'], card['id']) or '(no recipe section; work from the act line)'}
@@ -351,11 +377,11 @@ def prepare(card, dry=False):
         out = json.loads(r.stdout)
     except Exception as e:
         log(f'{cid}: runner failed: {e}')
-        json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(e)[:300], 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
+        json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(e)[:300], 'errors': errors_before(cid) + 1, 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
         return
     if out.get('is_error') or not out.get('structured_output'):
         log(f"{cid}: model error: {str(out.get('result'))[:200]}")
-        json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(out.get('result'))[:300], 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
+        json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(out.get('result'))[:300], 'errors': errors_before(cid) + 1, 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
         return
     so = out['structured_output']
     ready = drafted(card['lane'], so)
@@ -372,6 +398,8 @@ def prepare(card, dry=False):
         options.sort(key=lambda o: o['label'] != 'Send it')
     elif unchecked and any(o['label'] == 'Check the examples, then answer' for o in options):
         options.sort(key=lambda o: o['label'] != 'Check the examples, then answer')
+    else:
+        options = first_option_rules(card, so, options, p)
     brief = {
         'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'fingerprint': fingerprint(card),
         'status': card.get('status'), 'act': card.get('act'), 'key': card.get('key'), 'since': card.get('since'),
@@ -387,6 +415,30 @@ def prepare(card, dry=False):
     }
     json.dump(brief, open(brief_path(cid), 'w'), ensure_ascii=False, indent=1)
     log(f"{cid}: prepared in {(datetime.datetime.now() - t0).seconds}s, {len(brief['openChecks'])} open checks, ${out.get('total_cost_usd', 0):.3f}")
+
+
+def first_option_rules(card, so, options, material):
+    """Deterministic rules on what may lead (2026-11-09, from the score ledger since 22 Oct): Defer first missed 23 of 31,
+    "I sent it already" 17 of 24, "Draft the reply" 10 of 11; briefs with open checks hit 39 %, without 64 %. A card that
+    came back from a defer was deferred again in 111 of 321 cases."""
+    labels = [o['label'] for o in options]
+    def lead(label):
+        nonlocal options
+        if label in labels:
+            options.sort(key=lambda o: o['label'] != label)
+    first = labels[0] if labels else ''
+    trigger = (so.get('deferTrigger') or '').strip()
+    deferred_before = bool(card.get('deferred'))
+    no_validation = 'local validation note: none' in material
+    # Defer leads only on a machine-checkable trigger, and never on a card that already came back from a defer.
+    if first.startswith('Defer') and (deferred_before or not MACHINE_TRIGGER.match(trigger)):
+        options.sort(key=lambda o: o['label'].startswith('Defer'))
+    # open checks: the validation leads, not the draft or the record of a send
+    if so.get('openChecks') and 'Claim + validate now' in labels:
+        lead('Claim + validate now')
+    elif first in ('Draft the reply', 'I sent it already') and no_validation and 'Claim + validate now' in labels:
+        lead('Claim + validate now')
+    return options
 
 
 def now_iso():
