@@ -50,7 +50,7 @@ OPTIONS = {
     'REPLY': ['Send it', 'I sent it already', 'Edit then send', 'Defer until a trigger', 'Drop'],
     'NOTIFY': ['Send it', 'I sent it already', 'Edit then send', 'Nobody to tell (mark done)', 'Defer'],
     'PROMISE': ['Reply with a status', 'I sent it already', 'Close the loop (nothing owed)', 'Hand to a worker / ticket', 'Defer', 'Drop'],
-    'FAST': ['Claim + validate now', 'Draft the reply', 'I sent it already', 'Hand to a worker', 'Defer', 'Drop (unpin)'],
+    'FAST': ['Check the examples, then answer', 'Claim + validate now', 'Draft the reply', 'I sent it already', 'Hand to a worker', 'Defer', 'Drop (unpin)'],
     'REVIEW': ['Hand the rework to its agent', 'Review it now', 'Close the PR', 'Defer'],
     'RUN': ['Go (agent runs it now)', 'Show me the command first', 'Defer', 'Drop'],
     'INBOX': ['Answer now', 'Defer', 'Drop (reply as human: declined)', 'Close as read', 'Reply with a note'],
@@ -86,7 +86,7 @@ VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'de
          'Drop': 'drop', 'Drop (unpin)': 'drop', 'Nobody to tell (mark done)': 'do', 'Reply with a status': 'delegate',
          'Close the loop (nothing owed)': 'do', 'Hand to a worker / ticket': 'delegate', 'Claim + validate now': 'do',
          'Draft the reply': 'delegate', 'Hand to a worker': 'delegate', 'Hand the rework to its agent': 'delegate',
-         'Review it now': 'do', 'Close the PR': 'drop', 'Go (agent runs it now)': 'do', 'Show me the command first': 'decide',
+         'Review it now': 'do', 'Check the examples, then answer': 'do', 'Close the PR': 'drop', 'Go (agent runs it now)': 'do', 'Show me the command first': 'decide',
          'Answer now': 'decide', 'Drop (reply as human: declined)': 'drop', 'Close as read': 'do', 'Reply with a note': 'delegate',
          'Start it now': 'do', 'Hand it to agents': 'delegate', 'Answer': 'decide', 'Drop (accepted risk, recorded)': 'drop',
          'Send as staged': 'delegate', 'Drop the line': 'drop', 'Push (ask the owner / assign)': 'delegate', 'Hand to an agent': 'delegate',
@@ -183,6 +183,11 @@ def holder_block(t, rows):
     if notes:
         n = notes[0]  # newest first in the Plain page
         out.append(f"last internal note: {n['who']} at {n['at']}: {n['text'][:200].replace(chr(10), ' ')}")
+    # 2026-11-09, from the score ledger: "I sent it already" was recommended 19 times and right 3 times; in 10 of the
+    # misses the person picked "Claim + validate now". The brief saw our reply and called the card done, while the
+    # thread still had no validation note. So the material states it outright.
+    validated = next((r for r in rows if r['kind'] == 'Note' and 'triage validation' in r['text'].lower()), None)
+    out.append(f"local validation note: {validated['who']} at {validated['at']}" if validated else 'local validation note: none')
     visible = [r for r in rows if r['kind'] != 'Note' and r['kind'] != 'ThreadStatusTransitioned']
     newest_cust = next((r for r in visible if r['actor'] == 'CustomerActor'), None)
     ours_after = any(r['actor'] != 'CustomerActor' and r['at'] > newest_cust['at'] for r in visible) if newest_cust else False
@@ -194,7 +199,21 @@ def holder_block(t, rows):
     tagged = [p for p in deskconfig.TEAM if p.strip() != own and re.search(r'(?<![A-Za-z])@?' + re.escape(p.strip()) + r'(?![A-Za-z])', body)]
     if tagged:
         out.append(f"the newest customer message names {', '.join(tagged)}" + (' and we have not replied since: the answer may be theirs' if not ours_after else '; we replied after it'))
+    # 2026-11-09, from 30 days of corrections: five drafts were stopped with "check the examples first". The person
+    # had named a video, a screenshot or a case, and the draft answered before anyone had looked. A memory said so twice;
+    # the brief still led with the answer. So the material counts the examples, and prepare() refuses a ready draft
+    # while they are unchecked.
+    n = examples_named(body)
+    out.append(f"examples named in the newest customer message: {n}" + ('' if ours_after or not n else ' and nobody has replied since'))
     return '## Who holds this thread\n' + '\n'.join(out) + '\n\n## Timeline\n'
+
+
+EXAMPLE_WORDS = re.compile(r'https?://\S+|\b(?:screenshot|screenshots|video|videos|anhang|anbei|angehängt|attached|attachment|beispiel|beispiele|example|examples|z\.\s?b\.|zum beispiel|siehe|see below|bild|bilder|aufnahme|recording|replay)\b', re.I)
+
+
+def examples_named(body):
+    """How many examples the newest customer message points at: links, attachments, screenshots, named cases."""
+    return len(EXAMPLE_WORDS.findall(body or ''))
 
 
 def fingerprint(card):
@@ -277,6 +296,11 @@ def prompt(card, ctx):
                 f"Recommend Defer (trigger: that teammate answers) or the lane's drop option, name the holder in `why`, and leave `draft` empty unless the material shows the teammate handed it back.")
     else:
         rule = f"- The options are this lane's fixed set, in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use these labels verbatim. Set `replyReady` false."
+    if card['lane'] in REPLY_LANES:
+        rule += "\n- When the material says the newest customer message names examples and nobody has replied since, and there is no local validation note, the examples come first: the draft is not ready, say in `fact` what the customer pointed at, and recommend the lane's check option (\"Check the examples, then answer\" where the lane has it, otherwise the validation or draft option) over any send."
+    if 'I sent it already' in opts:
+        rule += ("\n- \"I sent it already\" only records a reply the person sent himself; it is the recommendation only when our visible reply is the newest message AND the thread needs nothing else. "
+                 "When the material says `local validation note: none` and the thread still carries a question, a bug or an unvalidated brief, the reply does not end the card: recommend \"Claim + validate now\" (or the lane's status reply) first, and say in `then` what the validation settles.")
     return f"""You prepare ONE card of a support desk for the person who runs it. You cannot use tools: everything you may rely on is in this message. Answer with the JSON the schema asks for.
 
 The desk's rules for a card (from its skill):
@@ -334,6 +358,10 @@ def prepare(card, dry=False):
         return
     so = out['structured_output']
     ready = drafted(card['lane'], so)
+    unchecked = re.search(r'examples named in the newest customer message: ([1-9]\d*) and nobody has replied since', p) and 'local validation note: none' in p
+    if unchecked and ready:  # the examples come before the answer (2026-11-09)
+        ready = False
+        so['then'] = ('The customer named examples nobody has looked at yet; the check comes before any answer. ' + (so.get('then') or '')).strip()[:300]
     allowed = DRAFTED if ready else options_of(card)
     options = [{'label': o['label'], 'verb': VERBS.get(o['label'], 'do'), 'why': o.get('why', '')} for o in so.get('options', []) if o.get('label') in allowed]
     for label in allowed:  # the fixed set stays complete, recommended ones first
@@ -341,6 +369,8 @@ def prepare(card, dry=False):
             options.append({'label': label, 'verb': VERBS.get(label, 'do'), 'why': ''})
     if ready:  # a checked draft always leads with the send
         options.sort(key=lambda o: o['label'] != 'Send it')
+    elif unchecked and any(o['label'] == 'Check the examples, then answer' for o in options):
+        options.sort(key=lambda o: o['label'] != 'Check the examples, then answer')
     brief = {
         'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'fingerprint': fingerprint(card),
         'status': card.get('status'), 'act': card.get('act'), 'key': card.get('key'), 'since': card.get('since'),
