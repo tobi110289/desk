@@ -50,7 +50,7 @@ OPTIONS = {
     'REPLY': ['Send it', 'I sent it already', 'Edit then send', 'Defer until a trigger', 'Drop'],
     'NOTIFY': ['Send it', 'I sent it already', 'Edit then send', 'Nobody to tell (mark done)', 'Defer'],
     'PROMISE': ['Reply with a status', 'I sent it already', 'Close the loop (nothing owed)', 'Hand to a worker / ticket', 'Defer', 'Drop'],
-    'FAST': ['Check the examples, then answer', 'Claim + validate now', 'Draft the reply', 'I sent it already', 'Hand to a worker', 'Defer', 'Drop (unpin)'],
+    'FAST': ['Check the examples, then answer', 'Validate and draft (unattended)', 'Claim + validate now', 'Draft the reply', 'I sent it already', 'Hand to a worker', 'Defer', 'Drop (unpin)'],
     'REVIEW': ['Hand the rework to its agent', 'Review it now', 'Close the PR', 'Defer'],
     'RUN': ['Go (agent runs it now)', 'Show me the command first', 'Defer', 'Drop'],
     'INBOX': ['Answer now', 'Defer', 'Drop (reply as human: declined)', 'Close as read', 'Reply with a note'],
@@ -71,10 +71,14 @@ TICKET_OPTIONS = {
 MACHINE_TRIGGER = re.compile(r'^(?:trigger:\s*)?(?:\d{4}-\d{2}-\d{2}|deployed:|merged:|pr-merged:|appstore:|a2a:)')
 
 
-def options_of(card):
+def options_of(card, material=None):
     if card.get('lane') == 'TICKET':
         return TICKET_OPTIONS.get(card.get('kind') or 'notion', TICKET_OPTIONS['notion'])
     opts = list(OPTIONS.get(card.get('lane'), []))
+    # 2026-11-09: the unattended validation checks a Hermes brief; with no brief, or a validation note already on the
+    # thread, there is nothing for it to check and the session's "Claim + validate now" stays the path.
+    if card.get('lane') == 'FAST' and not unattended_fits(card, material):
+        opts = [o for o in opts if o != UNATTENDED]
     # 2026-11-09 (all desk history): 10 of 25 model-class runs failed on "Hand the rework to its agent" because no agent
     # terminal existed. The option exists only while the card names a live terminal or workspace.
     if card.get('lane') == 'REVIEW' and not (card.get('terminal') or card.get('workspace')):
@@ -83,6 +87,7 @@ def options_of(card):
 # 2026-10-14: a customer-text card whose reply is drafted and checked puts the send on the pane, first. The pick is the
 # send approval; no second question. OPTIONS above stay the set while checks are open or the thread is not yet claimed.
 REPLY_LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST'}
+UNATTENDED = 'Validate and draft (unattended)'   # deskplain.VALIDATE; desk-execute.py runs it as one background job
 DRAFTED = ['Send it', 'Edit then send', 'I sent it already', 'Defer', 'Drop']
 
 
@@ -92,7 +97,7 @@ def drafted(lane, so):
             and not so.get('resolved') and bool(so.get('replyReady')))
 VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'delegate', 'Defer': 'defer', 'Defer until a trigger': 'defer',
          'Drop': 'drop', 'Drop (unpin)': 'drop', 'Nobody to tell (mark done)': 'do', 'Reply with a status': 'delegate',
-         'Close the loop (nothing owed)': 'do', 'Hand to a worker / ticket': 'delegate', 'Claim + validate now': 'do',
+         'Close the loop (nothing owed)': 'do', 'Hand to a worker / ticket': 'delegate', 'Claim + validate now': 'do', UNATTENDED: 'delegate',
          'Draft the reply': 'delegate', 'Hand to a worker': 'delegate', 'Hand the rework to its agent': 'delegate',
          'Review it now': 'do', 'Check the examples, then answer': 'do', 'Close the PR': 'drop', 'Go (agent runs it now)': 'do', 'Show me the command first': 'decide',
          'Answer now': 'decide', 'Drop (reply as human: declined)': 'drop', 'Close as read': 'do', 'Reply with a note': 'delegate',
@@ -196,6 +201,9 @@ def holder_block(t, rows):
     # thread still had no validation note. So the material states it outright.
     validated = next((r for r in rows if r['kind'] == 'Note' and 'triage validation' in r['text'].lower()), None)
     out.append(f"local validation note: {validated['who']} at {validated['at']}" if validated else 'local validation note: none')
+    # 2026-11-09: the unattended validation needs a Hermes brief to check; the material says whether one is in view
+    hermes = next((r for r in rows if r['kind'] == 'Note' and any(m in r['text'] for m in HERMES_MARKERS)), None)
+    out.append(f"Hermes brief: {hermes['who']} at {hermes['at']}" if hermes else 'Hermes brief: none in the entries read')
     visible = [r for r in rows if r['kind'] != 'Note' and r['kind'] != 'ThreadStatusTransitioned']
     newest_cust = next((r for r in visible if r['actor'] == 'CustomerActor'), None)
     ours_after = any(r['actor'] != 'CustomerActor' and r['at'] > newest_cust['at'] for r in visible) if newest_cust else False
@@ -214,6 +222,37 @@ def holder_block(t, rows):
     n = examples_named(body)
     out.append(f"examples named in the newest customer message: {n}" + ('' if ours_after or not n else ' and nobody has replied since'))
     return '## Who holds this thread\n' + '\n'.join(out) + '\n\n## Timeline\n'
+
+
+HERMES_MARKERS = ('<!-- ORBOT_CANONICAL_TRIAGE_BRIEF', '<!-- ORBOT_TRIAGE_DELTA', 'TRIAGE_CLAIMS_JSON', '## Triage note part', '## Agent Brief')   # jev/plain.py
+
+
+def unattended_fits(card, material=None):
+    """The unattended validation is offered on a FAST card with a thread whose material shows a Hermes brief and no
+    local validation note. Without material (no read yet) it stays in the set; the brief's material decides."""
+    if not card.get('thread') or not re.match(r'^T-\d+$', card.get('ref') or ''):
+        return False
+    if material is None:
+        return True
+    return 'local validation note: none' in material and 'Hermes brief: none' not in material and 'Hermes brief:' in material
+
+
+def unattended_failed(card):
+    """True when the unattended validation already failed for this card's current wait: the session takes it then."""
+    try:
+        rec = json.load(open(f"{DESK}/decisions/{re.sub(r'[^A-Za-z0-9._-]', '_', card['id'])}.json"))
+    except Exception:
+        return False
+    return (rec.get('option') == UNATTENDED and rec.get('state') in ('failed', 'bounced')
+            and rec.get('key') == card.get('key') and rec.get('since') == card.get('since'))
+
+
+def unattended_draft(ref):
+    """The reply the unattended validation drafted (drafts/<ref>.unattended.json), or None."""
+    try:
+        return json.load(open(f"{DESK}/drafts/{re.sub(r'[^A-Za-z0-9._-]', '_', ref)}.unattended.json"))
+    except Exception:
+        return None
 
 
 EXAMPLE_WORDS = re.compile(r'https?://\S+|\b(?:screenshot|screenshots|video|videos|anhang|anbei|angehängt|attached|attachment|beispiel|beispiele|example|examples|z\.\s?b\.|zum beispiel|siehe|see below|bild|bilder|aufnahme|recording|replay)\b', re.I)
@@ -275,7 +314,7 @@ def recipe(lane, cid):
         head = m.group(1)
         if any(head.startswith(w) for w in want) or (lane in ('REPLY', 'NOTIFY', 'PROMISE', 'FAST') and (head.startswith('Support memory') or head.startswith('Sending as Luna'))):
             out.append(f'### {head}\n{m.group(2).strip()}\n')
-    return '\n'.join(out)[:9000]
+    return '\n'.join(out)[:14000]   # 2026-11-09: 9000 cut the Luna sending rules off the FAST recipe
 
 
 def material(card):
@@ -289,6 +328,11 @@ def material(card):
         parts.append('## Support memory block (memory.py show)\n' + sh(['python3', f'{DESK}/memory.py', 'show', ref], 60)[:8000])
     elif thread:
         parts.append('## Support memory block\nnone: company unmapped (the checks must say so; never guess from the domain)')
+    u = unattended_draft(ref) if ref else None
+    if u and (u.get('draft') or '').strip():
+        parts.append(f"## Draft from the unattended validation ({u.get('at')}, verdict {u.get('verdict') or '?'})\n"
+                     f"Written by the desk's background run right after its validation note; checked against that note.\n"
+                     f"checks: {json.dumps(u.get('checks') or [], ensure_ascii=False)}\nopen checks: {json.dumps(u.get('openChecks') or [], ensure_ascii=False)}\n\n{u['draft'][:2500]}")
     pr = card.get('pr')
     if pr:
         # repo names live in config.json (deskconfig.py), never here
@@ -310,7 +354,7 @@ def material(card):
 
 
 def prompt(card, ctx):
-    opts = options_of(card)
+    opts = options_of(card, ctx)
     if card['lane'] in REPLY_LANES:
         rule = (f"- The options depend on the draft. When `draft` is a customer reply the person could send as it stands, set `replyReady` true and use this set with \"Send it\" first: {json.dumps(DRAFTED, ensure_ascii=False)}. "
                 f"Ready means: every claim in the draft is backed by a line in the context (`checks`), or the draft makes no claim a check could refute (a how-to taken from the material, an acknowledgement, a question back). "
@@ -326,6 +370,12 @@ def prompt(card, ctx):
     if 'I sent it already' in opts:
         rule += ("\n- \"I sent it already\" only records a reply the person sent himself; it is the recommendation only when our visible reply is the newest message AND the thread needs nothing else. "
                  "When the material says `local validation note: none` and the thread still carries a question, a bug or an unvalidated brief, the reply does not end the card: recommend \"Claim + validate now\" (or the lane's status reply) first, and say in `then` what the validation settles.")
+    if UNATTENDED in opts:
+        rule += (f"\n- \"{UNATTENDED}\" claims the thread, checks the Hermes brief, posts the validation note and drafts the reply in one background run; the card comes back with the draft. "
+                 "With a Hermes brief in view and `local validation note: none`, recommend it over \"Claim + validate now\" unless the customer named examples nobody has checked.")
+    if 'Draft from the unattended validation' in ctx:
+        rule += ("\n- The material carries a draft from the unattended validation, written after its note. When no customer message came after it, start from that draft: "
+                 "keep it unless a line in the context refutes it, carry its checks over, and set `replyReady` when its open checks are empty.")
     return f"""You prepare ONE card of a support desk for the person who runs it. You cannot use tools: everything you may rely on is in this message. Answer with the JSON the schema asks for.
 
 The desk's rules for a card (from its skill):
@@ -389,7 +439,7 @@ def prepare(card, dry=False):
     if unchecked and ready:  # the examples come before the answer (2026-11-09)
         ready = False
         so['then'] = ('The customer named examples nobody has looked at yet; the check comes before any answer. ' + (so.get('then') or '')).strip()[:300]
-    allowed = DRAFTED if ready else options_of(card)
+    allowed = DRAFTED if ready else options_of(card, p)
     options = [{'label': o['label'], 'verb': VERBS.get(o['label'], 'do'), 'why': o.get('why', '')} for o in so.get('options', []) if o.get('label') in allowed]
     for label in allowed:  # the fixed set stays complete, recommended ones first
         if all(o['label'] != label for o in options):
@@ -433,10 +483,14 @@ def first_option_rules(card, so, options, material):
     # Defer leads only on a machine-checkable trigger, and never on a card that already came back from a defer.
     if first.startswith('Defer') and (deferred_before or not MACHINE_TRIGGER.match(trigger)):
         options.sort(key=lambda o: o['label'].startswith('Defer'))
-    # open checks: the validation leads, not the draft or the record of a send
-    if so.get('openChecks') and 'Claim + validate now' in labels:
-        lead('Claim + validate now')
-    elif first in ('Draft the reply', 'I sent it already') and no_validation and 'Claim + validate now' in labels:
+    # open checks: the validation leads, not the draft or the record of a send. 2026-11-09: the unattended validation
+    # leads when it can run (Hermes brief, no note, no failed run on this wait); after a failure the session's claim leads.
+    validation = UNATTENDED if UNATTENDED in labels and not unattended_failed(card) else 'Claim + validate now'
+    if so.get('openChecks') and validation in labels:
+        lead(validation)
+    elif first in ('Draft the reply', 'I sent it already', 'Claim + validate now') and no_validation and validation in labels:
+        lead(validation)
+    elif first == UNATTENDED and validation != UNATTENDED:
         lead('Claim + validate now')
     return options
 
