@@ -28,6 +28,8 @@ DESK=f'{HOME}/orbit-scratch/desk'
 DESKFILE=f'{DESK}/desk.json'
 HERMES_LOG=f'{HOME}/orbit-scratch/hermes-feedback/LOG.md'
 import deskconfig, deskhold
+import deskcoverage
+_cov=deskcoverage.Coverage()   # 2026-11-09: what each source saw vs what reached the desk (deskcoverage.py)
 PLAIN=deskconfig.PLAIN_THREAD
 ORBIT=deskconfig.REPO; ORBOT=deskconfig.BOT_REPO
 GH=f'https://github.com/{ORBIT}/pull/'; GHO=f'https://github.com/{ORBOT}/'
@@ -445,6 +447,9 @@ def add(card):
     cards.append(card)
 
 # ---------------------------------------------------------------- source 1: agent-loop state
+# 2026-11-09: every card offered to add() counts as reached for the coverage pass (a hold, ignore.json or a batch decides it there)
+_add_built=add
+def add(card): _cov.offer(card); return _add_built(card)
 AGENT_OWNED=r'agent polling|agent working|agent on HORST|\(no action\)|worker \d+%|in HORST queue|^sent[ :"]|; agent wo'
 STALE_AGENT_HOURS=6
 _prh_doc=None
@@ -541,13 +546,19 @@ def screen_card(ref,t,x):
 for ref,t in state.items():
     ph=t.get('phase'); st=(t.get('status') or '').strip(); note=(t.get('note') or '')
     _x=_screens.get(ref)
+    if t.get('terminal') and ph in ('handoff-running','pr-open','blocked'): _cov.see('workers',ref,f"{ph}, screen {(_x or {}).get('state') or 'unread'} {(_x or {}).get('conf') or ''}".strip())
     if _x and _x.get('state')=='gone' and ph in ('handoff-running','pr-open','blocked'):
         # 2026-09-29: an unreadable terminal is settled by the cache's box facts, not by a hand read (CARDS.md RUN)
         if _x.get('sentinel') or _x.get('tmuxAlive') is False: _x={**_x,'conf':1.0}
-        elif _x.get('tmuxAlive') is True: continue   # detached terminal, agent alive: the loop re-attaches
+        elif _x.get('tmuxAlive') is True: _cov.explain(ref,'detached terminal, agent alive'); continue   # detached terminal, agent alive: the loop re-attaches
     if _x and (_x.get('conf') or 0)>=0.85 and ph in ('handoff-running','pr-open','blocked'):
         _c=screen_card(ref,t,_x)
-        if _c=='hide': continue
+        if _c=='hide':
+            # coverage: a worker mid-turn, or idle while its open PR sits with HORST, is a reason; an idle worker with no
+            # open PR is not (the first coverage run found nine such terminals hidden, a P0 hotfix among them)
+            if _x.get('state')=='mid_turn_working': _cov.explain(ref,'worker mid-turn')
+            elif t.get('pr') in my_prs: _cov.explain(ref,f"worker idle, #{t['pr']} with HORST or approved")
+            continue
         if _c: add(_c); continue
     if ph=='pr-open' and t.get('pr') and not t.get('terminal'):
         # 2026-09-17: a pr-open entry with no terminal has no agent; it reaches the desk when CI is red or nothing
@@ -558,11 +569,12 @@ for ref,t in state.items():
             add({'id':f'loop:{ref}','ref':ref,'lane':'RUN','mins':2,'impact':impact_of(ref)[0],'age':age_days(t.get('updated') or ''),'waits':'nobody',
                  'pr':t['pr'],'task':t.get('task'),'workspace':None,'host':None,'terminal':None,'thread':(byref.get(ref) or {}).get('id') or t.get('threadId'),
                  'status':st,'note':note[:400],'since':f"pr-open:{t['pr']}:{why}",'act':f"#{t['pr']} has no agent and {why}: own it (fix CI / add auto-review) or spawn a babysit",'score':round((impact_of(ref)[1]+2)/2*10,1)})
+        elif pi: _cov.explain(ref,'pr-open, CI green and queued for HORST')
         continue
     if ph not in ('blocked','done'): continue
     if ph=='done' and not re.search(r'reply|open|pending|release|sync|rollout|deploy',st): continue
     if ph=='done' and re.search(r'(^|[;:] )done\s*$',st): continue   # 2026-09-16: a done entry whose caption ends in 'done' waits on nobody (T-111 came back daily as STALE)
-    if re.search(r'reply sent',st) and not re.search(r'\+ ',st): continue
+    if re.search(r'reply sent',st) and not re.search(r'\+ ',st): _cov.explain(ref,'reply sent, waits on the customer'); continue
     _dc=(desk.get('captions') or {}).get(ref) or {}
     _stamps=[parse_iso(t.get('updated') or '')]+([parse_iso(_dc.get('at') or '')] if _dc.get('status')==st else [])
     silent=hours_since(max(x for x in _stamps if x)) if any(_stamps) else 0   # desk-caption.py stamps its own rewrites
@@ -570,7 +582,7 @@ for ref,t in state.items():
         # 2026-09-17 (Tobias: 20 open PRs, none on the desk): a caption that says an agent owns the work is only trusted
         # for STALE_AGENT_HOURS. Nine "agent working" rows were 23h old; the terminals held unsent lines, a Fable limit
         # and two dead sessions. Older than that, the caption is a claim to verify, not a reason to skip.
-        if silent<STALE_AGENT_HOURS: continue
+        if silent<STALE_AGENT_HOURS: _cov.explain(ref,f'agent-owned caption, {silent:.0f}h old'); continue
         lane,mins,waits,tpl='RUN',2,'nobody','Read the terminal of {ref} {pr}: caption "{status}" is '+f'{silent:.0f}h old'+'; rewrite it (staged / stalled / working)'
     else:
         lane,mins,waits,tpl='STALE',2,'nobody','Re-read {ref} and decide: keep (with a status) or drop'
@@ -578,9 +590,9 @@ for ref,t in state.items():
             if re.search(pat,st):
                 lane,mins,waits,tpl=name,m,w,tp; break
         else:
-            if re.search(ASK_RE,st): continue   # waits on a teammate (ASK_RE above)
+            if re.search(ASK_RE,st): _cov.explain(ref,'waits on a teammate'); continue   # waits on a teammate (ASK_RE above)
             _jl=_jev.lane(ref)   # regex matched nothing: Jev may promote the row into a real lane (never into NONE)
-            if _jl=='ASK': continue
+            if _jl=='ASK': _cov.explain(ref,'waits on a teammate (Jev)'); continue
             if _jl: lane,mins,waits,tpl=next((n,m,w,tp) for n,_,m,w,tp in LANES if n==_jl)
     lvl,iw=impact_of(ref)
     age=age_days(t.get('updated') or '')
@@ -644,18 +656,23 @@ def pr_cards(repo,prefix,url):
     covered=({c['pr'] for c in cards if c.get('pr')} | set(loop_of)) if repo==ORBIT else set()
     for p in prs:
         n=p['number']; labels=[l['name'] for l in p['labels']]; ref=f'{prefix}#{n}'; cid=f'{"gh" if repo==ORBIT else "orbot"}:{n}'
+        _pi=_cov.pr_item(n,repo=repo); _cov.see('prs',_pi,p.get('title') or '')
         if any(c.get('pr')==n and c['lane'] in ('REVIEW','SEND') for c in cards): continue   # the loop already asks for it
         move=pr_next_move(p) if not p.get('needsHuman') else None   # needs-human has its own card (pr_health, with HORST's ask)
         if move:
             lref=loop_of.get(n)
-            if lref and any((h or {}).get('defer') for k,h in desk.get('holds',{}).items() if k.split(':',1)[-1]==lref): continue   # a parked hold on the entry is the deliberate wait
+            if lref and any((h or {}).get('defer') for k,h in desk.get('holds',{}).items() if k.split(':',1)[-1]==lref): _cov.explain(_pi,f'parked hold on {lref}'); continue   # a parked hold on the entry is the deliberate wait
             st,act,age,since=move
             add({'id':cid,'ref':ref,'lane':'REVIEW','mins':15,'impact':'-','age':age,'waits':'person','pr':n,'thread':None,'url':f'{url}{n}','repo':repo,'task':lref,
                  'status':st,'note':p['title'],'act':act,'since':since,'score':round((2+2+min(age/3,2))/15*10,1)})
             continue
-        if n in covered or p.get('isDraft'): continue
         needs = p.get('reviewDecision')=='CHANGES_REQUESTED' or p.get('mergeable')=='CONFLICTING' or 'needs-human-review' in labels
-        if not needs: continue
+        if n in covered or p.get('isDraft'):
+            # coverage: a loop entry speaks for a PR that needs a move; otherwise no rule asks anything of a person yet
+            if needs and not p.get('isDraft') and n in loop_of: _cov.via(_pi,loop_of[n])
+            else: _cov.explain(_pi,'draft, no move yet' if p.get('isDraft') else 'no move for a person')
+            continue
+        if not needs: _cov.explain(_pi,'no move for a person: CI or HORST owns it'); continue
         st=', '.join(x for x in [p.get('reviewDecision') if p.get('reviewDecision')!='UNKNOWN' else None,p.get('mergeable') if p.get('mergeable')=='CONFLICTING' else None,'needs-human-review' if 'needs-human-review' in labels else None] if x)
         age=age_days(p['updatedAt'])
         add({'id':cid,'ref':ref,'lane':'REVIEW','mins':15,'impact':'-','age':age,'waits':'agent','pr':n,'thread':None,'url':f'{url}{n}','repo':repo,
@@ -685,7 +702,7 @@ except Exception as _e:
 if feed:
     lookups_waiting=[]
     for t in feed.get('waitingOnMe',[]):
-        kind=t.get('kind') or 'lookup'; h=a2a_age_h(t)
+        kind=t.get('kind') or 'lookup'; h=a2a_age_h(t); _cov.see('inbox',t.get('taskId'),f"{kind} from {t.get('from')}")
         if kind=='message':
             add({'id':f"a2a:{t['taskId']}",'ref':f"@{t.get('from')}",'lane':'INBOX','mins':1,'impact':'P2','age':int(h//24),'waits':'agent','pr':None,'thread':None,'url':None,
                  'a2a':{'taskId':t['taskId'],'from':t.get('from'),'kind':kind,'acked':bool(t.get('acked')),'points':0,'decision':None},'since':t['taskId'],
@@ -694,6 +711,7 @@ if feed:
             continue
         if kind!='decision':
             if h>=1: lookups_waiting.append(t)
+            _cov.explain(t.get('taskId'),'lookup: the inbox poller answers it' if h<1 else 'lookup over an hour: the poller card carries it')
             continue
         pts=(t.get('decision') or {}).get('points') if isinstance(t.get('decision'),dict) else None
         n=len(pts) if pts else max(1,len(re.findall(r'(?m)^\s*\*?\d+[a-z]?[.)]',t.get('text') or '')))
@@ -1080,11 +1098,11 @@ try:
         sec=re.search(r'^## '+bucket+r'\..*?$(.*?)(?=^## |\Z)',gap_md,re.S|re.M)
         for m in re.finditer(r'- \[(T-\d+)\]\((https://[^)]+/thread/(th_\w+))\) (\S+) · (.*?) · (\S*) · `([^`]*)`',sec.group(1) if sec else ''):
             ref,url,tid,lvl,title,_date,st=m.groups()
-            if ref in _carded or ref in notify_refs: continue
-            if state.get(ref,{}).get('phase') in ('handoff-running','pr-open','blocked'): continue
+            if ref in _carded or ref in notify_refs: _cov.explain(ref,'has a card, or its card got a verb today'); continue
+            if state.get(ref,{}).get('phase') in ('handoff-running','pr-open','blocked'): continue   # the loop source decides it (and records its reason)
             if SCOPE and not in_scope({'id':f'owe:{ref}','ref':ref,'thread':tid}): continue
             age=age_days((_date or today)+'T00:00:00Z') if re.match(r'\d{4}-\d{2}-\d{2}$',_date or '') else 0
-            if age<minage: continue
+            if age<minage: _cov.explain(ref,f'needs-info, customer silent {age}d (card from day {minage})'); continue
             lvl=lvl if lvl in IMPACT else 'P2'
             # E = bot stalled (Tobias 2026-10-12): the triage pass ended needs-triage, so nobody holds the thread; the desk claims it for local triage
             why={'D':'ready-for-human, nobody listed it','E':'bot stalled (needs-triage), claim it here','J':'never swept','F':'needs-info, customer silent'}[bucket]
@@ -1429,6 +1447,17 @@ for _name,_err in failed_sources:
         'status':f'source {_name} failed: {_err[:80]}','note':_err,'since':today,'bonus':50,
         'act':f"The desk source '{_name}' failed this run ({_err[:100]}): its cards are missing until it runs again. Fix it or drop this for today",'score':0}
     add(_c); rank(_c)
+# 2026-11-09 coverage pass (deskcoverage.py): "something is missing from my desk" was the most frequent desk complaint
+# since September (25 times). Every TODO thread on the todo-gap page, own open PR, worker terminal and inbox task that
+# reached no card and no recorded reason becomes one coverage:<source> card. A scoped run is a subset by design: no pass.
+_cov_phrase=''
+if not SCOPE:
+    for _b,_sec in re.findall(r'^## ([A-J])\. .*?$(.*?)(?=^## |\Z)',gap_md or '',re.S|re.M):
+        for _m in re.finditer(r'- \[(T-\d+)\]\([^)]+\) \S+ · (.*?) · \S* · `([^`]*)`',_sec):
+            _cov.see('threads',_m.group(1),f"bucket {_b}: {_m.group(2)[:60]} · {_m.group(3)[:40]}")
+    for _c in _cov.cards(IGNORE,today): add(_c); rank(_c)
+    _cov_phrase=_cov.phrase(IGNORE)
+    if os.environ.get('DESK_DEBUG'): print(_cov.report(IGNORE),file=sys.stderr)
 # 2026-11-03 (Tobias): "i like to look at them one by one if there are edits or decisions to make. batch ONLY for cases
 # where its dropping unnecessary lines, or calling multiple workers to babysit, stuff that usually can go through as is."
 # A batch now holds only members whose move is known before anyone reads them; every other member stays the single card
@@ -1538,7 +1567,7 @@ if '--wins' in sys.argv:
     print(f"{len(wins)} closed today"); sys.exit(0)
 pins_live=[c['ref'] for c in live if c['id'].startswith('fast:')]   # tenant:<ref> cards share the FAST lane but are not pins
 _today_live=[c['ref'] for c in live if c.get('ref') in TODAY_NEW]+[c['ref'] for c in live if c.get('ref') in TODAY_ANSWERED]
-print(f"**Desk {now.strftime('%Y-%m-%dT%H:%MZ')}**{f' · scope: {SCOPE}' if SCOPE else ''}{(' · today: '+', '.join(_today_live)) if _today_live else ''}{(' · pinned: '+', '.join(pins_live)) if pins_live else ''} · {len({r for c in live for r in _refs(c)})} waiting on you ({len(live)} cards{(' incl. '+str(len([c for c in live if not _refs(c)]))+' outside the loop') if [c for c in live if not _refs(c)] else ''}, ~{total} min) · {len(parked)} parked · {len(wins)} closed today")
+print(f"**Desk {now.strftime('%Y-%m-%dT%H:%MZ')}**{f' · scope: {SCOPE}' if SCOPE else ''}{(' · today: '+', '.join(_today_live)) if _today_live else ''}{(' · pinned: '+', '.join(pins_live)) if pins_live else ''} · {len({r for c in live for r in _refs(c)})} waiting on you ({len(live)} cards{(' incl. '+str(len([c for c in live if not _refs(c)]))+' outside the loop') if [c for c in live if not _refs(c)] else ''}, ~{total} min) · {len(parked)} parked · {len(wins)} closed today{(' · '+_cov_phrase) if _cov_phrase else ''}")
 due=[f"{k} ({v['reason']})" for k,v in preflight.items() if v['due']]
 quiet=[f"{k} ({v['reason']})" for k,v in preflight.items() if not v['due']]
 print(f"PRE-FLIGHT: due → {'; '.join(due) if due else 'none'}" + (f" · quiet → {'; '.join(quiet)}" if quiet else '')
