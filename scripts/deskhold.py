@@ -19,6 +19,12 @@ desk.json keeps `holds[key]` = {closed: {...}, defer: {...}}; `cards[id]` keeps 
 migrate() moves the records written before this module into `holds`, keyed from the card id and lane they were written
 for; a closure from before holds for its own day only, a deferral adopts the card's `since` the first time it matches.
 """
+# 2026-11-09 (all-time desk report: 39 % of closes hit an id closed before; in W45 17 of 76 closes came back within a
+# day, about 12 of them with nothing new): one reply wait (`reply:<ref>`) is fed by four sources that each write their
+# own `since` (today/fast "TODO|<customer time>", owe "<bucket>:<grade>", promise "<newest entry>", notify
+# "deployed:<env>:<at>"), so a closure bound to one card's since never matched its siblings, and our own grade or
+# status writes moved it. A closure that answered the customer (a send, "sent it already", nothing owed) is now `sent`:
+# it holds every reply wait of the thread until the customer writes again (or, on a NOTIFY card, a newer deploy).
 import datetime, re, zoneinfo
 
 BERLIN = zoneinfo.ZoneInfo('Europe/Berlin')
@@ -42,6 +48,49 @@ def entity_of(card):
     if REF_RE.match(ref): return ref
     cid = card.get('id') or ''
     return cid.split(':', 1)[-1] if ':' in cid else cid
+
+
+REPLY_KINDS = ('reply', 'unanswered')
+ISO_RE = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}')
+# the notes a send leaves (desk-execute.py writes the first three; session closes word it the same way)
+SENT_RE = re.compile(r'(replied|sent|told)\b[^.;]{0,40}\bluna\b|\bluna (replied|sent|told)\b|sent it (himself|already)|nobody to tell|nothing owed', re.I)
+
+
+def reply_wait(card):
+    """True for a card of the thread's reply wait (today, fast, owe, promise, notify, gap, unanswered)."""
+    return key_of(card).split(':', 1)[0] in REPLY_KINDS
+
+
+def customer_at(card):
+    """The newest customer message the card knows of: the source's field, else the time inside a 'STATUS|<iso>' since or
+    an unanswered since. None when the source does not know (owe reads only the sweep grade)."""
+    if card.get('customerAt'): return card['customerAt']
+    s = str(card.get('since') or '')
+    if '|' in s and ISO_RE.match(s.split('|', 1)[1]): return s.split('|', 1)[1]
+    if key_of(card).startswith('unanswered:') and ISO_RE.match(s): return s
+    return None
+
+
+def news_after_send(card, c):
+    """What reopens a `sent` closure: a customer message newer than the one the send answered, or on a NOTIFY card a
+    deploy newer than the send. The text says what changed, None while nothing did."""
+    sent_at = c.get('at') or f"{c.get('date') or ''}T00:00:00"   # a closure from before `at`: the start of its day
+    ref = c.get('customerAt') or sent_at
+    cust = customer_at(card)
+    if cust and cust[:19] > ref[:19]: return f"the customer wrote again {cust[:16]}Z"
+    # a source that cannot tell the customer from us (owe reads the sweep cache) reopens on any entry after the send
+    act = card.get('activityAt')
+    if not cust and act and act[:19] > sent_at[:19]: return f"new entries on the thread since the send ({act[:16]}Z)"
+    m = re.match(r'deployed:(\w+):(\S+)', str(card.get('since') or ''))
+    if card.get('lane') == 'NOTIFY' and m and m.group(2)[:19] > (c.get('at') or f"{c.get('date') or ''}T23:59:59")[:19]:
+        return f"a newer deploy on {m.group(1)} {m.group(2)[:16]}Z"
+    return None
+
+
+def norm(since):
+    """2026-11-09: an idle worker reads as idle_empty_prompt or finished_summary from one capture to the next; the desk
+    treats both the same (screen_card), so they are one wait."""
+    return re.sub(r'^screen:finished_summary:', 'screen:idle_empty_prompt:', since) if isinstance(since, str) else since
 
 
 def key_of(card):
@@ -148,7 +197,9 @@ def hold(desk, card, today):
             if c.get('verb') == 'drop' and c.get('date') == today and k.split(':', 1)[-1] == ent: return ('closed', c)
     h = holds.get(key) or {}
     c = h.get('closed')
-    if c:
+    if c and c.get('sent') and not members and reply_wait(card):
+        if not news_after_send(card, c): return ('closed', c)
+    elif c:
         if members:
             # a batch stays closed only today and only while its member set has not grown (2026-09-10: a SEND batch closed
             # on 09-09 hid a staged line for a day)
@@ -159,7 +210,7 @@ def hold(desk, card, today):
             if not texts:
                 if c.get('date') == today: return ('closed', c)
             elif any(_cmp(cid, x) == _cmp(cid, card.get('status') or '') for x in texts): return ('closed', c)
-        elif c.get('since') == since: return ('closed', c)
+        elif norm(c.get('since')) == norm(since): return ('closed', c)
     d = h.get('defer')
     if not d and not members:
         # 2026-09-14: loop:<ref> and the thread's reply wait (gap:<ref>) are one thread and one act; a deferral on one
@@ -182,7 +233,7 @@ def hold(desk, card, today):
             return ('void', {**d, 'why': 'caption changed'})
         d.pop('legacy', None); d.pop('status', None); d['since_wait'] = since
         return ('parked', d)
-    if d.get('since_wait') is not None and d['since_wait'] != since and not card.get('rebuilt'):
+    if d.get('since_wait') is not None and norm(d['since_wait']) != norm(since) and not card.get('rebuilt'):
         return ('void', {**d, 'why': 'the wait moved on'})
     return ('parked', d)
 
@@ -197,15 +248,68 @@ def _cmp(cid, s):
     return s or ''
 
 
-def close(desk, card, verb, today, note='', since=None):
-    """Record a verb on the card's wait. `since` overrides the card's (a caption written in the same call)."""
+def close(desk, card, verb, today, note='', since=None, sent=False):
+    """Record a verb on the card's wait. `since` overrides the card's (a caption written in the same call). `sent` (or a
+    note that says the reply went out) closes every reply wait of the thread until the customer writes again."""
     key = key_of(card)
     rec = {'verb': verb, 'date': today, 'note': note, 'id': card.get('id'),
            'since': since if since is not None else since_of(card)}
     if card.get('members'): rec['members'] = [member_key(m) for m in card['members']]; rec.pop('since', None)
     h = desk.setdefault('holds', {}).setdefault(key, {})
     h['closed'] = rec; h.pop('defer', None)
+    if not card.get('members') and verb != 'defer' and (sent or SENT_RE.search(note or '')) and reply_wait(card):
+        rec['sent'] = True; rec['at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        if customer_at(card): rec['customerAt'] = customer_at(card)
+        # the sibling waits of the thread hold too; a deferral there is its own plan and stays
+        for k in (f"reply:{entity_of(card)}", f"unanswered:{entity_of(card)}"):
+            sh = desk['holds'].setdefault(k, {})
+            if k != key and not sh.get('defer'): sh['closed'] = {**rec, 'via': key}
     return key
+
+
+def last_close(desk, card):
+    """Why a card that had a verb is back: the verb, its date and what changed. None when it never had one."""
+    key = key_of(card); cid = card.get('id') or ''
+    c = ((desk.get('holds') or {}).get(key) or {}).get('closed')
+    week = (datetime.date.fromisoformat(today_berlin()) - datetime.timedelta(days=7)).isoformat()
+    if c and (c.get('date') or '') < week: c = None   # an old verb is history, not news
+    if c and not card.get('members'):
+        if c.get('sent'): what = news_after_send(card, c) or 'new'
+        else: what = f"the wait moved: {str(c.get('since'))[:40]!r} -> {str(since_of(card))[:40]!r}"
+        return f"{c.get('verb')} {c.get('date')}: {(c.get('note') or '')[:80]}; since then {what}"
+    if card.get('members'): return None
+    for k, h in (desk.get('holds') or {}).items():
+        o = (h or {}).get('closed') or {}
+        if k != key and o.get('id') == cid and not o.get('via') and o.get('date') == today_berlin():
+            return f"{o.get('verb')} {o.get('date')} on its other wait {k.split(':', 1)[0]}: {(o.get('note') or '')[:80]}; this wait ({key.split(':', 1)[0]}) is still open"
+    return None
+
+
+def mark_sent(desk):
+    """2026-11-09, once: a reply-wait closure written before `sent` existed whose note says the reply went out counts as
+    sent. Returns the number marked; runs once (desk['sentMarked']), later sends are marked by close() in order."""
+    if desk.get('sentMarked'): return 0
+    desk['sentMarked'] = True
+    n = 0
+    for key, h in (desk.get('holds') or {}).items():
+        c = (h or {}).get('closed') or {}
+        if c and not c.get('sent') and not c.get('members') and key.split(':', 1)[0] in REPLY_KINDS and SENT_RE.search(c.get('note') or ''):
+            c['sent'] = True
+            s = str(c.get('since') or '')
+            if '|' in s and ISO_RE.match(s.split('|', 1)[1]): c['customerAt'] = s.split('|', 1)[1]
+            elif key.startswith('unanswered:') and ISO_RE.match(s): c['customerAt'] = s
+            n += 1
+    # the sibling wait of the thread holds too, unless it carries a deferral or a newer verb of its own
+    for key, h in list((desk.get('holds') or {}).items()):
+        c = (h or {}).get('closed') or {}
+        if not c.get('sent') or c.get('via'): continue
+        kind, _, ent = key.partition(':')
+        if kind not in REPLY_KINDS: continue
+        sib = desk['holds'].setdefault(f"{'unanswered' if kind == 'reply' else 'reply'}:{ent}", {})
+        have = sib.get('closed') or {}
+        if sib.get('defer') or have.get('sent') or (have.get('date') or '') > (c.get('date') or ''): continue
+        sib['closed'] = {**c, 'via': key}
+    return n
 
 
 def defer(desk, card, trigger, act, today, since=None):

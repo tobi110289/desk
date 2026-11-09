@@ -184,6 +184,7 @@ DESK_STAMP=_desk_stamp()
 desk=load(DESKFILE,{'cards':{},'log':[]})
 desk.setdefault('cards',{}); desk.setdefault('log',[]); desk.pop('runs',None); desk.pop('preflight',None)   # 2026-09-29: never read
 if deskhold.migrate(desk): print("desk: moved the closures and deferrals into holds (keyed by wait)",file=sys.stderr)
+if deskhold.mark_sent(desk): print("desk: marked the reply closures that sent an answer (holds until the customer writes)",file=sys.stderr)
 loopstate=load(f'{LOOP}/state.json',{'threads':{}})
 # live entries plus the archive (done entries older than 7 days, jev/loopstate.py): the desk still sees old done captions
 state={**load(f'{LOOP}/state-archive.json',{'threads':{}}).get('threads',{}),**loopstate.get('threads',{})}
@@ -425,6 +426,10 @@ def add(card):
     h=deskhold.hold(desk,card,today)
     if os.environ.get('DESK_DEBUG'): print(f"HOLD {cid} key={card['key']} since={str(card['since'])[:40]!r} -> {h and h[0]}",file=sys.stderr)
     if h and h[0]=='closed': return
+    # 2026-11-09: a card that had a verb comes back saying what changed since (W45: about 12 re-closes read "already
+    # validated" or "already resolved" because the card looked new); a same-day verb under the id's other wait counts
+    _was=deskhold.last_close(desk,card)
+    if _was and not h: card['reopened']=_was; card['note']=f"reopened ({_was}): "+(card.get('note') or '')
     if h and h[0]=='void':
         d=h[1]; desk['holds'].get(card['key'],{}).pop('defer',None)
         card['note']=f"deferral voided ({d.get('why')} since {d.get('since')}, was until {d.get('trigger')}): "+(card.get('note') or '')
@@ -499,7 +504,7 @@ def screen_card(ref,t,x):
     base={'id':f'loop:{ref}','ref':ref,'impact':lvl,'age':age_days(t.get('updated') or ''),'pr':pr,'task':task,'workspace':t.get('workspace'),'host':t.get('host'),'terminal':t.get('terminal'),
           'thread':(byref.get(ref) or {}).get('id') or t.get('threadId'),'note':(t.get('note') or '')[:400],'screen':st,'screenAt':x.get('capturedAt'),
           # the wait: the screen state (a staged line's text is ghost text and changes every turn), plus the PR for PR-bound states
-          'since':f"screen:{st}:{pr or ''}"}
+          'since':deskhold.norm(f"screen:{st}:{pr or ''}")}
     if st=='mid_turn_working': return 'hide'
     pf=_pr_facts(pr)
     if st=='staged_line_typed':
@@ -800,15 +805,16 @@ def promise_cards():
         if t and t.get('phase')!='done': continue          # the loop owns it; its deploy note ends in a NOTIFY card
         d=plain_gql(q2,{'id':n['id']})
         if not d or not d.get('thread'): continue
-        last=None
+        last=None; cust_at=None
         for ed in d['thread']['timelineEntries']['edges']:
             x=ed['node']; e=x['entry']
-            if e['__typename'] in MSG_ENTRIES:
+            if e['__typename'] in MSG_ENTRIES and x['actor']['__typename']=='CustomerActor' and not cust_at: cust_at=x['timestamp']['iso8601']
+            if e['__typename'] in MSG_ENTRIES and not last:
                 txt=(e.get('chatText') or e.get('textContent') or e.get('slackText') or e.get('replyText') or e.get('teamsText') or '').strip()
                 last={'id':x['id'],'at':x['timestamp']['iso8601'],'actor':x['actor']['__typename'],
                       'who':((x['actor'].get('user') or x['actor'].get('machineUser') or {}).get('fullName') or ('customer' if x['actor']['__typename']=='CustomerActor' else 'us')),
                       'text':re.sub(r'\s+',' ',txt)}
-                break
+            if last and cust_at: break
         if not last: continue
         ours=last['actor'] in ('UserActor','MachineUserActor')
         fields={f['key']:f.get('stringValue') for f in n['threadFields']}
@@ -820,7 +826,7 @@ def promise_cards():
         who='you' if ours else cust or 'the customer'
         out.append({'id':f'promise:{ref}','ref':ref,'lane':'PROMISE','mins':3,'impact':lvl,'age':age,'waits':'customer',
              'pr':(fields.get('github_pr') or '').rsplit('/',1)[-1] or None,'task':None,'thread':n['id'],'url':PLAIN+n['id'],
-             'status':f"{'ours' if ours else 'customer'} last {last['at'][:10]} ({age}d, {detail}): {quote}",'since':last['at'],
+             'status':f"{'ours' if ours else 'customer'} last {last['at'][:10]} ({age}d, {detail}): {quote}",'since':last['at'],'customerAt':cust_at,'activityAt':last['at'],
              'note':f"{(n.get('title') or '')[:80]} · {cust} · {'we wrote last' if ours else 'customer wrote last, unanswered'}",
              'act':(f"{ref} ({(n.get('title') or '')[:50]}): {who} wrote last, {age} days ago, thread snoozed as {detail}. Tell {cust or 'the customer'} where it stands, close the loop, or hand it on"
                     if ours else f"{ref} ({(n.get('title') or '')[:50]}): {cust or 'the customer'} wrote last, {age} days ago, thread still snoozed. Answer or close"),
@@ -997,7 +1003,7 @@ def fast_thread_cards(threads,prefix):
         if f.get('github_pr'): note_bits.append(f"PR {f['github_pr']}")
         if f.get('notion_ticket'): note_bits.append(f"notion {f['notion_ticket']}")
         add({'id':f"{prefix}:{ref}",'ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':age,'waits':who,
-             'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],'since':f"{th.get('status') or 'TODO'}|{th.get('customerAt') or ''}",
+             'pr':t.get('pr'),'task':None,'thread':th['id'],'url':PLAIN+th['id'],'since':f"{th.get('status') or 'TODO'}|{th.get('customerAt') or ''}",'customerAt':th.get('customerAt') or None,
              'status':'; '.join(facts)[:300],'note':(th['title'][:120]+' · '+'; '.join(note_bits))[:300],
              'act':f"{ref} ({th['title'][:60]}, {th['email']}): {READINESS_ACT.get(rd,READINESS_ACT['needs-triage'])}",
              'score':deskevent.fast_score(lvl,who,age)})
@@ -1084,7 +1090,7 @@ try:
             why={'D':'ready-for-human, nobody listed it','E':'bot stalled (needs-triage), claim it here','J':'never swept','F':'needs-info, customer silent'}[bucket]
             add({'id':f'owe:{ref}','ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':age,'waits':'customer',
                  'pr':None,'task':None,'thread':tid,'url':url,
-                 'status':f"{why}: {st[:50]}",'note':title[:200],'since':f"{bucket}:{st}",
+                 'status':f"{why}: {st[:50]}",'note':title[:200],'since':f"{bucket}:{st}",'activityAt':((byref.get(ref) or {}).get('fingerprint') or {}).get('newestAt'),
                  'act':f"{ref} ({title[:60]}): {why}. Claim + validate, draft the reply, or hand it to a worker",
                  'score':base+IMPACT.get(lvl,1)+min(age,10)})
             _carded.add(ref)

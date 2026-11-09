@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""desk-close.py <card-id> <verb> [note]  — verbs: do decide delegate defer drop caption.  For defer: desk-close.py <id> defer "<trigger>" "<act>".  caption: store a status caption for a non-loop card (orbot / run cards) without closing it.
+"""desk-close.py <card-id> <verb> [note] [--sent]  — verbs: do decide delegate defer drop caption.  For defer: desk-close.py <id> defer "<trigger>" "<act>".  caption: store a status caption for a non-loop card (orbot / run cards) without closing it.
 
 2026-10-22: the verb lands on the card's wait (deskhold: holds[key], bound to the wait's `since`), never on a display
 string. The card's key and since come from cards.json, so this script holds no copy of the hold logic. It also writes
@@ -29,7 +29,14 @@ if '--caption' in sys.argv:
     # 2026-09-23: --caption "<text>" writes the loop caption here and binds the closure to it. Closing first and rewriting
     # the caption afterwards reopened every loop card the same sitting (T-121, ORB-201-KIT came back within minutes).
     i=sys.argv.index('--caption'); new_caption=sys.argv[i+1]; sys.argv=sys.argv[:i]+sys.argv[i+2:]
-bound=new_caption if new_caption is not None and cid.startswith(('loop:','gap:')) else None
+# 2026-11-09: only a card whose since IS the caption binds to the new one. A loop card built from the worker's screen
+# waits on the screen state; binding it to the caption reopened it on the next gather (W45: a loop card came back an
+# hour after its close, and the next close read "caption already reads ...")
+bound=new_caption if new_caption is not None and cid.startswith(('loop:','gap:')) and not str(deskhold.since_of(card)).startswith(('screen:','picker:','signoff:','pr-open:')) else None
+# 2026-11-09: --sent (desk-execute.py after a send, "sent it already", nothing owed): the reply wait of the thread stays
+# closed until the customer writes again, whatever the sibling sources write as their since (deskhold.close)
+sent='--sent' in sys.argv
+if sent: sys.argv.remove('--sent')
 if verb=='caption':
     c['caption']=' '.join(sys.argv[3:]); d.get('holds',{}).get(deskhold.key_of(card),{}).pop('closed',None)
 elif verb=='defer':
@@ -37,7 +44,7 @@ elif verb=='defer':
     if ' -> ' in _trig and not (len(sys.argv)>4 and sys.argv[4]): _trig,_act=[x.strip() for x in _trig.split(' -> ',1)]
     deskhold.defer(d,card,_trig.strip(),_act,today,since=bound)
 else:
-    deskhold.close(d,card,verb,today,' '.join(sys.argv[3:]),since=bound)
+    deskhold.close(d,card,verb,today,' '.join(sys.argv[3:]),since=bound,sent=sent)
     if cid.startswith('fast:'): d['pins']=[p for p in d.get('pins',[]) if p['ref']!=cid[5:]]   # a verb unpins a FAST card
     if cid.startswith('task:'):   # a verb ends a local task (tasks.json); a defer keeps it open
         try:
@@ -72,7 +79,7 @@ if verb!='caption':
             tmp=dp+'.tmp'; json.dump(rec,open(tmp,'w'),ensure_ascii=False,indent=1); os.replace(tmp,dp)
     except FileNotFoundError: pass
     except Exception as e: print('decision not marked:',e)
-d['log'].append({'date':today,'id':cid,'verb':verb,'lane':next((x.get('lane') for x in cardsdoc.get('cards',[])+cardsdoc.get('parked',[]) if x.get('id')==cid),None),'note':' '.join(sys.argv[3:]) if verb!='defer' else f"until {sys.argv[3]}"})   # lane 2026-11-09: close rows had no lane, so per-lane rates came from guesses
+d['log'].append({'date':today,'id':cid,'verb':verb,'lane':next((x.get('lane') for x in cardsdoc.get('cards',[])+cardsdoc.get('parked',[]) if x.get('id')==cid),None),'note':' '.join(sys.argv[3:]) if verb!='defer' else f"until {sys.argv[3]}",'key':deskhold.key_of(card),'since':bound if bound is not None else deskhold.since_of(card)})   # key+since 2026-11-09: a re-close could not say which field moved; lane 2026-11-09: close rows had no lane, so per-lane rates came from guesses
 json.dump(d,open(P,'w'),indent=1,ensure_ascii=False); print(f"{cid} → {verb}")
 # the pane reads the verb from the card itself until the next gather removes it
 if verb!='caption':

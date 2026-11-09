@@ -158,14 +158,17 @@ def add_note(thread_id, text):
     gql('mutation($input: CreateNoteInput!){ createNote(input:$input){ error{ message } } }', {'input': {'threadId': thread_id, 'text': text}})
 
 
-def close(rec, verb, note, caption=None, trigger=None, act=None, env=None):
-    """desk-close.py with the pick, so the brief is scored like a session close."""
+def close(rec, verb, note, caption=None, trigger=None, act=None, env=None, sent=False):
+    """desk-close.py with the pick, so the brief is scored like a session close. `sent`: the customer has the answer, so
+    the thread's reply wait stays closed until they write again (2026-11-09)."""
     argv = ['python3', f'{HERE}/desk-close.py', rec['cardId'], verb]
     if verb == 'defer':
         argv += [trigger, act or '']
     else:
         argv += [note]
     argv += ['--pick', rec['option']]
+    if sent:
+        argv += ['--sent']
     if caption:
         argv += ['--caption', caption]
     code, out = sh(argv, 60, env)
@@ -244,17 +247,17 @@ def run_script(path, rec, brief, card, dry):
                 log(f"{rec['cardId']}: sent, but mark done failed: {e}")
         caption = f'replied as Luna {at}; done' if lane != 'PROMISE' else None
         note = f'replied as Luna {at} (pane pick): {fact}' if lane == 'PROMISE' else f'replied as Luna {at} (pane pick)'
-        close(rec, verb, note, caption=caption, env=env)
+        close(rec, verb, note, caption=caption, env=env, sent=True)
         finish(path, rec, 'done', f'sent as Luna {at}', brief, card)
         return
     if label == 'I sent it already':
         at = hhmm()
-        close(rec, 'do', 'Tobias sent it himself (pane pick)', caption=f'replied {at}; done' if thread else None, env=env)
+        close(rec, 'do', 'Tobias sent it himself (pane pick)', caption=f'replied {at}; done' if thread else None, env=env, sent=True)
         finish(path, rec, 'done', 'recorded: sent by hand', brief, card); return
     if label == 'Nobody to tell (mark done)':
         if thread:
             mark_done(thread)
-        close(rec, 'do', 'nobody to tell (pane pick)', caption='done; nobody to tell' if thread else None, env=env)
+        close(rec, 'do', 'nobody to tell (pane pick)', caption='done; nobody to tell' if thread else None, env=env, sent=True)
         finish(path, rec, 'done', 'thread set to done, nobody to tell', brief, card); return
     if label == 'Close the loop (nothing owed)':
         if thread:
@@ -262,7 +265,7 @@ def run_script(path, rec, brief, card, dry):
                 add_note(thread, f'desk: loop closed, nothing owed. {fact}'.strip())
             except Exception as e:
                 log(f"{rec['cardId']}: note failed: {e}")
-        close(rec, 'do', f'nothing owed (pane pick): {fact}', env=env)
+        close(rec, 'do', f'nothing owed (pane pick): {fact}', env=env, sent=True)
         finish(path, rec, 'done', 'closed, nothing owed', brief, card); return
     if label.startswith('Drop'):
         close(rec, 'drop', f'dropped from the pane: {fact or label}', env=env)

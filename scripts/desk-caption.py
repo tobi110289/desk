@@ -14,9 +14,17 @@ sys.path.insert(0,os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import 
 S=os.path.expanduser('~/orbit-scratch/agent-loop/state.json'); s=json.load(open(S))
 t=s['threads'].get(ref)
 if t is None: sys.exit(f'{ref}: no loop entry')
-t['status']=status
+old_status=(t.get('status') or '').strip(); t['status']=status
 if note: t['note']=(t.get('note') or '')+f' desk: {now[:10]} {note}'
 save(S,s)
-D=os.path.expanduser('~/orbit-scratch/desk/desk.json'); d=json.load(open(D))
+D=os.path.expanduser('~/orbit-scratch/desk/desk.json')
+# 2026-11-09: a caption written before or after a close moved the loop card's since away from the one the close was
+# bound to, and the card came back on the next gather (W45: one loop card closed six times, one close read "caption
+# already reads ..."). Holds bound to the old caption follow it, under the lock desk-close.py takes.
+import fcntl; _lock=open(os.path.join(os.path.dirname(D),'.desk.lock'),'w'); fcntl.flock(_lock,fcntl.LOCK_EX)
+d=json.load(open(D))
 d.setdefault('captions',{})[ref]={'status':status,'at':now}
+try:
+    sys.path.insert(0,os.path.dirname(os.path.realpath(__file__))); import deskhold; deskhold.rebind(d,ref,old_status,status)
+except Exception as e: print('holds not rebound:',e)
 save(D,d); print(f'{ref} → "{status}" @ {now}')
