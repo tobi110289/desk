@@ -175,6 +175,8 @@ A PR whose newest HORST round asks for a human (label `needs-human-review` or he
 Prepare: for each member read the loop `note`, the Plain thread status and the sweep-cache row, and propose a caption under 50 chars or "drop: <reason>".
 Execute `Keep`: write the caption. `Drop`: delete the entry from `state.json` (jq, atomic via temp file) and say so.
 
+**Ageing sweep** (`sweep:ageing`, 2026-11-09). Every card nobody waits on that the desk has shown for 14 days or more leaves the list and joins this one card (all desk history: 65 of 94 live cards had been shown a week or longer, "shrink the desk" and "why does this keep coming back" were asked 24 times). Prepare: list the members with their days on the desk and one line each on what they were for. Present: header STALE, options `Drop them all` · `Keep some (name them)` · `Defer`. Execute `Drop them all`: `desk-close.py <member id> drop "ageing sweep <date>: <one reason>"` per member, then close the sweep card `do`. `Keep some`: close the named members with a `caption` that says why they stay (they come back as single cards with a fresh count), drop the rest. `Defer`: trigger + act. A member that is a task file keeps its file; only the card goes.
+
 ### ORBOT (removed 2026-09-29)
 
 The lane fed harvested orbot issues to an improvement-run workspace from `desk.json` `runs[]`. `runs[]` is gone, so the lane is gone too; harvested issues wait on GitHub (`ready-for-agent` label).

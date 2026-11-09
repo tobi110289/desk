@@ -1437,6 +1437,19 @@ def _landed(c):
 batch('SEND',key=lambda c:'babysit',act='Send the {n} babysit lines the desk wrote for idle workers (HORST changes or red CI), as written',mins_each=1,waits='agent',pred=lambda c:bool(c.get('prefilled')))
 batch('TICKET',key=lambda c:'local-landed',act='Close the {n} local ticket files whose PR merged: set Status: done on each',mins_each=1,waits='nobody',pred=lambda c:c.get('kind')=='local-human' and _landed(c))
 batch('STALE',act='Sweep {n} loop entries with no caption: keep (write the caption) or drop each',mins_each=1,waits='nobody',pred=lambda c:not (c.get('status') or '').strip())   # 2026-09-16: captioned entries stay single cards; the batch hid 13 live rows behind one 'drop'
+# 2026-11-09 (all desk history): 65 of 94 live cards had been shown 7+ days and 13 for 14+ days; "shrink the desk" and
+# "cards that keep coming back" were asked 14 and 1 times. A card nobody waits on that has been shown AGEING_DAYS days
+# leaves the list and joins one sweep card that proposes the drops; the person keeps what still matters. Drops go
+# through as is (the batch rule of 2026-11-03), so this is the one batch the lowest tier gets.
+AGEING_DAYS=14
+_ageing=[c for c in cards if c['score']>=0 and c.get('seen',0)>=AGEING_DAYS and c.get('tier') in ('nobody','bottom') and not c['id'].startswith(('batch:','sweep:','source:'))]
+if len(_ageing)>=3:
+    for c in _ageing: cards.remove(c)
+    _sw={'id':'sweep:ageing','ref':f'ageing×{len(_ageing)}','lane':'STALE','mins':max(2,len(_ageing)),'impact':'P2','age':max(c['age'] for c in _ageing),'waits':'nobody','pr':None,'task':None,'thread':None,'url':None,
+         'members':[{k2:c.get(k2) for k2 in ('id','ref','lane','seen','status','act','url')} for c in sorted(_ageing,key=lambda c:-c.get('seen',0))],
+         'status':'; '.join(f"{c['ref']} ({c.get('seen',0)}d)" for c in sorted(_ageing,key=lambda c:-c.get('seen',0)))[:300],'note':'','since':today,
+         'act':f"Drop the {len(_ageing)} cards shown {AGEING_DAYS}+ days that nobody waits on, or name the ones to keep (a kept card comes back single)",'score':0}
+    add(_sw); rank(_sw)
 live=[c for c in cards if c['score']>=0]
 live.sort(key=lambda c:(-c['score'],c['ref']))
 parked=[c for c in cards if c['score']<0]
