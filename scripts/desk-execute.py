@@ -17,6 +17,13 @@ never touched here, the session executes them and desk-close.py marks them done.
   desk-execute.py --one <file> run one record (any class but session), for a look by hand
   desk-execute.py --dry        say what would run
   desk-execute.py --rehearse   model runs only look and report (done=false), nothing is executed: a test of the chain
+                               (the unattended validation runs in full, but every Plain write is dry: DESK_PLAIN_DRY=1)
+
+"Validate and draft (unattended)" (FAST cards, 2026-11-09) is a model run of its own (run_unattended): this script claims
+the thread, one headless run (DESK_VALIDATE_MODEL, default opus, in the Orbit checkout so its production guard hook
+applies) checks the Hermes brief by the /triage rules, posts the note through plain-note.py and answers with the
+verdict and a drafted reply; this script releases the claim, writes the draft file, captions the card without closing
+it, drops the brief and starts a prepare pass for the card, which comes back with "Send it" first.
 
 The state of a record goes queued → running → done | bounced | failed; every write is atomic. The mod starts a drain
 after every pick and shows decisions/*.json as the results strip. Env: PLAIN_API_KEY, DESK_DIR (tests).
@@ -37,6 +44,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 import deskanchor  # noqa: E402
 import deskclass  # noqa: E402
+import deskplain  # noqa: E402
 import importlib.util as _ilu
 _spec = _ilu.spec_from_file_location('desk_harvest', f'{HERE}/desk-harvest.py'); deskharvest = _ilu.module_from_spec(_spec); _spec.loader.exec_module(deskharvest)
 
@@ -46,6 +54,8 @@ BRIEFS = f'{DESK}/briefs'
 DRAFTS = f'{DESK}/drafts'
 LOCK_S = 10 * 60
 MODEL = os.environ.get('DESK_EXECUTE_MODEL', 'sonnet')
+VALIDATE_MODEL = os.environ.get('DESK_VALIDATE_MODEL', 'opus')
+ORBIT = os.environ.get('DESK_ORBIT_REPO') or os.path.expanduser('~/orbit')
 LOOP = os.path.expanduser('~/orbit-scratch/agent-loop')
 LOOP_SKILL = os.path.expanduser('~/.claude/skills/plain-agent-loop/SKILL.md')
 VERDICT = {
@@ -120,42 +130,12 @@ def sh(argv, timeout=180, env=None):
     return r.returncode, ((r.stdout or '') + (r.stderr or '')).strip()
 
 
-def gql(query, variables):
-    key = os.environ.get('PLAIN_API_KEY')
-    if not key:
-        raise RuntimeError('no PLAIN_API_KEY')
-    import urllib.request
-    body = json.dumps({'query': query, 'variables': variables}).encode()
-    req = urllib.request.Request('https://core-api.uk.plain.com/graphql/v1', data=body, headers={
-        'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'User-Agent': 'desk-execute/1 (+python-urllib)'})
-    with urllib.request.urlopen(req, timeout=40) as r:
-        out = json.load(r)
-    if out.get('errors'):
-        raise RuntimeError(str(out['errors'])[:300])
-    data = out['data']
-    err = next((v.get('error') for v in data.values() if isinstance(v, dict) and v.get('error')), None)
-    if err:
-        raise RuntimeError(err.get('message') or str(err)[:200])
-    return data
-
-
-def readiness_of(thread_id):
-    d = gql('query($id: ID!){ thread(threadId:$id){ threadFields{ key stringValue } } }', {'id': thread_id})
-    fields = ((d or {}).get('thread') or {}).get('threadFields') or []   # gql() returns the data block
-    return next((f.get('stringValue') or '' for f in fields if f.get('key') == 'agent_readiness'), '')
-
-
-def set_readiness(thread_id, value):
-    gql('mutation($input: UpsertThreadFieldInput!){ upsertThreadField(input:$input){ error{ message } } }',
-        {'input': {'threadId': thread_id, 'key': 'agent_readiness', 'type': 'ENUM', 'stringValue': value}})
-
-
-def mark_done(thread_id):
-    gql('mutation($input: MarkThreadAsDoneInput!){ markThreadAsDone(input:$input){ error{ message } } }', {'input': {'threadId': thread_id}})
-
-
-def add_note(thread_id, text):
-    gql('mutation($input: CreateNoteInput!){ createNote(input:$input){ error{ message } } }', {'input': {'threadId': thread_id, 'text': text}})
+# 2026-11-09: the writes live in deskplain.py. The field write here lacked Plain's `identifier` and the note its
+# customer id, so the readiness flip before a send to a ready-for-human thread and the "loop closed" note never landed.
+readiness_of = deskplain.readiness_of
+set_readiness = deskplain.set_readiness
+mark_done = deskplain.mark_done
+add_note = deskplain.add_note
 
 
 def close(rec, verb, note, caption=None, trigger=None, act=None, env=None, sent=False):
@@ -347,6 +327,8 @@ Hard rules:
 
 def run_model(path, rec, brief, card, dry, rehearse):
     label = rec['option']
+    if label == deskplain.VALIDATE:
+        return run_unattended(path, rec, brief, card, dry, rehearse)
     if dry:
         finish(path, rec, 'queued', f'dry: would run a {MODEL} run for {label}'); return
     p = model_prompt(rec, brief, card, rehearse)
@@ -379,6 +361,216 @@ def run_model(path, rec, brief, card, dry, rehearse):
         caption = (v.get('result') or label)[:49]
     close(rec, rec.get('verb') or 'do', (v.get('note') or v.get('result') or label)[:300], caption=caption, env={'DESK_DECISION': path})
     finish(path, rec, 'done', v.get('result') or 'done', brief, card)
+
+
+UNATTENDED_VERDICT = {
+    'type': 'object',
+    'properties': {
+        **VERDICT['properties'],
+        'done': {'type': 'boolean', 'description': 'true only when the validation note was posted (plain-note.py printed "posted:") and the reply below is drafted or deliberately empty'},
+        'verdict': {'type': 'string', 'enum': ['confirmed', 'partially-confirmed', 'refuted', 'stale', 'none'], 'description': "the note's verdict on the Hermes brief; none when no note was posted"},
+        'readiness': {'type': 'string', 'description': 'the readiness you judge the thread at (ready-for-agent, ready-for-human, needs-info, wontfix); the note says it, nothing writes it'},
+        'draft': {'type': 'string', 'description': 'the customer reply to send as Luna, or empty when no reply is the move (a teammate holds the thread, nothing true to tell the customer yet)'},
+        'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence that backs it (a note row, an entity read, a code line)'},
+        'openChecks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'claims the reply would need that you could not back; they stay out of the draft'},
+    },
+    'required': VERDICT['required'] + ['verdict', 'readiness', 'draft', 'checks', 'openChecks'],
+}
+TRIAGE_STEPS = ('## Forensic Gotchas', '## Step 3', '## Step 4', '## Step 10: Write Back')
+
+
+def triage_rules():
+    """The /triage command's reading, validation and note rules, from origin/develop of the Orbit repo (the checkout lags)."""
+    code, md = sh(['git', '-C', ORBIT, 'show', 'origin/develop:.claude/commands/triage.md'], 30)
+    if code:
+        md = _read(f'{ORBIT}/.claude/commands/triage.md', 60000)
+    out = [sec.strip() for sec in re.split(r'(?m)^(?=## )', md) if sec.startswith(TRIAGE_STEPS)]
+    return '\n\n'.join(out)[:24000] or '(the triage rules could not be read: validate by the note format below and say so)'
+
+
+def safe(name):
+    return re.sub(r'[^A-Za-z0-9._-]', '_', name)
+
+
+def _prepare_mod():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('desk_prepare', f'{HERE}/desk-prepare.py')
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
+def unattended_prompt(rec, brief, card, rehearse):
+    ref, thread = card.get('ref') or '', rec.get('thread') or card.get('thread')
+    timeline = _prepare_mod().plain_timeline(thread, n=40, width=8000)[:70000]
+    ctx = _read(brief.get('context') or '', 60000)
+    memory = re.search(r'(?ms)^## Support memory block.*?(?=^## |\Z)', ctx)
+    prod = 'STAGE=production pnpm -s -C ' + ORBIT   # the one shape the production guard lets through
+    parts = [f"""You validate ONE support thread ({ref}) for the person who runs a support desk, unattended, and draft the reply.
+The person picked "{deskplain.VALIDATE}" on their pane and is not watching. You run headless with Bash, Read, Glob and Grep,
+no MCP servers, in the Orbit checkout ({ORBIT}). No one answers questions.
+
+The desk has already claimed the thread for you (triage_owner=local) and releases the claim after you answer. Your job:
+1. Read the thread below. Find the newest full Hermes pass (by its marker, see the rules) and extract its claim sheet.
+2. Validate the load-bearing claims by the /triage rules below, in about six minutes of work: CONFIRMED, REFUTED or
+   UNVERIFIED, each with your own evidence. Sample the rest.
+3. Post ONE internal note with: python3 {HERE}/plain-note.py {thread} --file <your note file>
+   Write the note file under {DECISIONS}/runs/ first. The note's first line is exactly:
+   {deskplain.UNATTENDED_LINE}
+   then an empty line, then the note in the "## Local triage validation (Claude)" format of step 10a, with these changes:
+   - right under the heading: "> _Unattended desk run ({VALIDATE_MODEL}); no MCP, so no Sentry, PostHog replay or attachment reads._"
+   - "**Validated against:**" names what you read (branch@commit, entities re-queried, files) and what you could not read.
+   - a line "**Readiness (unattended view):** <ready-for-agent | ready-for-human | needs-info | wontfix>" with one reason.
+   - keep the format's sections: the claim table, "### Corrections" when something was refuted or missing, and
+     "### Hermes feedback" with its `<!-- hermes-feedback: <flaw-class>, … -->` comment (or the line "No feedback; brief was accurate.").
+   Keep it under 9000 characters. plain-note.py refuses a note without the first line; read its output: "posted:" means it landed.
+4. Draft the customer reply from what you validated (rules in "Support memory" and "Sending as Luna" below): German "du"
+   unless the customer wrote "Sie", warm and short, signed as Luna, no ids, no internal words, no memory quotes. Every claim
+   in it backed by your evidence (`checks`); a claim you could not back stays out (`openChecks`). Leave `draft` empty when the
+   "Who holds this thread" block shows a teammate holds it, or when there is nothing true to tell the customer yet.
+5. Answer with the JSON verdict. `caption`: under 50 characters, e.g. "validated unattended 21:40Z; reply drafted".
+
+Hard rules (they override everything below):
+- Your ONLY write outside {DECISIONS}/runs/ is that one note through plain-note.py (and, when the note carries Hermes
+  feedback, one entry appended to ~/orbit-scratch/hermes-feedback/LOG.md with "unattended desk run" in its heading).
+  Never reply to the customer, never send as Luna, never write a Plain field, status, label or assignee, never write to any
+  database, never change, commit or push code, never check out a branch in {ORBIT}, never run claude, desk-close.py,
+  desk-decide.py, desk-execute.py or luna-send.py.
+- Code: read it at the branch of the reported stage without touching the working tree: `git -C {ORBIT} fetch -q origin`,
+  then `git -C {ORBIT} show origin/production:<path>` and `git -C {ORBIT} grep -n <pattern> origin/production -- <dir>`.
+- DynamoDB: keyed reads only, through the dynamo-query wrapper; never a scan, never `aws dynamodb` by hand. The stage is an
+  environment variable, never a flag: `{prod} dynamo:query <Entity> --id=… --tenant=… --format=json`
+  (staging: `STAGE=staging pnpm -s dynamo:query …`). `--env=` is not a flag of that script. When a guard hook rejects the
+  call it prints the one path it accepts after `pnpm -C`: re-run with that literal path. `--keys-only` debugs a key shape.
+  An AWS login error means the session expired: say so in the note and in `result`; do not retry for minutes.
+- More of the thread: `python3 ~/orbit-scratch/agent-loop/jev/plain.py timeline {thread} 60` (read-only JSON).
+- When the thread shows a person's claim, a teammate's open question, or no Hermes brief at all: post no note, done=false,
+  and `result` says why in plain words. The session takes the card then.
+- `result` is read on a pane by someone who has not opened any file: plain words, no paths, ids, hashes or code words.
+"""]
+    if rehearse:
+        parts.append('REHEARSAL: a test of the chain. Do the whole job, but plain-note.py runs dry here (it prints "dry, would post:" and writes '
+                     'nothing): treat that line as the note landing. Append nothing to the feedback log. Answer as you would for real.\n')
+    parts.append('## The card\n' + json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'waits', 'status', 'note', 'act', 'pr', 'thread')}, ensure_ascii=False, indent=1))
+    parts.append('## What the brief saw (prepared before the pick)\n' + json.dumps({k: brief.get(k) for k in ('why', 'fact', 'then', 'checks', 'openChecks')}, ensure_ascii=False, indent=1))
+    parts.append(f'## The Plain thread, read now (newest first; notes and mails up to 8000 characters)\n{timeline}')
+    parts.append(memory.group(0).strip() if memory else '## Support memory block\nnone in the brief: the company is unmapped; never guess the tenant from the mail domain')
+    parts.append('## The /triage rules (Orbit repo, .claude/commands/triage.md on origin/develop)\n'
+                 'Where they name an MCP tool (get_thread, add_internal_note, upsert_thread_field, Sentry, PostHog) you have none: use the commands above '
+                 'and name what you could not read. `--env=<stage>` on dynamo:query in these rules is outdated: the stage goes in STAGE.\n\n' + triage_rules())
+    parts.append('## The lane recipe and the customer-text rules (CARDS.md)\n' + (recipe('FAST', card['id']) or '(no recipe section)'))
+    return '\n\n'.join(parts)
+
+
+def drop_brief(rec):
+    for g in (rec.get('briefFile') or '', (rec.get('briefFile') or '').replace('.json', '.ctx.md')):
+        try:
+            if g: os.remove(g)
+        except FileNotFoundError:
+            pass
+
+
+def reprepare(cid):
+    """A prepare pass for this card alone, detached: the card comes back with a brief written from the new thread state."""
+    env = {k: v for k, v in os.environ.items() if k not in ('DESK_PREPARE', 'CLAUDE_CODE_PLUGIN_DIRS', 'DESK_DECISION', 'DESK_PLAIN_DRY')}
+    try:
+        subprocess.Popen(['python3', f'{HERE}/desk-prepare.py', cid], env=env, cwd=DESK, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log(f'{cid}: prepare not started: {e}')
+
+
+def run_unattended(path, rec, brief, card, dry, rehearse):
+    """Claim, validate, note, draft: one background job for a FAST card (2026-11-09: "Claim + validate now" was picked
+    28 of 43 times, took about five minutes, and 31 cards then came back a second time for the reply)."""
+    cid, ref = rec['cardId'], card.get('ref') or ''
+    thread = rec.get('thread') or card.get('thread')
+    if not thread or not re.match(r'^T-\d+$', ref):
+        raise RuntimeError('the card names no support thread; the session validates it')
+    if dry:
+        finish(path, rec, 'queued', f'dry: would claim {ref}, run a {VALIDATE_MODEL} validation, post its note and draft the reply'); return
+    rec['rehearsal'] = bool(rehearse)
+    stem = f"{DECISIONS}/runs/{os.path.basename(path)[:-5]}"
+    os.makedirs(f'{DECISIONS}/runs', exist_ok=True)
+    receipt = f'{path}.note'   # plain-note.py writes it; never *.json, the pane reads those as picks
+    try:
+        os.remove(receipt)
+    except FileNotFoundError:
+        pass
+    claimed = False
+    try:
+        if not rehearse:
+            deskplain.claim(thread)   # raises while a person or another local run holds the thread
+            claimed = True
+        p = unattended_prompt(rec, brief, card, rehearse)
+        with open(f'{stem}.prompt.md', 'w') as f:
+            f.write(p)
+        env = {k: v for k, v in os.environ.items() if k != 'CLAUDE_CODE_PLUGIN_DIRS'}
+        env.update({'DESK_DECISION': path, 'DESK_PREPARE': '1'})
+        if rehearse:
+            env['DESK_PLAIN_DRY'] = '1'
+        # cwd = the Orbit checkout: its project hooks (the production guard) load in the headless run too
+        r = subprocess.run(['claude', '-p', '--model', VALIDATE_MODEL, '--effort', 'medium', '--no-session-persistence',
+                            '--tools', 'Bash,Read,Glob,Grep', '--permission-mode', 'bypassPermissions',
+                            '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'json',
+                            '--json-schema', json.dumps(UNATTENDED_VERDICT), p],
+                           capture_output=True, text=True, timeout=int(8.5 * 60), env=env, cwd=ORBIT)
+        with open(f'{stem}.out.json', 'w') as f:
+            f.write(r.stdout or '')
+        try:
+            out = json.loads(r.stdout)
+        except Exception:
+            raise RuntimeError(f'model run gave no JSON (exit {r.returncode}): {(r.stderr or r.stdout)[-200:]}')
+        if out.get('is_error') or not out.get('structured_output'):
+            raise RuntimeError(f"model run failed: {str(out.get('result'))[:200]}")
+        v = out['structured_output']
+        rec['learned'] = [str(x) for x in (v.get('learned') or [])][:10]
+        rec['costUsd'] = out.get('total_cost_usd')
+        try:
+            note = json.load(open(receipt))
+        except Exception:
+            note = None
+        # the receipt, not the model's word, says whether a note landed
+        landed = bool(note) and note.get('firstLine') == deskplain.UNATTENDED_LINE and bool(note.get('dry')) == bool(rehearse)
+        if not v.get('done') or not landed:
+            why = v.get('result') if not v.get('done') else 'the run said done, but no note landed on the thread'
+            raise RuntimeError(f"not done: {why or 'no reason given'}")
+    except Exception:
+        if claimed:
+            try:
+                deskplain.release(thread)
+            except Exception as e:
+                log(f'{cid}: claim not released: {e}')
+        if not rehearse:
+            drop_brief(rec)   # the next brief sees the failed record and leads with the session's claim instead
+        raise
+    if claimed:
+        try:
+            deskplain.release(thread)
+        except Exception as e:
+            log(f'{cid}: claim not released (the 24 h limit frees it): {e}')
+    draft = (v.get('draft') or '').strip()
+    side = {'at': now_iso(), 'cardId': cid, 'ref': ref, 'verdict': v.get('verdict'), 'readiness': v.get('readiness'),
+            'draft': draft, 'checks': v.get('checks') or [], 'openChecks': v.get('openChecks') or [], 'model': VALIDATE_MODEL}
+    if rehearse:
+        with open(f'{stem}.draft.json', 'w') as f:
+            json.dump(side, f, ensure_ascii=False, indent=1)
+        finish(path, rec, 'failed', f"rehearsal: the note would be posted ({note.get('chars')} characters, verdict {v.get('verdict')}); "
+                                    f"reply {'drafted' if draft else 'not drafted'}. {v.get('result') or ''}".strip())
+        return
+    os.makedirs(DRAFTS, exist_ok=True)
+    if draft:
+        with open(f'{DRAFTS}/{safe(ref)}.txt', 'w', encoding='utf-8') as f:
+            f.write(draft + '\n')
+    with open(f'{DRAFTS}/{safe(ref)}.unattended.json', 'w', encoding='utf-8') as f:
+        json.dump(side, f, ensure_ascii=False, indent=1)
+    caption = ((v.get('caption') or '').strip() or f"validated unattended {hhmm()}; {'reply drafted' if draft else 'no reply drafted'}")[:49]
+    # a caption, not a verb: a verb would unpin a FAST card, and the card has to come back with the drafted reply
+    code, outc = sh(['python3', f'{HERE}/desk-close.py', cid, 'caption', caption], 60, {'DESK_DECISION': path})
+    if code:
+        log(f'{cid}: caption not written: {outc[:160]}')
+    drop_brief(rec)
+    finish(path, rec, 'done', v.get('result') or f"validated and drafted ({v.get('verdict')})", brief, card)
+    reprepare(cid)
 
 
 def run_one(path, dry=False, force_class=False, rehearse=False):

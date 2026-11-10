@@ -17,8 +17,13 @@ MODEL = {'Hand to a worker', 'Hand the rework to its agent', 'Hand it to agents'
          # 2026-11-03: single SEND and TICKET cards. A line goes to its worker's terminal, a ticket file gets its Status:
          # both are Bash work with the lane recipe. Notion moves (push, archive, ticket it) need the Notion MCP: session.
          'Send as staged', 'Drop the line', 'Ready for an agent', 'Ready for a person', "Won't fix",
-         'Close (PR landed)'}
-# everything else: 'Edit then send', 'Review it now', 'Claim + validate now', 'Draft the reply', 'Start it now',
+         'Close (PR landed)',
+         # 2026-11-09: FAST cards. "Claim + validate now" was picked 28 of 43 times, took about five minutes in the
+         # session, and the card came back a second time for the reply (31 cards scored twice). This one claims,
+         # validates, notes and drafts in one background run; the card returns once with "Send it" first.
+         'Validate and draft (unattended)'}
+# everything else: 'Edit then send', 'Review it now', 'Claim + validate now' (the session path, also when the
+# unattended run failed or the thread has no Hermes brief), 'Draft the reply', 'Start it now',
 # 'Answer now', 'Answer', 'Show me the command first', 'Drop (reply as human: declined)', 'Close as read',
 # 'Reply with a note' (the a2a answers carry the person's words), …
 
