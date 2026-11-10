@@ -389,6 +389,8 @@ const isBusy = atom({ plugin: "desk", key: "isBusy" } as const, false);
 // Counts up every theme.waveMs while Claude works; the pane and the band draw one wave frame per count.
 const tick = atom({ plugin: "desk", key: "tick" } as const, 0);
 let ticker: ReturnType<EngineInterface["clock"]["every"]> | null = null;
+// True once the person opened the pane in this session (/desk-pane, ctrl+k). Only such a session gets it back by itself.
+let askedForPane = false;
 
 /** The wave frame for a count, dimmed on every second cycle so the eye also sees a slow 1.6 s beat. */
 function wave(count: number) {
@@ -1631,6 +1633,7 @@ export const register: Register = (on) => {
   });
 
   on("command.run", { command: "desk-pane" }, async ($) => {
+    askedForPane = true;
     await refresh($, true);
     await $.ui.open({
       id: PANE,
@@ -1772,7 +1775,11 @@ export const register: Register = (on) => {
     if (GATHER.test(command)) {
       // refresh() drops the worked card and its brief only when the new ranking no longer carries them.
       await refresh($, true);
-      void $.ui.open({ id: PANE, title: "Desk", columns: 72, rows: 40 });
+      // 2026-11-10: a gather run in any session opened the pane there. The pane belongs to the session that asked for
+      // it with /desk-pane; a gather brings it back only where the person had it and hid it.
+      if (askedForPane && (await read($, isPaneHidden))) {
+        void $.ui.open({ id: PANE, title: "Desk", columns: 72, rows: 40 });
+      }
     } else if (DESK_WRITE.test(command)) {
       await refresh($, true);
     }
@@ -1950,6 +1957,7 @@ export const register: Register = (on) => {
       e.element === "show" &&
       (await read($, isPaneHidden))
     ) {
+      askedForPane = true;
       await $.ui.open({ ...PANE_SIZE, focus: true });
     }
 
@@ -1966,7 +1974,8 @@ export const register: Register = (on) => {
     const id = await read($, working);
     const desk = await read($, view);
     const card = desk.cards.find((one) => one.id === id);
-    const hidden = await read($, isPaneHidden);
+    // The band offers the pane back only in the session that asked for it.
+    const hidden = askedForPane && (await read($, isPaneHidden));
 
     if ((!card && !hidden) || e.props.hasSurvey) {
       return next(e);
