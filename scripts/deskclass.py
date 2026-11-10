@@ -9,14 +9,17 @@ fixed option sets from CARDS.md and desk-prepare.py OPTIONS; an unknown label ne
 """
 
 SEND = {'Send it', 'Reply with a status'}
+# 2026-11-10: "Drop the line" was a model run that tried to clear the worker's prompt and gave up when the terminal was
+# closed, so a card dropped twice came back twice. A staged line is a suggestion in an idle prompt: there is nothing to
+# clear. The drop closes the card.
 SCRIPT = SEND | {'I sent it already', 'Nobody to tell (mark done)', 'Drop', 'Drop (unpin)', 'Drop (accepted risk, recorded)',
-                 'Close the loop (nothing owed)'}
+                 'Close the loop (nothing owed)', 'Drop the line'}
 DEFER = {'Defer', 'Defer until a trigger', 'Defer until the deploy lands'}
 MODEL = {'Hand to a worker', 'Hand the rework to its agent', 'Hand it to agents', 'Hand to a worker / ticket',
          'Go (agent runs it now)', 'Close the PR',
          # 2026-11-03: single SEND and TICKET cards. A line goes to its worker's terminal, a ticket file gets its Status:
          # both are Bash work with the lane recipe. Notion moves (push, archive, ticket it) need the Notion MCP: session.
-         'Send as staged', 'Drop the line', 'Ready for an agent', 'Ready for a person', "Won't fix",
+         'Send as staged', 'Ready for an agent', 'Ready for a person', "Won't fix",
          'Close (PR landed)',
          # 2026-11-09: FAST cards. "Claim + validate now" was picked 28 of 43 times, took about five minutes in the
          # session, and the card came back a second time for the reply (31 cards scored twice). This one claims,
