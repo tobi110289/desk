@@ -504,7 +504,7 @@ def unattended_prompt(rec, brief, card, rehearse):
     memory = re.search(r'(?ms)^## Support memory block.*?(?=^## |\Z)', ctx)
     prod = 'STAGE=production pnpm -s -C ' + ORBIT   # the one shape the production guard lets through
     parts = [f"""You validate ONE support thread ({ref}) for the person who runs a support desk, unattended, and draft the reply.
-The person picked "{deskplain.VALIDATE}" on their pane and is not watching. You run headless with Bash, Read, Glob and Grep,
+{'The desk started this check by itself, before it asks the person,' if rec.get('via') == 'auto' else f'The person picked "{deskplain.VALIDATE}" on their pane'} and nobody is watching. You run headless with Bash, Read, Glob and Grep,
 no MCP servers, in the Orbit checkout ({ORBIT}). No one answers questions.
 
 The desk has already claimed the thread for you (triage_owner=local) and releases the claim after you answer. Your job:

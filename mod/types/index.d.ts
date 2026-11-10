@@ -10,6 +10,10 @@ export type PreparedBrief = {
   fact: string;
   draft: string;
   options: DeskOption[];
+  /** The trigger a Defer picked on the pane would wait on, "" when the brief proposed none. */
+  deferTrigger: string;
+  /** How many options the pane shows before `v`: the lead, the best alternative, one way out. */
+  shown: number;
   openChecks: string[];
   resolved: boolean;
 };
@@ -198,6 +202,8 @@ declare module "claude-code" {
       isPrsOpen: boolean;
       /** The card's raw lines (status, memory, note) are folded out. */
       isDetailsOpen: boolean;
+      /** The card whose full option list is folded out (`v`), or "". */
+      moreFor: string;
       /** True from the pane's close to its next open; the band then offers it back on ctrl+k. */
       isPaneHidden: boolean;
       /** Auto mode (`t`, file desk/.auto): the session takes queued session-class picks by itself when idle. */

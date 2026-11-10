@@ -31,3 +31,7 @@ def is_internal(email):
     dom = (email or '').rsplit('@', 1)[-1].lower() if '@' in (email or '') else ''
     return bool(dom) and dom in INTERNAL_DOMAINS
 TICKET_OWNER = CFG.get('ticketOwner') or 'the ticket owner'
+# 2026-11-10: a new FAST thread with an unchecked Hermes brief is validated in the background before the person is asked
+# (desk-prepare.py start_validation). Off unless config.json says autoValidate: true; at most autoValidateMax runs a day.
+AUTO_VALIDATE = bool(CFG.get('autoValidate'))
+AUTO_VALIDATE_MAX = int(CFG.get('autoValidateMax') or 8)

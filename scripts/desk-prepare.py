@@ -14,6 +14,15 @@ person pressed Send on a draft with nothing to refute): every claim backed, or n
 or validation state does not block it. The material opens with who holds the thread (assignee, triage claim, last
 internal note, teammates named in the newest customer message), and a thread a teammate holds is theirs to answer.
 
+2026-11-10, from 190 scored closes (the first option was the pick 43 % of the time):
+  - The code picks the menu and the first option from facts (who holds the thread, a validation note, named examples, a
+    defer that came back). The model ranks that menu and writes one question and one consequence PER option, so the
+    question on the pane always belongs to the option that leads. Before this the code reordered the options after the
+    model had written its question for another one.
+  - The pane shows three options: the lead, the best alternative, one way out (Defer or Drop). The rest are one key away.
+  - A new FAST thread with an unchecked Hermes brief is validated in the background before the person is asked
+    (config.json autoValidate): "Claim + validate now" was the pick 41 of 108 times, a routine step and no decision.
+
 A brief is bound to the card's caption (status + act). When the caption changes the brief is stale and the next
 pass writes a new one. Batch cards and lanes that take the session over are never prepared.
 
@@ -73,21 +82,114 @@ TICKET_OPTIONS = {
 MACHINE_TRIGGER = re.compile(r'^(?:trigger:\s*)?(?:\d{4}-\d{2}-\d{2}|deployed:|merged:|pr-merged:|appstore:|a2a:|deploy-after:)')
 
 
-def options_of(card, material=None):
+def facts_of(card, material):
+    """What the material settles before any model reads it. The menu and the first option hang on these."""
+    m = material or ''
+    has_thread = bool(card.get('thread')) and '## Who holds this thread' in m
+    return {
+        'thread': has_thread,
+        # a validation note written in a session or by the unattended run
+        'validated': has_thread and 'local validation note: none' not in m,
+        'hermes': has_thread and 'Hermes brief:' in m and 'Hermes brief: none' not in m,
+        # the customer pointed at a video, a screenshot or a case and nobody has looked (2026-11-09: five drafts stopped for this)
+        'examples': bool(re.search(r'examples named in the newest customer message: [1-9]\d* and nobody has replied since', m)),
+        'ours_newest': 'newest visible message: ours' in m,
+        'unattended_draft': 'Draft from the unattended validation' in m,
+        'deferred': bool(card.get('deferred')),
+        'agent': bool(card.get('terminal') or card.get('workspace')),
+    }
+
+
+def menu_of(card, f, ready=False):
+    """The options a card may show, from facts. An option that cannot be the right pick is not on the menu:
+    - a checked draft (ready) puts the send set on a customer-text card;
+    - a FAST card offers a validation only while no note exists, the unattended one only while it can run, and a handoff
+      or a bare draft only after a validation (2026-11-09: "Draft the reply" led 11 times and was the pick once);
+    - "I sent it already" records a reply of ours, so it needs one on top of the thread (it led 19 times on FAST, 0 hits);
+    - "Hand the rework to its agent" needs a live terminal (10 of 25 background runs failed without one)."""
+    lane = card.get('lane')
     if (card.get('id') or '').startswith('release-notes:'):
         return list(RELEASE_NOTES_OPTIONS)
-    if card.get('lane') == 'TICKET':
-        return TICKET_OPTIONS.get(card.get('kind') or 'notion', TICKET_OPTIONS['notion'])
-    opts = list(OPTIONS.get(card.get('lane'), []))
-    # 2026-11-09: the unattended validation checks a Hermes brief; with no brief, or a validation note already on the
-    # thread, there is nothing for it to check and the session's "Claim + validate now" stays the path.
-    if card.get('lane') == 'FAST' and not unattended_fits(card, material):
-        opts = [o for o in opts if o != UNATTENDED]
-    # 2026-11-09 (all desk history): 10 of 25 model-class runs failed on "Hand the rework to its agent" because no agent
-    # terminal existed. The option exists only while the card names a live terminal or workspace.
-    if card.get('lane') == 'REVIEW' and not (card.get('terminal') or card.get('workspace')):
-        opts = [o for o in opts if o != 'Hand the rework to its agent']
-    return opts
+    if lane == 'TICKET':
+        return list(TICKET_OPTIONS.get(card.get('kind') or 'notion', TICKET_OPTIONS['notion']))
+    if lane in REPLY_LANES and ready:
+        return [o for o in DRAFTED if o != 'I sent it already' or f['ours_newest']]
+    opts = list(OPTIONS.get(lane, []))
+    drop = set()
+    if lane == 'FAST' and not f['thread']:
+        # a pinned ticket without a support thread: nothing to validate, the handoff and the draft stay
+        drop |= {UNATTENDED, 'Claim + validate now', 'Check the examples, then answer'}
+    elif lane == 'FAST':
+        can_run = f['thread'] and f['hermes'] and not f['validated'] and re.match(r'^T-\d+$', card.get('ref') or '') and not unattended_failed(card)
+        if f['validated']:
+            drop |= {UNATTENDED, 'Claim + validate now'}
+        else:
+            drop |= {'Draft the reply', 'Hand to a worker', 'Claim + validate now' if can_run else UNATTENDED}
+        if not f['examples']:
+            drop.add('Check the examples, then answer')
+    if lane in REPLY_LANES and not f['ours_newest']:
+        drop.add('I sent it already')
+    if lane == 'REVIEW' and not f['agent']:
+        drop.add('Hand the rework to its agent')
+    return [o for o in opts if o not in drop]
+
+
+EXITS = ('Defer', 'Drop', 'Close as read', 'Archive', "Won't fix")
+
+
+def is_exit(label):
+    return label.startswith(EXITS)
+
+
+def lead_of(card, f, so, order, ready):
+    """The first option, from facts first and the model's ranking second (score ledger, 22 Oct to 10 Nov: Defer first
+    missed 23 of 31; briefs with open checks hit 39 %, without 64 %; a card back from a defer was deferred again in 111
+    of 321 cases; on PROMISE "Close the loop" was the pick 7 of 13 times while Defer led 9 times)."""
+    lane = card.get('lane')
+    validation = next((o for o in (UNATTENDED, 'Claim + validate now') if o in order), None)
+    if ready and 'Send it' in order:
+        return 'Send it'
+    if f['examples'] and not f['validated'] and 'Check the examples, then answer' in order:
+        return 'Check the examples, then answer'
+    if lane == 'PROMISE' and so.get('resolved') and 'Close the loop (nothing owed)' in order:
+        return 'Close the loop (nothing owed)'
+    if validation and (so.get('openChecks') or lane == 'FAST'):
+        # no note on the thread yet: the check comes before a draft, a record of a send, or a handoff
+        if not (order and is_exit(order[0]) and may_lead_exit(card, f, so, order[0])):
+            return validation
+    for label in order:
+        if is_exit(label) and not may_lead_exit(card, f, so, label):
+            continue
+        if label == 'Send it' and not ready and lane in ('FAST', 'PROMISE'):
+            continue
+        return label
+    return order[0] if order else ''
+
+
+def may_lead_exit(card, f, so, label):
+    """A Drop may lead when the model ranks it first. A Defer leads only on a trigger a machine can check, and never on
+    a card that already came back from a defer."""
+    if not label.startswith('Defer'):
+        return True
+    return not f['deferred'] and bool(MACHINE_TRIGGER.match((so.get('deferTrigger') or '').strip()))
+
+
+def pane_order(lead, order):
+    """Lead, best alternative, one way out, then the rest. The pane shows the first three."""
+    rest = [o for o in order if o != lead]
+    alt = next((o for o in rest if not is_exit(o)), None)
+    out = next((o for o in rest if is_exit(o)), None)
+    if is_exit(lead):   # the lead is the way out: two real alternatives follow
+        head = [lead] + [o for o in rest if not is_exit(o)][:2]
+    else:
+        head = [o for o in (lead, alt, out) if o]
+    return head + [o for o in rest if o not in head]
+
+
+SHOWN = 3
+AUTO_MAX_AGE_DAYS = 2
+
+
 # 2026-10-14: a customer-text card whose reply is drafted and checked puts the send on the pane, first. The pick is the
 # send approval; no second question. OPTIONS above stay the set while checks are open or the thread is not yet claimed.
 REPLY_LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST'}
@@ -114,12 +216,14 @@ SCHEMA = {
     'type': 'object',
     'properties': {
         'why': {'type': 'string', 'description': 'one plain sentence: what put this card on the desk, since when, and who waits'},
-        'decide': {'type': 'string', 'description': 'the one question the person answers, in one plain sentence'},
-        'then': {'type': 'string', 'description': 'one or two plain sentences: what the recommended option sets in motion, and what is at stake if nothing happens'},
         'fact': {'type': 'string', 'description': 'the single fact that decides this card, one plain sentence under 140 characters, no code words or ids'},
         'draft': {'type': 'string', 'description': 'the drafted consequence: the customer text, the reply, the command, or the decision; empty when nothing is drafted'},
-        'options': {'type': 'array', 'items': {'type': 'object', 'properties': {'label': {'type': 'string'}, 'why': {'type': 'string'}}, 'required': ['label', 'why']},
-                    'description': "the lane's fixed options, recommended first"},
+        'options': {'type': 'array', 'items': {'type': 'object', 'properties': {
+            'label': {'type': 'string'},
+            'decide': {'type': 'string', 'description': 'the one yes/no question this option answers, one plain sentence under 160 characters ("Send Dana this answer as Luna?")'},
+            'then': {'type': 'string', 'description': 'one or two plain sentences under 300 characters: what this option sets in motion, and what is at stake if nothing happens'}},
+            'required': ['label', 'decide', 'then']},
+                    'description': 'every option of the menu, best first, each with its own question and consequence'},
         'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence line in the context that backs it'},
         'openChecks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'claims the draft needs that the context does not back; Claude verifies these live before desk_card'},
         'resolved': {'type': 'boolean', 'description': 'true when the context shows the card is already resolved (reply sent, PR merged, line submitted)'},
@@ -129,7 +233,7 @@ SCHEMA = {
         'threadAfter': {'type': 'string', 'enum': ['done', 'waiting', 'leave'], 'description': "the Plain thread's status once the recommended reply or close has happened: done (nothing owed, or only the customer's feedback awaited), waiting (the customer's answer feeds a change we still owe), leave (we still owe work the reply only reports on, or a teammate holds the thread)"},
         'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': 'facts about the tenant or the requester that the memory block lacks and the material shows (a role, an address form or greeting habit, who owns a config, a rollout state, a recurring theme): one plain line each, ending with its source and a confidence in parentheses; usually empty'},
     },
-    'required': ['why', 'decide', 'then', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady', 'threadAfter'],
+    'required': ['why', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady', 'threadAfter'],
 }
 log_lock = threading.Lock()
 
@@ -225,22 +329,13 @@ def holder_block(t, rows):
     # had named a video, a screenshot or a case, and the draft answered before anyone had looked. A memory said so twice;
     # the brief still led with the answer. So the material counts the examples, and prepare() refuses a ready draft
     # while they are unchecked.
+    out.append('newest visible message: ' + ('ours, after the customer' if ours_after else 'the customer' if newest_cust else 'ours'))
     n = examples_named(body)
     out.append(f"examples named in the newest customer message: {n}" + ('' if ours_after or not n else ' and nobody has replied since'))
     return '## Who holds this thread\n' + '\n'.join(out) + '\n\n## Timeline\n'
 
 
 HERMES_MARKERS = ('<!-- ORBOT_CANONICAL_TRIAGE_BRIEF', '<!-- ORBOT_TRIAGE_DELTA', 'TRIAGE_CLAIMS_JSON', '## Triage note part', '## Agent Brief')   # jev/plain.py
-
-
-def unattended_fits(card, material=None):
-    """The unattended validation is offered on a FAST card with a thread whose material shows a Hermes brief and no
-    local validation note. Without material (no read yet) it stays in the set; the brief's material decides."""
-    if not card.get('thread') or not re.match(r'^T-\d+$', card.get('ref') or ''):
-        return False
-    if material is None:
-        return True
-    return 'local validation note: none' in material and 'Hermes brief: none' not in material and 'Hermes brief:' in material
 
 
 def unattended_failed(card):
@@ -295,6 +390,14 @@ def fresh(card):
         return False
     if b.get('fingerprint') != fingerprint(card):
         return False
+    if b.get('auto'):
+        # the "being checked" brief lives while its background run does, 20 minutes at most
+        try:
+            state = json.load(open(decision_path(card['id']))).get('state')
+        except Exception:
+            state = None
+        age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.strptime(b['preparedAt'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        return state in ('queued', 'running') and age < 20 * 60
     if not b.get('error'):
         return True
     # 2026-11-09: the same cards failed 23 passes in a row on one API outage (93 errors). After an error the card waits
@@ -361,47 +464,45 @@ def material(card):
     return '\n\n'.join(parts) if parts else '(no raw material: work from the card alone)'
 
 
-def prompt(card, ctx):
-    opts = options_of(card, ctx)
-    if card['lane'] in REPLY_LANES:
-        rule = (f"- The options depend on the draft. When `draft` is a customer reply the person could send as it stands, set `replyReady` true and use this set with \"Send it\" first: {json.dumps(DRAFTED, ensure_ascii=False)}. "
-                f"Ready means: every claim in the draft is backed by a line in the context (`checks`), or the draft makes no claim a check could refute (a how-to taken from the material, an acknowledgement, a question back). "
-                f"An unclaimed thread or an unvalidated brief does not make it unready: the send claims the thread. `openChecks` holds only claims the draft itself states; a doubt about the case that the draft does not state goes into `fact` or `then`. "
-                f"Otherwise (an open check the draft depends on, or the move is no reply) set `replyReady` false and use the lane's set, "
-                f"in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use the labels verbatim.\n"
-                f"- Who holds the thread decides before the draft does: when the material's \"Who holds this thread\" block shows a teammate assigned, or the newest customer message names a teammate and we have not replied since, the answer is theirs. "
-                f"Recommend Defer (trigger: that teammate answers) or the lane's drop option, name the holder in `why`, and leave `draft` empty unless the material shows the teammate handed it back.")
+def prompt(card, ctx, f):
+    lane = card['lane']
+    reply = lane in REPLY_LANES
+    menu = menu_of(card, f)
+    if reply and 'Send it' not in menu:
+        menu = ['Send it'] + menu
+    lane_rules = ''
+    if reply:
+        lane_rules = """
+- Customer text: German "du" unless the customer wrote "Sie"; warm and short; signed as Luna, never with the person's name. It never quotes memory, tenant ids, sources or inferred facts. Address form and greeting habits come from the memory block.
+- Every claim in the draft is backed by a line in the material: put each claim with its evidence into `checks`. A claim you need and cannot back goes into `openChecks` and stays out of the draft. `openChecks` holds only claims the draft itself would state.
+- `replyReady` is true when the person could send `draft` as it stands: every claim backed, or no claim a check could refute (a how-to from the material, a thanks, a question back). An unclaimed thread does not make it unready.
+- "Send it" is on the menu so that it has its question. The desk shows it only when `replyReady` is true; rank it where it belongs.
+- When "Who holds this thread" shows a teammate assigned, or the newest customer message names a teammate and we have not replied since, the answer is theirs: rank Defer (trigger: that teammate answers) or the drop option first, name the holder in `why`, leave `draft` empty.
+- When the material carries a draft from the unattended validation and no customer message came after it, start from that draft: keep it unless a line refutes it, and carry its checks over.
+- `threadAfter`: the thread's status once the reply is sent or the card closed. `done`: nothing owed, or only the customer's feedback awaited. `waiting`: their answer feeds a change we still owe (also when in doubt between the two). `leave`: we still owe work, or a teammate holds the thread."""
+    elif lane == 'REVIEW':
+        lane_rules = '\n- `draft` is the recommended move and its one-line reason. Set `replyReady` false and `threadAfter` "leave".'
+    elif lane == 'RUN':
+        lane_rules = '\n- `draft` is the exact command or action. Set `replyReady` false and `threadAfter` "leave".'
     else:
-        rule = f"- The options are this lane's fixed set, in the order you recommend (best first): {json.dumps(opts, ensure_ascii=False)}. Use these labels verbatim. Set `replyReady` false."
-    if card['lane'] in REPLY_LANES:
-        rule += "\n- When the material says the newest customer message names examples and nobody has replied since, and there is no local validation note, the examples come first: the draft is not ready, say in `fact` what the customer pointed at, and recommend the lane's check option (\"Check the examples, then answer\" where the lane has it, otherwise the validation or draft option) over any send."
-    if 'I sent it already' in opts:
-        rule += ("\n- \"I sent it already\" only records a reply the person sent himself; it is the recommendation only when our visible reply is the newest message AND the thread needs nothing else. "
-                 "When the material says `local validation note: none` and the thread still carries a question, a bug or an unvalidated brief, the reply does not end the card: recommend \"Claim + validate now\" (or the lane's status reply) first, and say in `then` what the validation settles.")
-    if UNATTENDED in opts:
-        rule += (f"\n- \"{UNATTENDED}\" claims the thread, checks the Hermes brief, posts the validation note and drafts the reply in one background run; the card comes back with the draft. "
-                 "With a Hermes brief in view and `local validation note: none`, recommend it over \"Claim + validate now\" unless the customer named examples nobody has checked.")
-    if 'Draft from the unattended validation' in ctx:
-        rule += ("\n- The material carries a draft from the unattended validation, written after its note. When no customer message came after it, start from that draft: "
-                 "keep it unless a line in the context refutes it, carry its checks over, and set `replyReady` when its open checks are empty.")
+        lane_rules = '\n- `draft` on a task or batch card is at most three numbered lines: each names the thing in product words, says whether it is still true, and ends with the verb. Set `replyReady` false and `threadAfter` "leave".'
     return f"""You prepare ONE card of a support desk for the person who runs it. You cannot use tools: everything you may rely on is in this message. Answer with the JSON the schema asks for.
 
-The desk's rules for a card (from its skill):
-- A brief, not a draft: the deciding fact on top, the consequence already drafted. The person confirms or edits, never composes.
-{rule}
-- Customer text: German "du" unless the customer wrote "Sie"; warm and short; sign as Luna (never with the person's name); it never quotes memory, tenant ids, sources or inferred facts. Address form, greeting and sign-off habits come from the memory block.
-- Every claim in a customer text must be backed by a line in the context. Put each claim and its evidence into `checks`. A claim you need but cannot back goes into `openChecks` and NOT into the draft; the person's agent verifies it live.
-- When the context shows the card is already resolved (reply already sent, PR merged, line already submitted), say so in `fact`, set `resolved` true and leave `draft` empty.
-- When the card is a REVIEW card, `draft` is the recommended move and the one-line reason; when it is a RUN card, `draft` is the exact command or action.
-- `deferTrigger` and `deferAct`: when a Defer is a sensible pick, name the one trigger it would wait on (a date, "customer replies", "manual:<person> answers …", "deployed:<env>:<pr>", "merged:<pr>") and the act when it fires, so a Defer picked on the pane runs without a question. Empty when no defer makes sense.
-- `threadAfter`: where the Plain thread goes once the reply is sent or the card is closed; the executor applies it. `done` when nothing is owed or we only wait for the customer's feedback or confirmation; `waiting` when their answer feeds a change we still have to make (a config choice, an id, a retest that decides a fix), and when in doubt between these two; `leave` when we still owe work the reply only reports on, or a teammate holds the thread.
-- `learned`: what the material shows about the tenant or the requester that the memory block does not have (a role, an address form, who owns a config, a rollout state). One plain line each with its source and confidence in parentheses. The person answers one memory question for all cards at once, so write only what is worth a line in the support memory; usually empty.
-- `draft` holds only the text that would go out (or the command, or the decision). No remarks about the draft inside it: those belong in `fact` or `openChecks`.
-- A card whose material shows it already came back from a defer (`deferred` on the card) does not get Defer first again: it is acted on or dropped (111 of 321 defers were deferred again).
-- `seen` is the number of days the desk has shown this card. From 7 on, `why` says so in plain words ("on the desk for 12 days") and the recommendation weighs whether the card should still exist: Drop or Defer with a real trigger beats another day on the list.
-- Keep `fact` to one sentence. Keep `draft` under 1200 characters.
-- Every brief has a fixed shape so the person sees why the card is there, what to decide and for what. `why`: one sentence, what put the card on the desk, since when, and who waits ("Dana wrote at 09:11 today and has had no answer", "this file has sat untriaged since 26 Aug, nobody waits"). `decide`: the one question in one sentence ("Send Dana this answer as Luna?"). `then`: one or two sentences, what the recommended option sets in motion and what is at stake if nothing happens ("Luna sends it now; the thread stays open until she confirms on staging"). Keep `why` and `decide` under 160 characters and `then` under 300.
-- Plain words on the pane: the person reads `why`, `decide`, `then`, `fact` and `draft` without opening any file, often at the end of a long day. `fact` is one plain sentence under 140 characters: what the case is and what changed. `draft` on a batch or task card is at most three numbered lines; each names the thing in product words (what a user sees or cannot do), says whether it is still true, and ends with the verb. A reply draft is one short paragraph of customer text; it keeps the customer-text rules above and skips the three-line cap. Never put into `fact` or `draft`: file paths, function, hook or variable names, commit hashes, entity ids or UUIDs, status enum values, ticket folder slugs, backticked code. PR numbers, thread refs, ticket ids, dates and amounts may stay. `checks` and `openChecks` are for the agent and may carry identifiers; `why`, `decide`, `then`, `fact` and `draft` may not. The desk refuses a brief that breaks this.
+## What you write
+Write every field in English and speak to the person as "you". Only customer text inside `draft` is in the customer's language.
+- `why`: one sentence under 160 characters. What put the card on the desk, since when, and who waits ("Dana wrote at 09:11 today and has had no answer"). From `seen` 7 on, say how long ("on the desk for 12 days").
+- `fact`: the single fact that decides the card, one sentence under 140 characters.
+- `draft`: only the text that would go out (or the command, or the move), under 1200 characters. No remarks about the draft inside it.
+- `options`: EVERY label of the menu below, verbatim, best first. Each carries its own `decide` (one yes/no question for exactly that option, never "A or B?") and `then` (what that option sets in motion, and what is at stake if nothing happens). The desk picks which option leads and shows that option's question, so each pair must stand alone.
+- `resolved`: true when the material shows the card is already settled (reply sent and nothing else owed, PR merged, promise kept). Then say so in `fact` and leave `draft` empty.
+- `deferTrigger` and `deferAct`: the one trigger a Defer would wait on (a date YYYY-MM-DD, "customer replies", "manual:<person> answers …", "deployed:<env>:<pr>", "merged:<pr>") and the act when it fires. Empty when no defer makes sense. Never "later".
+- `learned`: what the material shows about the tenant or the requester that the memory block lacks, one line each with source and confidence in parentheses. Usually empty.{lane_rules}
+
+## Plain words
+The person reads `why`, `fact`, `draft`, `decide` and `then` on a small pane without opening any file, often at the end of a long day. Never in those fields: the card's id or a task slug, the `seen` number as a number of views, file paths, function or variable names, commit hashes, entity ids, status enum values, ticket folder slugs, backticked code. PR numbers, thread refs, ticket ids, dates and amounts may stay. `checks` and `openChecks` are for the agent and may carry identifiers.
+
+## The menu
+{json.dumps(menu, ensure_ascii=False)}
 
 ## The card
 {json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'mins', 'waits', 'age', 'seen', 'deferred', 'status', 'note', 'act', 'pr', 'url')}, ensure_ascii=False, indent=1)}
@@ -414,17 +515,97 @@ The desk's rules for a card (from its skill):
 """
 
 
+def write_error(card, message):
+    cid = card['id']
+    json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(message)[:300], 'errors': errors_before(cid) + 1, 'preparedAt': now_iso()},
+              open(brief_path(cid), 'w'))
+
+
+# ---- 2026-11-10: the validation runs before the person is asked ------------------------------------------------------
+def decision_path(cid):
+    return f"{DESK}/decisions/{re.sub(r'[^A-Za-z0-9._-]', '_', cid)}.json"
+
+
+def auto_runs_today():
+    today = now_iso()[:10]
+    n = 0
+    for path in glob.glob(f'{DESK}/decisions/*.json'):
+        try:
+            rec = json.load(open(path))
+        except Exception:
+            continue
+        n += rec.get('via') == 'auto' and (rec.get('pickedAt') or '')[:10] == today
+    return n
+
+
+def auto_validate_due(card, f):
+    """A FAST support thread of the last two days with a Hermes brief nobody checked, no examples to look at first, no
+    run that already failed on this wait, and room under the day's cap."""
+    sys.path.insert(0, DESK)
+    import deskconfig
+    if not deskconfig.AUTO_VALIDATE or card.get('lane') != 'FAST' or card.get('verb'):
+        return False
+    if UNATTENDED not in menu_of(card, f) or f['examples'] or f['unattended_draft']:
+        return False
+    # a thread of the last days only: on an older one the person knows more than the thread says (a call, a chat),
+    # and the unattended check stays one press away as the first option
+    if int(card.get('age') or 0) > AUTO_MAX_AGE_DAYS:
+        return False
+    try:
+        if json.load(open(decision_path(card['id']))).get('state') in ('queued', 'running'):
+            return False
+    except Exception:
+        pass
+    return auto_runs_today() < deskconfig.AUTO_VALIDATE_MAX
+
+
+def start_validation(card, ctx_path, anc):
+    """Write the brief that says "being checked", record the pick as the desk's own (via auto), start the executor.
+    The executor's run_unattended claims the thread, validates, posts its marked note, drafts, and asks for a new brief."""
+    cid = card['id']
+    brief = {
+        'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'fingerprint': fingerprint(card),
+        'status': card.get('status'), 'act': card.get('act'), 'key': card.get('key'), 'since': card.get('since'),
+        'why': 'A support thread whose triage brief nobody has checked yet.',
+        'decide': 'Nothing to decide yet: the desk checks the brief first.',
+        'then': 'The check runs in the background for about eight minutes. The card comes back with a checked draft, or says why the check stopped.',
+        'fact': 'The desk is checking this thread before it asks you.',
+        'draft': '', 'options': [{'label': UNATTENDED, 'verb': VERBS[UNATTENDED], 'decide': '', 'then': ''}], 'shown': 1,
+        'checks': [], 'openChecks': [], 'resolved': False, 'replyReady': False, 'preparedAt': now_iso(), 'model': '',
+        'deferTrigger': '', 'deferAct': '', 'threadAfter': '', 'learned': [], 'anchor': anc, 'context': ctx_path, 'auto': True,
+    }
+    json.dump(brief, open(brief_path(cid), 'w'), ensure_ascii=False, indent=1)
+    rec = {
+        'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'option': UNATTENDED, 'verb': VERBS[UNATTENDED], 'class': 'model',
+        'via': 'auto', 'pickedAt': now_iso(), 'briefFile': brief_path(cid), 'fingerprint': brief['fingerprint'],
+        'key': card.get('key'), 'since': card.get('since'), 'anchor': anc, 'thread': card.get('thread'), 'pr': card.get('pr'),
+        'state': 'queued', 'startedAt': None, 'finishedAt': None, 'result': '', 'learned': [],
+    }
+    os.makedirs(f'{DESK}/decisions', exist_ok=True)
+    tmp = decision_path(cid) + '.tmp'
+    json.dump(rec, open(tmp, 'w'), ensure_ascii=False, indent=1)
+    os.replace(tmp, decision_path(cid))
+    env = {k: v for k, v in os.environ.items() if k not in ('DESK_PREPARE', 'CLAUDE_CODE_PLUGIN_DIRS')}
+    subprocess.Popen(['python3', f'{os.path.dirname(os.path.realpath(__file__))}/desk-execute.py'], env=env, cwd=DESK,
+                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log(f'{cid}: validation started in the background (auto)')
+
+
 def prepare(card, dry=False):
     cid = card['id']
     t0 = datetime.datetime.now()
     ctx = material(card)
+    f = facts_of(card, ctx)
     anc = deskanchor.anchor(card)   # read before the model runs: a message that lands during the run is "after the brief"
-    p = prompt(card, ctx)
+    p = prompt(card, ctx, f)
     ctx_path = brief_path(cid).replace('.json', '.ctx.md')
-    with open(ctx_path, 'w') as f:
-        f.write(p)
+    with open(ctx_path, 'w') as fh:
+        fh.write(p)
     if dry:
-        log(f'{cid}: dry, context {len(p)} chars at {ctx_path}')
+        log(f"{cid}: dry, context {len(p)} chars at {ctx_path}; menu {menu_of(card, f)}; auto validation {'due' if auto_validate_due(card, f) else 'not due'}")
+        return
+    if auto_validate_due(card, f):
+        start_validation(card, ctx_path, anc)
         return
     env = {k: v for k, v in os.environ.items() if k != 'CLAUDE_CODE_PLUGIN_DIRS'}
     env['DESK_PREPARE'] = '1'
@@ -436,74 +617,45 @@ def prepare(card, dry=False):
         out = json.loads(r.stdout)
     except Exception as e:
         log(f'{cid}: runner failed: {e}')
-        json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(e)[:300], 'errors': errors_before(cid) + 1, 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
+        write_error(card, e)
         return
     if out.get('is_error') or not out.get('structured_output'):
         log(f"{cid}: model error: {str(out.get('result'))[:200]}")
-        json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'error': str(out.get('result'))[:300], 'errors': errors_before(cid) + 1, 'preparedAt': now_iso()}, open(brief_path(cid), 'w'))
+        write_error(card, out.get('result'))
         return
-    so = out['structured_output']
-    ready = drafted(card['lane'], so)
-    unchecked = re.search(r'examples named in the newest customer message: ([1-9]\d*) and nobody has replied since', p) and 'local validation note: none' in p
-    if unchecked and ready:  # the examples come before the answer (2026-11-09)
-        ready = False
-        so['then'] = ('The customer named examples nobody has looked at yet; the check comes before any answer. ' + (so.get('then') or '')).strip()[:300]
-    allowed = DRAFTED if ready else options_of(card, p)
-    options = [{'label': o['label'], 'verb': VERBS.get(o['label'], 'do'), 'why': o.get('why', '')} for o in so.get('options', []) if o.get('label') in allowed]
-    for label in allowed:  # the fixed set stays complete, recommended ones first
-        if all(o['label'] != label for o in options):
-            options.append({'label': label, 'verb': VERBS.get(label, 'do'), 'why': ''})
-    if ready:  # a checked draft always leads with the send
-        options.sort(key=lambda o: o['label'] != 'Send it')
-    elif unchecked and any(o['label'] == 'Check the examples, then answer' for o in options):
-        options.sort(key=lambda o: o['label'] != 'Check the examples, then answer')
-    else:
-        options = first_option_rules(card, so, options, p)
-    brief = {
-        'cardId': cid, 'ref': card.get('ref'), 'lane': card['lane'], 'fingerprint': fingerprint(card),
+    brief = brief_of(card, out['structured_output'], f)
+    brief.update({'preparedAt': now_iso(), 'model': MODEL, 'costUsd': out.get('total_cost_usd'), 'ms': out.get('duration_ms'),
+                  # 2026-10-23: the facts the brief stands on; desk-execute.py reads them again before it acts on a pane pick
+                  'anchor': anc, 'context': ctx_path})
+    json.dump(brief, open(brief_path(cid), 'w'), ensure_ascii=False, indent=1)
+    log(f"{cid}: prepared in {(datetime.datetime.now() - t0).seconds}s, {len(brief['openChecks'])} open checks, first {brief['options'][0]['label'] if brief['options'] else '-'}, ${out.get('total_cost_usd', 0):.3f}")
+
+
+def brief_of(card, so, f):
+    """The model's answer becomes the brief: the menu and the first option come from facts, and the question on the
+    pane is the one the model wrote for exactly that option."""
+    lane = card['lane']
+    ready = drafted(lane, so) and not (f['examples'] and not f['validated'])   # the examples come before the answer
+    menu = menu_of(card, f, ready)
+    wrote = {o.get('label'): o for o in so.get('options') or [] if o.get('label')}
+    order = [label for label in wrote if label in menu] + [label for label in menu if label not in wrote]
+    lead = lead_of(card, f, so, order, ready)
+    order = pane_order(lead, order)
+    options = [{'label': label, 'verb': VERBS.get(label, 'do'),
+                'decide': (wrote.get(label) or {}).get('decide', '').strip(), 'then': (wrote.get(label) or {}).get('then', '').strip()} for label in order]
+    first = options[0] if options else {'label': '', 'decide': '', 'then': ''}
+    return {
+        'cardId': card['id'], 'ref': card.get('ref'), 'lane': lane, 'fingerprint': fingerprint(card),
         'status': card.get('status'), 'act': card.get('act'), 'key': card.get('key'), 'since': card.get('since'),
-        'why': so.get('why', ''), 'decide': so.get('decide', ''), 'then': so.get('then', ''),
-        'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options,
+        'why': so.get('why', ''), 'decide': first['decide'] or f"{first['label']}?", 'then': first['then'],
+        'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options, 'shown': SHOWN,
         'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),
-        'replyReady': ready, 'preparedAt': now_iso(), 'model': MODEL, 'costUsd': out.get('total_cost_usd'), 'ms': out.get('duration_ms'),
+        'replyReady': ready,
         'deferTrigger': (so.get('deferTrigger') or '').strip(), 'deferAct': (so.get('deferAct') or '').strip(),
         # 2026-11-10: the thread's status after the pick (desk-execute.py thread_after applies it)
         'threadAfter': so.get('threadAfter') if so.get('threadAfter') in ('done', 'waiting', 'leave') else '',
         'learned': [str(x).strip() for x in (so.get('learned') or []) if str(x).strip()][:6],
-        # 2026-10-23: the facts the brief stands on; desk-execute.py reads them again before it acts on a pane pick
-        'anchor': anc,
-        'context': ctx_path,
     }
-    json.dump(brief, open(brief_path(cid), 'w'), ensure_ascii=False, indent=1)
-    log(f"{cid}: prepared in {(datetime.datetime.now() - t0).seconds}s, {len(brief['openChecks'])} open checks, ${out.get('total_cost_usd', 0):.3f}")
-
-
-def first_option_rules(card, so, options, material):
-    """Deterministic rules on what may lead (2026-11-09, from the score ledger since 22 Oct): Defer first missed 23 of 31,
-    "I sent it already" 17 of 24, "Draft the reply" 10 of 11; briefs with open checks hit 39 %, without 64 %. A card that
-    came back from a defer was deferred again in 111 of 321 cases."""
-    labels = [o['label'] for o in options]
-    def lead(label):
-        nonlocal options
-        if label in labels:
-            options.sort(key=lambda o: o['label'] != label)
-    first = labels[0] if labels else ''
-    trigger = (so.get('deferTrigger') or '').strip()
-    deferred_before = bool(card.get('deferred'))
-    no_validation = 'local validation note: none' in material
-    # Defer leads only on a machine-checkable trigger, and never on a card that already came back from a defer.
-    if first.startswith('Defer') and (deferred_before or not MACHINE_TRIGGER.match(trigger)):
-        options.sort(key=lambda o: o['label'].startswith('Defer'))
-    # open checks: the validation leads, not the draft or the record of a send. 2026-11-09: the unattended validation
-    # leads when it can run (Hermes brief, no note, no failed run on this wait); after a failure the session's claim leads.
-    validation = UNATTENDED if UNATTENDED in labels and not unattended_failed(card) else 'Claim + validate now'
-    if so.get('openChecks') and validation in labels:
-        lead(validation)
-    elif first in ('Draft the reply', 'I sent it already', 'Claim + validate now') and no_validation and validation in labels:
-        lead(validation)
-    elif first == UNATTENDED and validation != UNATTENDED:
-        lead('Claim + validate now')
-    return options
 
 
 def now_iso():

@@ -13,6 +13,8 @@
  "sendHost": "your-ssh-host-alias",
  "sendEnvFile": "/srv/your-adapter/.env",
  "liveEvents": false,
+ "autoValidate": false,
+ "autoValidateMax": 8,
  "askPattern": "Pat|Lee |human gates|policy|prioritis",
  "people": [
   "Pat",

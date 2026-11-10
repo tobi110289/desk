@@ -3,6 +3,7 @@ import { expect, mock, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 
 import { berlinTime, reopenedOf, titleOf } from "../hooks/cardText";
+import { hintOf } from "../hooks/optionHints";
 import { plainWordsProblems } from "../hooks/plainWords";
 
 const CARDS = JSON.stringify({
@@ -625,4 +626,14 @@ test("a task card is titled by its task, and an agent's working note is never a 
 test("the pane shows Berlin time", () => {
   expect(berlinTime("2026-11-10T14:34:42Z")).toBe("15:34");
   expect(berlinTime("")).toBe("");
+});
+
+test("each option says what a press does", () => {
+  expect(hintOf("Start it now")).toContain("this session");
+  expect(hintOf("Hand it to agents")).toContain("background agent");
+  expect(hintOf("Defer", "2026-11-17")).toBe(
+    "leaves the desk and comes back on: 2026-11-17",
+  );
+  expect(hintOf("Drop (unpin)")).toContain("for good");
+  expect(hintOf("Drop the line")).toContain("discarded");
 });

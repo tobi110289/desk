@@ -14,6 +14,7 @@ import type {
 } from "../types";
 import { berlinTime, dueName, reopenedOf, titleOf, waitOf } from "./cardText";
 import { healthOf, pickLine, rankWorkable, takesSession } from "./health";
+import { hintOf } from "./optionHints";
 import { BRIEF_FIELDS, plainWordsProblems } from "./plainWords";
 
 const PANE = "desk";
@@ -419,6 +420,8 @@ const isDetailsOpen = atom(
   { plugin: "desk", key: "isDetailsOpen" } as const,
   false,
 );
+/** The card whose whole option list is folded out with `v`; a brief shows three by default. */
+const moreFor = atom({ plugin: "desk", key: "moreFor" } as const, "");
 const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
 /**
  * 2026-10-23: auto mode. Off: a session-class pick waits under NEEDS YOU for `w`. On: when the session is idle, it takes
@@ -503,6 +506,9 @@ const preparedOf = (
       label: text(o.label),
       verb: text(o.verb),
     })),
+    deferTrigger: text(b.deferTrigger),
+    // A brief from before 2026-11-10 has no count: it shows its whole list, as it always did.
+    shown: typeof b.shown === "number" && b.shown > 0 ? b.shown : 99,
     openChecks: ((b.openChecks ?? []) as unknown[]).map(text),
     resolved: b.resolved === true,
   };
@@ -2060,6 +2066,7 @@ export const register: Register = (on) => {
     const listOpen = await read($, isListOpen);
     const prsOpen = await read($, isPrsOpen);
     const detailsOpen = await read($, isDetailsOpen);
+    const moreOpen = card !== undefined && (await read($, moreFor)) === card.id;
     const shown = await read($, brief);
     const current = card && shown?.cardId === card.id ? shown : null;
     const summary = card ? (await read($, summaries))[card.id] : undefined;
@@ -2262,15 +2269,46 @@ export const register: Register = (on) => {
                             : ""}
                           {card.prepared.resolved ? " · already resolved" : ""}
                         </Text>
-                        {card.prepared.options.map((option, i) => (
+                        {card.prepared.options
+                          .slice(0, moreOpen ? undefined : card.prepared.shown)
+                          .map((option, i) => (
+                            <Box key={`prepared-opt-row-${i}`} gap={1}>
+                              <Box flexShrink={0}>
+                                <Button
+                                  key={`prepared-opt-${i}`}
+                                  hotkey={OPTION_KEYS[i]}
+                                  variant={i === 0 ? "primary" : undefined}
+                                  label={`${OPTION_KEYS[i]}  ${option.label}${i === 0 ? "  ★" : ""}`}
+                                  onPress={() => void decide($, card, option)}
+                                />
+                              </Box>
+                              <Text dimColor wrap="truncate-end">
+                                {hintOf(
+                                  option.label,
+                                  card.prepared?.deferTrigger ?? "",
+                                )}
+                              </Text>
+                            </Box>
+                          ))}
+                        {/* 2026-11-10: the pick was one of the first three options 101 of 117 times; the rest fold out */}
+                        {card.prepared.options.length > card.prepared.shown && (
                           <Button
-                            key={`prepared-opt-${i}`}
-                            hotkey={OPTION_KEYS[i]}
-                            variant={i === 0 ? "primary" : undefined}
-                            label={`${OPTION_KEYS[i]}  ${option.label}${i === 0 ? "  ★" : ""}`}
-                            onPress={() => void decide($, card, option)}
+                            key="more-options"
+                            plain
+                            dimColor
+                            hotkey="v"
+                            label={
+                              moreOpen
+                                ? "fewer options"
+                                : `${card.prepared.options.length - card.prepared.shown} more options`
+                            }
+                            onPress={() =>
+                              update($, moreFor, (id) =>
+                                id === card.id ? "" : card.id,
+                              )
+                            }
                           />
-                        ))}
+                        )}
                       </Box>
                     )}
                   </Box>
@@ -2361,13 +2399,20 @@ export const register: Register = (on) => {
                   <Box marginTop={1} flexDirection="column">
                     <Text dimColor>CHOOSE</Text>
                     {current.options.map((option, i) => (
-                      <Button
-                        key={`opt-${i}`}
-                        hotkey={OPTION_KEYS[i]}
-                        variant={i === 0 ? "primary" : undefined}
-                        label={`${OPTION_KEYS[i]}  ${option.label}${i === 0 ? "  ★" : ""}`}
-                        onPress={() => void choose($, current, option)}
-                      />
+                      <Box key={`opt-row-${i}`} gap={1}>
+                        <Box flexShrink={0}>
+                          <Button
+                            key={`opt-${i}`}
+                            hotkey={OPTION_KEYS[i]}
+                            variant={i === 0 ? "primary" : undefined}
+                            label={`${OPTION_KEYS[i]}  ${option.label}${i === 0 ? "  ★" : ""}`}
+                            onPress={() => void choose($, current, option)}
+                          />
+                        </Box>
+                        <Text dimColor wrap="truncate-end">
+                          {hintOf(option.label)}
+                        </Text>
+                      </Box>
                     ))}
                   </Box>
                 )}

@@ -21,8 +21,8 @@ This is my working setup, published as a worked example. It runs against my comp
 | `skill/CARDS.md`         | Sources, lanes and the recipe for each lane                                                                                                                              |
 | `scripts/desk.py`        | Gathers from every source, ranks, writes `cards.json`                                                                                                                    |
 | `scripts/desk-close.py`  | Records a verb (the mod calls it through `desk_close`)                                                                                                                   |
-| `scripts/desk-decide.py` | Records a pick taken on the pane; `desk-execute.py` runs the queue in the background; `deskanchor.py` and `deskclass.py` are their shared tables                          |
-| `scripts/deskhold.py`    | The one hold logic: a card's wait (`key`, `since`), closed / parked / live, the ranking tiers; used by the gather, the close script and the live feed                        |
+| `scripts/desk-decide.py` | Records a pick taken on the pane; `desk-execute.py` runs the queue in the background; `deskanchor.py` and `deskclass.py` are their shared tables                         |
+| `scripts/deskhold.py`    | The one hold logic: a card's wait (`key`, `since`), closed / parked / live, the ranking tiers; used by the gather, the close script and the live feed                    |
 | `scripts/desk-score.py`  | How often the prepared briefs guessed the user's pick and draft right (`desk-close.py` writes the ledger)                                                                |
 | `scripts/desk-events.py` | The client for the support bot's live event feed (see Live events)                                                                                                       |
 | `scripts/` (rest)        | Plain numbers for the pane, Notion ticket classes, support memory, the send path, local tasks                                                                            |
@@ -42,6 +42,12 @@ Two checks run when Claude ends a turn. A reply that says a message went out whi
 ## Picks run in the background
 
 Since 2026-10-23 a prepared card shows its options on the pane, and a key press records the pick as a file (`scripts/desk-decide.py`, `decisions/<id>.json`) instead of a prompt. `scripts/desk-execute.py` drains the queue without the session: it reads the brief's anchors again (`scripts/deskanchor.py`: the newest message on the thread, the PR's head and review state) and bounces the pick when the world moved, else it sends, marks done, drops or defers and records the verb. The pane shows the last picks with their state (waiting, running, done, bounced, failed) and lists the picks that need the session under NEEDS YOU; `w` on such a card hands it to Claude with the option already chosen, and with auto mode on (`t`) Claude takes them one by one whenever it is idle. A handoff, a run card's go and a PR close run as one headless model run (`claude -p` with Bash, Read, Glob and Grep, no MCP) that gets the brief, its raw material, the lane recipe and the one option and answers with a verdict; `desk-execute.py --rehearse` runs that chain without any outward act. `scripts/deskclass.py` is the one table that says which option is a script, a model run or session work. `luna-send.py` refuses a send under a decision record whose option is not a send, so no background run sends on its own. On a FAST card with a Hermes brief and no validation note, `Validate and draft (unattended)` claims the thread, validates the brief by the `/triage` rules in one headless run, posts the note through `scripts/plain-note.py` (its first line says a person has not read the thread), drafts the reply and puts the card back once with `Send it` first; `scripts/deskplain.py` holds the Plain writes and `scripts/plain-field.py` shows, takes or releases the triage claim. What a brief or a run learned about a tenant or a requester queues in `scripts/desk-harvest.py`; `m` on the pane asks all of it in one memory question. `scripts/desk-score.py` adds the picks per class (ran, bounced, failed, median time from pick to end).
+
+## Who picks the first option
+
+The brief's model has no tools, so it does not get to decide what leads. `scripts/desk-prepare.py` builds the menu and picks the first option from facts it can read (a validation note on the thread, examples the customer named, a reply of ours on top, a defer that already came back). The model ranks that menu and writes one question and one consequence for every option; the pane shows the pair of the option that leads. Three options show: the lead, the best alternative and one way out. Each has a short hint that says who does the work.
+
+With `"autoValidate": true` in `config.json`, a new support thread whose triage brief nobody checked is validated in the background before the card asks anything. `python3 scripts/test_prepare.py` checks the rules without a model.
 
 ## Plain words on the pane
 
@@ -63,7 +69,7 @@ With `"liveEvents": true` in `config.json`, the pane hears about a new Plain thr
 
 ## Pane keys
 
-`1` to `9` select a card (ctrl+↑ / ctrl+↓ walk the list), `w` works it, `a` to `j` pick an option, `p` folds the Plain numbers, `h` hides the pane.
+`1` to `9` select a card (ctrl+↑ / ctrl+↓ walk the list), `w` works it, `a` to `j` pick an option, `v` shows the options past the first three, `s` shows the card's raw status lines, `p` folds the Plain numbers, `h` hides the pane. The pane opens only in the session that ran `/desk-pane`.
 
 ## Setup (for a fork)
 
