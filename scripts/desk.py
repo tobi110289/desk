@@ -446,10 +446,81 @@ def add(card):
     card['seen']=prev.get('seen',0)+(0 if prev.get('lastSeen')==today else 1)
     cards.append(card)
 
+# ---------------------------------------------------------------- threads a colleague holds (2026-11-10)
+# 26 close notes in four weeks said "a colleague owns this thread"; one thread was dropped seven times for it. A Plain
+# thread a teammate holds is on the ignore list until they hand it back, for every source (loop, gap, owe, promise, today).
+# A teammate holds it when (1) the Plain assignee is a teammate, (2) the triage owner is "human" and the newest Slack
+# takeover note names a teammate (no age limit: one such thread had a 13-day-old claim), or (3) the newest message from
+# our side is a teammate's and comes after the customer's newest one. It comes back when the assignee is cleared or
+# becomes the person, or when the customer writes after the holder's last move: then it is a new wait. A pin still shows,
+# with the holder in its status. One header line counts them; cache/colleague-held.json lists ref, who and since.
+sys.path.insert(0,os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import plain as _plain
+_Q_HELD='query($after:String){ threads(first:50, after:$after, filters:{statuses:[TODO,SNOOZED]}) { pageInfo{ hasNextPage endCursor } edges{ node{ id ref title assignedAt{ iso8601 } assignedTo{ __typename ... on User{ fullName } } threadFields{ key stringValue } timelineEntries(first:20){ edges{ node{ timestamp{ iso8601 } actor{ __typename ... on UserActor{ user{ fullName } } } entry{ __typename } } } } } } } }'
+_Q_TAKEOVER='query($id:ID!){ thread(threadId:$id){ timelineEntries(first:30){ edges{ node{ timestamp{ iso8601 } entry{ __typename ... on NoteEntry{ markdown } } } } } } }'
+_HELD_MSG={'EmailEntry','ChatEntry','SlackMessageEntry','SlackReplyEntry','MSTeamsMessageEntry','DiscordMessageEntry'}
+def _colleague(name):
+    first=(name or '').strip().split(' ')[0]
+    return next((p for p in deskconfig.COLLEAGUES if p.lower()==first.lower()),None)
+def colleague_held():
+    """[{ref, thread, who, since, why, title}] for every TODO or SNOOZED thread a teammate holds; None when Plain is unreachable."""
+    if not os.environ.get('PLAIN_API_KEY') or not deskconfig.COLLEAGUES: return None
+    after=None; out=[]
+    while True:
+        d=_plain.try_gql(_Q_HELD,{'after':after})
+        if not d: return None
+        for e in d['threads']['edges']:
+            n=e['node']; f={x['key']:x.get('stringValue') for x in n.get('threadFields') or []}
+            a=n.get('assignedTo') or {}
+            assignee=_colleague(a.get('fullName')) if a.get('__typename')=='User' else None
+            cust_at=''; mate=None; mate_at=''
+            for x in [y['node'] for y in (n.get('timelineEntries') or {}).get('edges') or []]:
+                if (x.get('entry') or {}).get('__typename') not in _HELD_MSG: continue
+                at=(x.get('timestamp') or {}).get('iso8601') or ''; act=x.get('actor') or {}
+                if act.get('__typename')=='CustomerActor': cust_at=cust_at or at
+                elif not mate_at and act.get('__typename')=='UserActor':
+                    mate_at=at; mate=_colleague((act.get('user') or {}).get('fullName'))
+                if cust_at and mate_at: break
+            who=None; since=''; why=''
+            if assignee:
+                who,since,why=assignee,((n.get('assignedAt') or {}).get('iso8601') or ''),'assignee'
+            if not who and f.get('triage_owner')=='human':
+                d2=_plain.try_gql(_Q_TAKEOVER,{'id':n['id']}) or {}
+                for y in ((d2.get('thread') or {}).get('timelineEntries') or {}).get('edges') or []:
+                    m=re.search(r'Taken over by:\s*<@([A-Z0-9]+)>',((y['node'].get('entry') or {}).get('markdown') or ''))
+                    if m:
+                        _t=_colleague(deskconfig.SLACK_USERS.get(m.group(1)))
+                        if _t: who,since,why=_t,y['node']['timestamp']['iso8601'],'took it over from Slack'
+                        break
+            if mate and mate_at>(cust_at or '') and (not who or who==mate):
+                # their reply after the customer's newest message: they hold it (the inverse of desk-prepare's
+                # "the customer names a teammate and we have not replied since")
+                who,since,why=mate,max(since,mate_at),(why+', ' if why else '')+'answered last'
+            if not who: continue
+            # the customer wrote after the holder's last move: a new wait, back on the desk
+            if cust_at and cust_at>since: continue
+            out.append({'ref':n['ref'],'thread':n['id'],'who':who,'since':since,'why':why,'title':(n.get('title') or '')[:120]})
+        if not d['threads']['pageInfo']['hasNextPage']: break
+        after=d['threads']['pageInfo']['endCursor']
+    return out
+try:
+    _held=cached('colleague-held',colleague_held)
+    if _held is None and os.environ.get('PLAIN_API_KEY') and deskconfig.COLLEAGUES: failed_sources.append(('colleague-held','Plain unreachable: threads a colleague holds may show'))
+except Exception as _e:
+    _held=None; failed_sources.append(('colleague-held',str(_e)[:160]))
+HELD={h['ref']:h for h in _held or []}
+held_skipped=set()   # refs whose cards the rule kept off this gather
+
 # ---------------------------------------------------------------- source 1: agent-loop state
 # 2026-11-09: every card offered to add() counts as reached for the coverage pass (a hold, ignore.json or a batch decides it there)
 _add_built=add
-def add(card): _cov.offer(card); return _add_built(card)
+def add(card):
+    _cov.offer(card)
+    h=HELD.get(card.get('ref') or '')
+    if h:
+        if not card['id'].startswith('fast:'):
+            held_skipped.add(h['ref']); _cov.explain(h['ref'],f"with {h['who']} ({h['why']})"); return
+        card['status']=f"with {h['who']} since {(h['since'] or '?')[:10]} ({h['why']}); "+(card.get('status') or '')
+    return _add_built(card)
 AGENT_OWNED=r'agent polling|agent working|agent on HORST|\(no action\)|worker \d+%|in HORST queue|^sent[ :"]|; agent wo'
 STALE_AGENT_HOURS=6
 _prh_doc=None
@@ -1550,7 +1621,7 @@ for c in parked:
 # live: ref -> the loop caption the desk ranked; the board honours the entry only while that caption stands, so a
 # caption the desk wrote on closing a card ("sent … agent working") moves the row off "waiting on you" at once.
 _live={r:(state.get(r,{}).get('status') or '').strip() for c in live for r in _refs(c) if r not in _parked}
-if not SCOPE: json.dump({'generatedAt':now.isoformat(),'parked':_parked,'live':_live},open(f'{DESK}/board-sync.json','w'),indent=1,ensure_ascii=False)   # same: never let a scoped run shrink the board
+if not SCOPE: json.dump({'generatedAt':now.isoformat(),'parked':_parked,'live':_live,'colleague':list(HELD.values())},open(f'{DESK}/board-sync.json','w'),indent=1,ensure_ascii=False)   # same: never let a scoped run shrink the board
 
 # ---------------------------------------------------------------- print
 def link(c):
@@ -1568,6 +1639,10 @@ if '--wins' in sys.argv:
 pins_live=[c['ref'] for c in live if c['id'].startswith('fast:')]   # tenant:<ref> cards share the FAST lane but are not pins
 _today_live=[c['ref'] for c in live if c.get('ref') in TODAY_NEW]+[c['ref'] for c in live if c.get('ref') in TODAY_ANSWERED]
 print(f"**Desk {now.strftime('%Y-%m-%dT%H:%MZ')}**{f' · scope: {SCOPE}' if SCOPE else ''}{(' · today: '+', '.join(_today_live)) if _today_live else ''}{(' · pinned: '+', '.join(pins_live)) if pins_live else ''} · {len({r for c in live for r in _refs(c)})} waiting on you ({len(live)} cards{(' incl. '+str(len([c for c in live if not _refs(c)]))+' outside the loop') if [c for c in live if not _refs(c)] else ''}, ~{total} min) · {len(parked)} parked · {len(wins)} closed today{(' · '+_cov_phrase) if _cov_phrase else ''}")
+if HELD:   # 2026-11-10: threads a teammate holds stay off the desk; one line says how many and with whom
+    _by={}
+    for h in HELD.values(): _by[h['who']]=_by.get(h['who'],0)+1
+    print(f"{len(HELD)} thread{'s' if len(HELD)!=1 else ''} with a colleague ({', '.join(f'{k} {v}' for k,v in sorted(_by.items()))}): {', '.join(sorted(HELD))} · cache/colleague-held.json")
 due=[f"{k} ({v['reason']})" for k,v in preflight.items() if v['due']]
 quiet=[f"{k} ({v['reason']})" for k,v in preflight.items() if not v['due']]
 print(f"PRE-FLIGHT: due → {'; '.join(due) if due else 'none'}" + (f" · quiet → {'; '.join(quiet)}" if quiet else '')

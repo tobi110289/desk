@@ -17,6 +17,10 @@ ASK_PATTERN = CFG.get('askPattern') or r'human gates|policy|prioritis'
 PEOPLE = CFG.get('people') or []
 # 2026-10-22: the teammates by first name, for "the customer tagged a colleague"; `people` also holds customer contacts we wait on
 TEAM = CFG.get('team') or []
+# 2026-11-10: the first name of the person who runs the desk. A thread a teammate holds (Plain assignee, Slack takeover,
+# their reply after the customer's) leaves the desk; one the person holds stays. Empty: nobody in TEAM is the person.
+ME = (CFG.get('me') or '').strip()
+COLLEAGUES = [p.strip() for p in TEAM if p.strip() and p.strip().lower() != ME.lower()]
 # Slack user id -> teammate first name, so a Slack mention (<@U…>) in a customer message reads as that teammate
 SLACK_USERS = CFG.get('slackUsers') or {}
 # 2026-10-22: a thread whose requester writes from one of these mail domains is a colleague's thread (a Sentry auto-flag

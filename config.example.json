@@ -27,6 +27,7 @@
     "Pat",
     "Lee"
   ],
+  "me": "Sam",
   "slackUsers": {
     "SLACK_USER_ID_OF_PAT": "Pat"
   }
