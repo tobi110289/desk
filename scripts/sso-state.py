@@ -4,7 +4,8 @@ both down there and in the desk pane, so I see it more easily"; the unattended v
 
 Reads the SSO token cache (~/.aws/sso/cache/*.json, the entries with a startUrl and an expiresAt), takes the latest
 expiry, writes cache/sso-state.json in the desk folder and prints one line: `expired`, `expiring 12m`, `ok 7h` or
-`none` (no token cached). No network call.
+`none` (no token cached). When the token is expired, the role credentials in ~/.aws/cli/cache decide: while they
+are valid, AWS calls work and the state stays `ok`. No network call.
 """
 import datetime
 import glob
@@ -31,9 +32,25 @@ def state():
             continue
         if latest is None or exp > latest:
             latest = exp
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if latest is None or latest <= now:
+        # The SSO token lives about 1 h, the role credentials it minted (~/.aws/cli/cache) up to 12 h. AWS calls
+        # work as long as those hold, so the login counts as expired only when they are gone too. The earliest
+        # expiry of the valid ones decides.
+        role = None
+        for f in glob.glob(os.path.expanduser('~/.aws/cli/cache/*.json')):
+            try:
+                raw = json.load(open(f))['Credentials']['Expiration']
+                exp = datetime.datetime.strptime(raw[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=datetime.timezone.utc)
+            except Exception:
+                continue
+            if exp > now and (role is None or exp < role):
+                role = exp
+        if role is not None:
+            latest = role
     if latest is None:
         return {'state': 'none', 'minutes': 0, 'expiresAt': None}
-    minutes = int((latest - datetime.datetime.now(datetime.timezone.utc)).total_seconds() // 60)
+    minutes = int((latest - now).total_seconds() // 60)
     s = 'expired' if minutes <= 0 else 'expiring' if minutes <= EXPIRING_MIN else 'ok'
     return {'state': s, 'minutes': max(0, minutes), 'expiresAt': latest.strftime('%Y-%m-%dT%H:%M:%SZ')}
 
