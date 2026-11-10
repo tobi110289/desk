@@ -14,6 +14,10 @@ OPEN = ('Ready to Execute', 'Ready to Estimate', 'Triage', 'Not started', 'Block
 RUNNING = ('In progress', 'In review')
 SHIPPED = ('Done', 'Staging Released', 'Production Released')
 IDLE_DAYS = 14
+try:
+    sys.path.insert(0, DESK); import deskconfig as _dc; _NOTION_ME = _dc.NOTION_ME
+except Exception:
+    _NOTION_ME = ''
 NOW = datetime.datetime.now(datetime.timezone.utc)
 
 
@@ -94,7 +98,11 @@ def classify():
             # Nobody moves it: unassigned, no PR, and old. 2026-10-19 (Tobias: no sprint planning, no estimates, ever):
             # "not in a sprint" is the normal state of every ticket now, so it no longer makes a ticket idle on day one;
             # the 17 tickets the desk filed that morning came straight back as a 33-member batch.
-            if not t.get('assignee') and not t.get('prs') and t['age'] >= IDLE_DAYS:
+            # 2026-11-10 (Tobias): an unassigned ticket belongs to the board triage, which runs several times a day and
+            # moves it on or archives it; the desk showed 21 of them for a month with nothing to do. A ticket is the
+            # person's business only while it names them as assignee.
+            mine = _NOTION_ME and _NOTION_ME in str(t.get('assignee') or '')
+            if mine and not t.get('prs') and t['age'] >= IDLE_DAYS:
                 idle.append(t)
     idle.sort(key=lambda t: -t['age'])
     return {

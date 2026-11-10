@@ -1401,9 +1401,9 @@ if not SCOPE:
         for t in _tc['idle']:
             add({'id':f"ticket:{t['id']}",'ref':f"ORB-{t['id']}",'lane':'TICKET','mins':1,'impact':t.get('impact') or 'P2','age':t['age'],'waits':'nobody',
                  'pr':None,'task':None,'thread':(t['threads'][0]['threadId'] if t['threads'] else None),'url':t.get('url'),
-                 'status':f"{t['status']} · {t['age']}d · {'no sprint' if not t.get('sprint') else 'Kanban'} · unassigned"+(f" · from {', '.join(r['ref'] for r in t['threads'])}" if t['threads'] else ''),
+                 'status':f"{t['status']} · {t['age']}d · {'no sprint' if not t.get('sprint') else 'Kanban'} · assigned to you, no PR"+(f" · from {', '.join(r['ref'] for r in t['threads'])}" if t['threads'] else ''),
                  'note':t['title'][:200],'since':f"{t['status']}|{'sprint' if t.get('sprint') else 'no sprint'}",
-                 'act':f"ORB-{t['id']} ({t['title'][:60]}) idles {t['age']}d: push it (ask {deskconfig.TICKET_OWNER} / assign), hand it to an agent, or archive it",
+                 'act':f"ORB-{t['id']} ({t['title'][:60]}) is assigned to you and idles {t['age']}d: start it, hand it to an agent, or unassign yourself (the board triage takes it)",
                  'score':round((IMPACT.get(t.get('impact') or '',1)+1+min(t['age']/14,3))/3*10,1)})
         for t in _tc['shippedUntold']:
             refs=[r['ref'] for r in t['threads'] if r['status'] in ('TODO','SNOOZED')]

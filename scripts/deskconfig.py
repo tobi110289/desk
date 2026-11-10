@@ -20,6 +20,7 @@ TEAM = CFG.get('team') or []
 # 2026-11-10: the first name of the person who runs the desk. A thread a teammate holds (Plain assignee, Slack takeover,
 # their reply after the customer's) leaves the desk; one the person holds stays. Empty: nobody in TEAM is the person.
 ME = (CFG.get('me') or '').strip()
+NOTION_ME = (CFG.get('notionUser') or '').strip()   # the person's Notion user url (user://…); a ticket is theirs when it names it
 COLLEAGUES = [p.strip() for p in TEAM if p.strip() and p.strip().lower() != ME.lower()]
 # Slack user id -> teammate first name, so a Slack mention (<@U…>) in a customer message reads as that teammate
 SLACK_USERS = CFG.get('slackUsers') or {}
