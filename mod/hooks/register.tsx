@@ -12,6 +12,7 @@ import type {
   PlainStats,
   PreparedBrief,
 } from "../types";
+import { berlinTime, dueName, reopenedOf, titleOf, waitOf } from "./cardText";
 import { healthOf, pickLine, rankWorkable, takesSession } from "./health";
 import { BRIEF_FIELDS, plainWordsProblems } from "./plainWords";
 
@@ -411,6 +412,11 @@ const isPaneHidden = atom(
   { plugin: "desk", key: "isPaneHidden" } as const,
   false,
 );
+/** The raw lines of a card (status, memory, the gather's note) fold out with `s`; a brief tells the story without them. */
+const isDetailsOpen = atom(
+  { plugin: "desk", key: "isDetailsOpen" } as const,
+  false,
+);
 const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
 /**
  * 2026-10-23: auto mode. Off: a session-class pick waits under NEEDS YOU for `w`. On: when the session is idle, it takes
@@ -565,6 +571,7 @@ const toView = (
         "",
       ),
       note: text(card.note),
+      since: text(card.since),
       waits: text(card.waits),
       age: typeof card.age === "number" ? card.age : 0,
       links: linksOf(card),
@@ -771,7 +778,10 @@ async function refresh($: EngineInterface, isForced = false) {
     let sso = { state: "none", minutes: 0 };
     try {
       const raw = JSON.parse(await $.fs.read(ssoPath)) as Raw;
-      sso = { state: text(raw.state) || "none", minutes: typeof raw.minutes === "number" ? raw.minutes : 0 };
+      sso = {
+        state: text(raw.state) || "none",
+        minutes: typeof raw.minutes === "number" ? raw.minutes : 0,
+      };
     } catch {
       // no state file yet: the next poll writes it
     }
@@ -922,7 +932,10 @@ async function syncTickets($: EngineInterface, isForced = false) {
 async function pollSso($: EngineInterface) {
   const home = (await $.env.get("HOME")) ?? "";
   try {
-    await $.process.run(["python3", `${home}/orbit-scratch/desk/sso-state.py`], { timeoutMs: 10_000 });
+    await $.process.run(
+      ["python3", `${home}/orbit-scratch/desk/sso-state.py`],
+      { timeoutMs: 10_000 },
+    );
   } catch {
     // a missing python or cache: the state file keeps its last value
   }
@@ -1363,13 +1376,13 @@ async function applyEvents(
   }
 }
 
-/** The pane's feed line: `live · last event 12:34Z`, `live · quiet`, `feed off: <reason>`. */
+/** The pane's feed line: `live · last event 12:34`, `live · quiet`, `feed off: <reason>`. */
 const feedLine = (one: DeskFeed) =>
   one.state === "off"
     ? `feed off: ${one.reason || "no answer"}`
     : one.lastEventAt === ""
       ? "live · quiet"
-      : `live · last event ${new Date(one.lastEventAt).toISOString().slice(11, 16)}Z`;
+      : `live · last event ${berlinTime(one.lastEventAt)}`;
 
 // desk_card: the brief goes on the pane, the card becomes the one being worked, and the reply tells Claude to wait.
 async function showCard($: EngineInterface, input: Raw): Promise<string> {
@@ -1946,7 +1959,8 @@ export const register: Register = (on) => {
   // The band names the card being worked; with none, the status line's count is enough.
   // While the pane is hidden it also offers it back.
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    if (!(await atHome($))) {
+    // Drawing is pure: atHome() stores its answer on the first call, so the draw reads what session.start stored.
+    if ((await read($, isHome)) !== true) {
       return next(e);
     }
     const id = await read($, working);
@@ -2032,13 +2046,11 @@ export const register: Register = (on) => {
     const busy = await read($, isBusy);
     const auto = await read($, isAuto);
     const beat = wave(await read($, tick));
-    if (busy) {
-      startTicker($);
-    }
     const stats = await read($, plain);
     const isOpen = await read($, isPlainOpen);
     const listOpen = await read($, isListOpen);
     const prsOpen = await read($, isPrsOpen);
+    const detailsOpen = await read($, isDetailsOpen);
     const shown = await read($, brief);
     const current = card && shown?.cardId === card.id ? shown : null;
     const summary = card ? (await read($, summaries))[card.id] : undefined;
@@ -2047,7 +2059,10 @@ export const register: Register = (on) => {
     const focused = e.props.isFocused;
     const width = Math.max(20, e.props.bodyColumns - 4);
     const rule = theme.rule.repeat(width);
-    const refWidth = Math.max(5, ...desk.cards.map((one) => one.ref.length));
+    const refWidth = Math.max(
+      5,
+      ...desk.cards.map((one) => (one.lane === "TASK" ? 4 : one.ref.length)),
+    );
 
     return (
       <Box
@@ -2082,14 +2097,14 @@ export const register: Register = (on) => {
             )}
             <Text dimColor>
               {isRunning ? "ranking… " : ""}
-              {desk.generatedAt.slice(11, 16)}Z
+              {berlinTime(desk.generatedAt)}
             </Text>
             <Button
               key="auto"
               plain
               hotkey="t"
               dimColor={!auto}
-              label={auto ? "t auto on" : "t auto off"}
+              label={auto ? "auto on" : "auto off"}
               onPress={() => void setAuto($, !auto)}
             />
             {/* 2026-10-23: what the cards taught, asked in one memory question when the person wants it */}
@@ -2098,7 +2113,7 @@ export const register: Register = (on) => {
                 key="harvest"
                 plain
                 hotkey="m"
-                label={`m harvest ${desk.harvestPending}`}
+                label={`harvest ${desk.harvestPending}`}
                 onPress={async () => {
                   await $.prompt.submit({
                     text:
@@ -2115,7 +2130,7 @@ export const register: Register = (on) => {
               plain
               hotkey="h"
               dimColor
-              label="h hide"
+              label="hide"
               onPress={async () => {
                 await update($, isPaneHidden, () => true);
                 void $.ui.close({ id: PANE }).catch(() => undefined);
@@ -2126,7 +2141,7 @@ export const register: Register = (on) => {
         <Text dimColor>{rule}</Text>
         {desk.due.length > 0 && (
           <Text wrap="wrap" color={C("yellow")}>
-            due: {desk.due.join(" · ")}
+            due: {desk.due.map(dueName).join(" · ")}
           </Text>
         )}
         {liveFeed.state !== "" && (
@@ -2138,236 +2153,274 @@ export const register: Register = (on) => {
             {feedLine(liveFeed)}
           </Text>
         )}
-        {card && (
-          <Box flexDirection="column" marginBottom={1}>
-            <Box gap={1}>
-              <Text bold color={laneColor(card.lane)}>
-                {card.lane}
-              </Text>
-              <Text bold>{card.ref}</Text>
-              <Text dimColor>
-                · {card.impact} · {card.mins} min · waits on{" "}
-                {card.waits || "you"}
-                {card.age > 0 ? ` · ${card.age}d old` : ""}
-              </Text>
-            </Box>
-            {card.note !== "" && (
-              <Text wrap="wrap" dimColor>
-                {card.note}
-              </Text>
-            )}
-            <Box marginTop={1} flexDirection="column">
-              <Text dimColor>DO</Text>
-              <Text wrap="wrap" bold>
-                {card.act}
-              </Text>
-            </Box>
-            {/* the health check: why the pane has no options for this card, and what a failed pick left behind */}
-            {card.verb === null && card.health !== "" && current === null && (
-              <Text key="health" wrap="wrap" color={C("yellow")}>
-                {`not ready: ${card.health} · w works it in the session`}
-              </Text>
-            )}
-            {card.verb === null &&
-              card.pickLine !== "" &&
-              pendingOf(desk, card.id) === null && (
-                <Text key="pick-line" wrap="wrap" color={C("red")}>
-                  {card.pickLine}
+        {card &&
+          (() => {
+            const pending = pendingOf(desk, card.id);
+            const hasBrief = card.prepared !== null || current !== null;
+            const reopened = reopenedOf(card.note);
+            // A brief tells the story; without one the status is all the card has, so it shows.
+            const showsRaw = detailsOpen || !hasBrief;
+
+            return (
+              <Box flexDirection="column" marginBottom={1} marginTop={1}>
+                <Text wrap="wrap">
+                  <Text bold color={laneColor(card.lane)}>
+                    {card.lane}
+                  </Text>{" "}
+                  {card.lane !== "TASK" && <Text bold>{card.ref} </Text>}
+                  <Text bold>{titleOf(card, stats?.titles[card.ref])}</Text>
                 </Text>
-              )}
-            {card.prepared !== null && current === null && (
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor>
-                  PREPARED {card.prepared.at.slice(11, 16)}Z ·{" "}
-                  {card.prepared.openChecks.length} open checks ·
-                  {card.prepared.resolved ? " already resolved" : ""} first:{" "}
-                  {card.prepared.options[0]?.label ?? "?"}
+                <Text wrap="wrap" dimColor>
+                  {card.waits === "" || card.waits === "nobody"
+                    ? "nobody waits"
+                    : `${card.waits === "person" ? "someone" : card.waits} waits`}{" "}
+                  {waitOf(card.age)}
+                  {card.impact !== "" && card.impact !== "-"
+                    ? ` · ${card.impact}`
+                    : ""}{" "}
+                  · about {card.mins} min
+                  {reopened !== "" ? ` · ${reopened}` : ""}
                 </Text>
-                {(
-                  [
-                    ["WHY", card.prepared.why],
-                    ["DECIDE", card.prepared.decide],
-                    ["THEN", card.prepared.then],
-                  ] as const
-                )
-                  .filter(([, line]) => Boolean(line))
-                  .map(([label, line]) => (
-                    <Text wrap="wrap">
-                      <Text dimColor>{label.padEnd(7)}</Text>
-                      {line}
+                {/* the health check: why the pane has no options for this card, and what a failed pick left behind */}
+                {card.verb === null &&
+                  card.health !== "" &&
+                  current === null && (
+                    <Text key="health" wrap="wrap" color={C("yellow")}>
+                      {`not ready: ${card.health} · w works it in the session`}
                     </Text>
-                  ))}
-                <Text wrap="wrap" bold color={C("yellow")}>
-                  {card.prepared.fact}
-                </Text>
-                {card.prepared.draft !== "" && (
-                  <Text wrap="wrap" dimColor>
-                    {card.prepared.draft.length > 600
-                      ? `${card.prepared.draft.slice(0, 600)}…`
-                      : card.prepared.draft}
-                  </Text>
-                )}
-                {/* 2026-10-23: the brief's options are the pane's; a press records the pick without the session */}
-                {card.verb === null && pendingOf(desk, card.id) === null && (
+                  )}
+                {card.verb === null &&
+                  card.pickLine !== "" &&
+                  pending === null && (
+                    <Text key="pick-line" wrap="wrap" color={C("red")}>
+                      {card.pickLine}
+                    </Text>
+                  )}
+                {!hasBrief && (
                   <Box marginTop={1} flexDirection="column">
-                    <Text dimColor>PICK (runs in the background)</Text>
-                    {card.prepared.options.map((option, i) => (
+                    <Text dimColor>DO</Text>
+                    <Text wrap="wrap" bold>
+                      {card.act}
+                    </Text>
+                  </Box>
+                )}
+                {card.prepared !== null && current === null && (
+                  <Box marginTop={1} flexDirection="column">
+                    {(
+                      [
+                        ["WHY", card.prepared.why],
+                        // A pick is taken: the question and its consequence are history, the pick line follows.
+                        [
+                          "DECIDE",
+                          pending === null ? card.prepared.decide : "",
+                        ],
+                        ["THEN", pending === null ? card.prepared.then : ""],
+                      ] as const
+                    )
+                      .filter(([, line]) => Boolean(line))
+                      .map(([label, line]) => (
+                        <Text wrap="wrap" bold={label === "DECIDE"}>
+                          <Text dimColor bold={false}>
+                            {label.padEnd(7)}
+                          </Text>
+                          {line}
+                        </Text>
+                      ))}
+                    {pending === null && (
+                      <Text wrap="wrap" color={C("yellow")}>
+                        <Text dimColor>{"FACT".padEnd(7)}</Text>
+                        {card.prepared.fact}
+                      </Text>
+                    )}
+                    {pending === null && card.prepared.draft !== "" && (
+                      <Box marginTop={1} flexDirection="column">
+                        <Text dimColor>DRAFT</Text>
+                        <Text wrap="wrap">
+                          {card.prepared.draft.length > 600
+                            ? `${card.prepared.draft.slice(0, 600)}…`
+                            : card.prepared.draft}
+                        </Text>
+                      </Box>
+                    )}
+                    {/* 2026-10-23: the brief's options are the pane's; a press records the pick without the session */}
+                    {card.verb === null && pending === null && (
+                      <Box marginTop={1} flexDirection="column">
+                        <Text dimColor>
+                          PICK · runs in the background · prepared{" "}
+                          {berlinTime(card.prepared.at)}
+                          {card.prepared.openChecks.length > 0
+                            ? ` · ${card.prepared.openChecks.length} checks open`
+                            : ""}
+                          {card.prepared.resolved ? " · already resolved" : ""}
+                        </Text>
+                        {card.prepared.options.map((option, i) => (
+                          <Button
+                            key={`prepared-opt-${i}`}
+                            hotkey={OPTION_KEYS[i]}
+                            variant={i === 0 ? "primary" : undefined}
+                            label={`${OPTION_KEYS[i]}  ${option.label}${i === 0 ? "  ★" : ""}`}
+                            onPress={() => void decide($, card, option)}
+                          />
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
+                )}
+                {pending !== null && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>PICKED</Text>
+                    <Text wrap="wrap" color={C("cyan")}>
+                      {STATE_GLYPH[pending.state]} {pending.option}
+                      {pending.kind === "session"
+                        ? " · needs you: press w to hand it to Claude"
+                        : pending.state === "running"
+                          ? ` · ${card.pickLine || "running"} in the background`
+                          : " · queued for the background"}
+                    </Text>
+                  </Box>
+                )}
+                {showsRaw && card.status !== "" && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>STATUS</Text>
+                    <Text wrap="wrap">{card.status}</Text>
+                  </Box>
+                )}
+                {detailsOpen && card.note !== "" && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>NOTE</Text>
+                    <Text wrap="wrap" dimColor>
+                      {card.note}
+                    </Text>
+                  </Box>
+                )}
+                {detailsOpen && card.memory !== "" && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>MEMORY</Text>
+                    <Text wrap="wrap" italic>
+                      {card.memory}
+                    </Text>
+                  </Box>
+                )}
+                {summary !== undefined && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>NOW</Text>
+                    <Text wrap="wrap" color={C("cyan")}>
+                      {summary}
+                    </Text>
+                  </Box>
+                )}
+                {card.members.length > 0 && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>MEMBERS</Text>
+                    {card.members.map((member) => (
+                      <Text wrap="wrap">· {member}</Text>
+                    ))}
+                  </Box>
+                )}
+                {current &&
+                  (
+                    [
+                      ["WHY", current.why],
+                      ["DECIDE", current.decide],
+                      ["THEN", current.then],
+                    ] as const
+                  )
+                    .filter(([, line]) => Boolean(line))
+                    .map(([label, line]) => (
+                      <Box marginTop={1} flexDirection="column">
+                        <Text dimColor>{label}</Text>
+                        <Text wrap="wrap" bold={label === "DECIDE"}>
+                          {line}
+                        </Text>
+                      </Box>
+                    ))}
+                {current && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>FACT</Text>
+                    <Text wrap="wrap" bold color={C("yellow")}>
+                      {current.fact}
+                    </Text>
+                  </Box>
+                )}
+                {current && current.draft !== "" && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>DRAFT</Text>
+                    <Text wrap="wrap">{current.draft}</Text>
+                  </Box>
+                )}
+                {current && (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text dimColor>CHOOSE</Text>
+                    {current.options.map((option, i) => (
                       <Button
-                        key={`prepared-opt-${i}`}
+                        key={`opt-${i}`}
                         hotkey={OPTION_KEYS[i]}
                         variant={i === 0 ? "primary" : undefined}
                         label={`${OPTION_KEYS[i]}  ${option.label}${i === 0 ? "  ★" : ""}`}
-                        onPress={() => void decide($, card, option)}
+                        onPress={() => void choose($, current, option)}
                       />
                     ))}
                   </Box>
                 )}
-              </Box>
-            )}
-            {(() => {
-              const pending = pendingOf(desk, card.id);
-              if (pending === null) {
-                return null;
-              }
-              return (
-                <Box marginTop={1} flexDirection="column">
-                  <Text dimColor>PICKED</Text>
-                  <Text wrap="wrap" color={C("cyan")}>
-                    {STATE_GLYPH[pending.state]} {pending.option}
-                    {pending.kind === "session"
-                      ? " · needs you: press w to hand it to Claude"
-                      : pending.state === "running"
-                        ? ` · ${card.pickLine || "running"} in the background`
-                        : " · queued for the background"}
-                  </Text>
-                </Box>
-              );
-            })()}
-            {card.status !== "" && (
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor>STATUS</Text>
-                <Text wrap="wrap">{card.status}</Text>
-              </Box>
-            )}
-            {summary !== undefined && (
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor>NOW</Text>
-                <Text wrap="wrap" color={C("cyan")}>
-                  {summary}
-                </Text>
-              </Box>
-            )}
-            {card.members.length > 0 && (
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor>MEMBERS</Text>
-                {card.members.map((member) => (
-                  <Text wrap="wrap">· {member}</Text>
-                ))}
-              </Box>
-            )}
-            {card.memory !== "" && (
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor>MEMORY</Text>
-                <Text wrap="wrap" italic>
-                  {card.memory}
-                </Text>
-              </Box>
-            )}
-            {current &&
-              (
-                [
-                  ["WHY", current.why],
-                  ["DECIDE", current.decide],
-                  ["THEN", current.then],
-                ] as const
-              )
-                .filter(([, line]) => Boolean(line))
-                .map(([label, line]) => (
-                  <Box marginTop={1} flexDirection="column">
-                    <Text dimColor>{label}</Text>
-                    <Text wrap="wrap" bold={label === "DECIDE"}>
-                      {line}
+                <Box marginTop={1} gap={1} alignItems="center">
+                  {card.verb !== null && (
+                    <Text dimColor>
+                      {`closed (${card.verb}) · the next gather drops it · pick another row (ctrl+↑/↓)`}
                     </Text>
-                  </Box>
-                ))}
-            {current && (
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor>FACT</Text>
-                <Text wrap="wrap" bold color={C("yellow")}>
-                  {current.fact}
-                </Text>
-              </Box>
-            )}
-            {current && current.draft !== "" && (
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor>DRAFT</Text>
-                <Text wrap="wrap">{current.draft}</Text>
-              </Box>
-            )}
-            {current && (
-              <Box marginTop={1} flexDirection="column">
-                <Text dimColor>CHOOSE</Text>
-                {current.options.map((option, i) => (
+                  )}
+                  {busy && card.verb === null && current === null && (
+                    <Text color={C("yellow")}>
+                      Claude is working, wait for the turn to end before the
+                      next card
+                    </Text>
+                  )}
+                  {!busy && card.verb === null && current === null && (
+                    <Button
+                      key="work"
+                      variant="primary"
+                      hotkey="w"
+                      label={
+                        pendingOf(desk, card.id)?.kind === "session"
+                          ? "Hand the pick to Claude"
+                          : "Work this card"
+                      }
+                      onPress={async () => {
+                        const pending = pendingOf(desk, card.id);
+                        if (pending !== null && pending.kind === "session") {
+                          await handToSession($, card.id, {
+                            label: pending.option,
+                            verb: pending.verb,
+                          });
+                          return;
+                        }
+                        await update($, picked, () => card.id);
+                        await update($, working, () => card.id);
+                        await $.prompt.submit({
+                          text:
+                            `Work desk card ${card.id} now. Follow Step 3 of ` +
+                            `${SKILL}/SKILL.md and the lane recipe in CARDS.md for this one card.` +
+                            (card.prepared !== null
+                              ? ` A prepared brief waits at ${card.prepared.file}: read it first, verify its openChecks live, then desk_card.`
+                              : ""),
+                        });
+                      }}
+                    />
+                  )}
+                  {card.links.map((link) => (
+                    <Link href={link.href} label={`↗ ${link.label}`} />
+                  ))}
                   <Button
-                    key={`opt-${i}`}
-                    hotkey={OPTION_KEYS[i]}
-                    variant={i === 0 ? "primary" : undefined}
-                    label={`${OPTION_KEYS[i]}  ${option.label}${i === 0 ? "  ★" : ""}`}
-                    onPress={() => void choose($, current, option)}
+                    key="details"
+                    plain
+                    dimColor
+                    hotkey="s"
+                    label={detailsOpen ? "▾ status" : "▸ status"}
+                    onPress={() => update($, isDetailsOpen, (isUp) => !isUp)}
                   />
-                ))}
+                </Box>
               </Box>
-            )}
-            <Box marginTop={1} gap={1} alignItems="center">
-              {card.verb !== null && (
-                <Text dimColor>
-                  {`closed (${card.verb}) · the next gather drops it · pick another row (ctrl+↑/↓)`}
-                </Text>
-              )}
-              {busy && card.verb === null && current === null && (
-                <Text color={C("yellow")}>
-                  Claude is working, wait for the turn to end before the next
-                  card
-                </Text>
-              )}
-              {!busy && card.verb === null && current === null && (
-                <Button
-                  key="work"
-                  variant="primary"
-                  hotkey="w"
-                  label={
-                    pendingOf(desk, card.id)?.kind === "session"
-                      ? "Hand the pick to Claude"
-                      : "Work this card"
-                  }
-                  onPress={async () => {
-                    const pending = pendingOf(desk, card.id);
-                    if (pending !== null && pending.kind === "session") {
-                      await handToSession($, card.id, {
-                        label: pending.option,
-                        verb: pending.verb,
-                      });
-                      return;
-                    }
-                    await update($, picked, () => card.id);
-                    await update($, working, () => card.id);
-                    await $.prompt.submit({
-                      text:
-                        `Work desk card ${card.id} now. Follow Step 3 of ` +
-                        `${SKILL}/SKILL.md and the lane recipe in CARDS.md for this one card.` +
-                        (card.prepared !== null
-                          ? ` A prepared brief waits at ${card.prepared.file}: read it first, verify its openChecks live, then desk_card.`
-                          : ""),
-                    });
-                  }}
-                />
-              )}
-              {card.links.map((link) => (
-                <Link href={link.href} label={`↗ ${link.label}`} />
-              ))}
-            </Box>
-          </Box>
-        )}
+            );
+          })()}
         <Text dimColor>{rule}</Text>
         <Box gap={1}>
           <Button
@@ -2440,36 +2493,45 @@ export const register: Register = (on) => {
 
             return (
               <Box key={`row-${row}`} gap={1}>
-                <Text color={C(isSelected ? "cyan" : undefined)}>
-                  {isSelected ? theme.selected : " "}
-                </Text>
-                {/* ◆ = a prepared brief waits for this card; ◌ ◍ = a pick waits or runs; · = not prepared */}
-                {(() => {
-                  const pending = pendingOf(desk, one.id);
-                  if (pending !== null && !isDone) {
+                {/* the marker, the glyph and the key column keep their width when a long title is cut */}
+                <Box flexShrink={0} gap={1}>
+                  <Text color={C(isSelected ? "cyan" : undefined)}>
+                    {isSelected ? theme.selected : " "}
+                  </Text>
+                  {/* ◆ = a prepared brief waits for this card; ◌ ◍ = a pick waits or runs; · = not prepared */}
+                  {(() => {
+                    const pending = pendingOf(desk, one.id);
+                    if (pending !== null && !isDone) {
+                      return (
+                        <Text color={C("cyan")}>
+                          {STATE_GLYPH[pending.state]}
+                        </Text>
+                      );
+                    }
                     return (
-                      <Text color={C("cyan")}>{STATE_GLYPH[pending.state]}</Text>
+                      <Text
+                        color={C(
+                          one.prepared !== null && !isDone
+                            ? "green"
+                            : undefined,
+                        )}
+                        dimColor={one.prepared === null || isDone}
+                      >
+                        {one.prepared !== null && !isDone
+                          ? theme.prepared
+                          : "·"}
+                      </Text>
                     );
-                  }
-                  return (
-                    <Text
-                      color={C(
-                        one.prepared !== null && !isDone ? "green" : undefined,
-                      )}
-                      dimColor={one.prepared === null || isDone}
-                    >
-                      {one.prepared !== null && !isDone ? theme.prepared : "·"}
-                    </Text>
-                  );
-                })()}
-                <Button
-                  key={`pick-${row}`}
-                  plain
-                  hotkey={row < 9 ? String(row + 1) : undefined}
-                  dimColor={isDone}
-                  label={`${row < 9 ? "" : "   "}${one.lane.padEnd(7)} ${one.ref.padEnd(refWidth)}`}
-                  onPress={() => update($, picked, () => one.id)}
-                />
+                  })()}
+                  <Button
+                    key={`pick-${row}`}
+                    plain
+                    hotkey={row < 9 ? String(row + 1) : undefined}
+                    dimColor={isDone}
+                    label={`${row < 9 ? "" : "   "}${one.lane.padEnd(7)} ${(one.lane === "TASK" ? "task" : one.ref).padEnd(refWidth)}`}
+                    onPress={() => update($, picked, () => one.id)}
+                  />
+                </Box>
                 <Text
                   wrap="truncate-end"
                   bold={isSelected && !isDone}
@@ -2484,7 +2546,7 @@ export const register: Register = (on) => {
                   {!isDone && one.health !== "" && one.id !== shown?.cardId && (
                     <Text color={C("yellow")}>{one.health} · </Text>
                   )}
-                  {stats?.titles[one.ref] ?? (one.note || one.act)}
+                  {titleOf(one, stats?.titles[one.ref])}
                 </Text>
               </Box>
             );
@@ -2641,7 +2703,7 @@ export const register: Register = (on) => {
                     · loop {ago(stats.sync.loopStateAgeMin)} · sweep{" "}
                     {ago(stats.sync.sweepCacheAgeMin)} · desk{" "}
                     {ago(stats.sync.deskAgeMin)} · plain{" "}
-                    {stats.generatedAt.slice(11, 16)}Z
+                    {berlinTime(stats.generatedAt)}
                   </Text>
                 </Text>
                 {stats.tickets && (

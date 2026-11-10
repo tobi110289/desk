@@ -2,6 +2,7 @@ import type { On } from "claude-code";
 import { expect, mock, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 
+import { berlinTime, reopenedOf, titleOf } from "../hooks/cardText";
 import { plainWordsProblems } from "../hooks/plainWords";
 
 const CARDS = JSON.stringify({
@@ -212,7 +213,10 @@ const PLAIN_DRAFT = [
 ].join("\n");
 
 test("the plain-words check names the code words of a draft nobody can read", () => {
-  const problems = plainWordsProblems({ fact: "Three triage files", draft: CODE_DRAFT }).join(" ");
+  const problems = plainWordsProblems({
+    fact: "Three triage files",
+    draft: CODE_DRAFT,
+  }).join(" ");
 
   for (const word of [
     "deferredIntentRef",
@@ -227,7 +231,13 @@ test("the plain-words check names the code words of a draft nobody can read", ()
 });
 
 test("the plain-words check passes the rewrite Tobias accepted", () => {
-  expect(plainWordsProblems({ ...PLAIN_SHAPE, fact: PLAIN_FACT, draft: PLAIN_DRAFT })).toEqual([]);
+  expect(
+    plainWordsProblems({
+      ...PLAIN_SHAPE,
+      fact: PLAIN_FACT,
+      draft: PLAIN_DRAFT,
+    }),
+  ).toEqual([]);
 });
 
 test("a customer reply with a thread ref, a PR number, a date and an amount passes", () => {
@@ -250,15 +260,23 @@ test("a customer reply with a thread ref, a PR number, a date and an amount pass
 });
 
 test("the plain-words check holds the fact length, the item cap and the item length", () => {
-  expect(plainWordsProblems({ fact: "x".repeat(141) }).join(" ")).toContain("141 characters");
+  expect(plainWordsProblems({ fact: "x".repeat(141) }).join(" ")).toContain(
+    "141 characters",
+  );
   const four = ["1. a", "2. b", "3. c", "4. d"].join("\n");
-  expect(plainWordsProblems({ draft: four }).join(" ")).toContain("4 numbered items");
+  expect(plainWordsProblems({ draft: four }).join(" ")).toContain(
+    "4 numbered items",
+  );
   // A reply keeps its own shape.
   expect(plainWordsProblems({ draft: four }, true)).toEqual([]);
-  expect(plainWordsProblems({ draft: `1. ${"word ".repeat(50)}` }).join(" ")).toContain("item 1");
-  expect(plainWordsProblems({ draft: "run `pnpm test` in mod/hooks/register.tsx at 6ff560d68e" }).join(" ")).toMatch(
-    /backtick.*file path.*id or hash/,
-  );
+  expect(
+    plainWordsProblems({ draft: `1. ${"word ".repeat(50)}` }).join(" "),
+  ).toContain("item 1");
+  expect(
+    plainWordsProblems({
+      draft: "run `pnpm test` in mod/hooks/register.tsx at 6ff560d68e",
+    }).join(" "),
+  ).toMatch(/backtick.*file path.*id or hash/);
 });
 
 test("desk_card refuses a brief in code words and names them", async ($, on) => {
@@ -368,7 +386,11 @@ const liveWorld = (on: On, liveEvents: boolean) => {
         exitCode: 0,
         stdout: isPoll
           ? JSON.stringify([
-              { type: "thread.created", ref: "T-101", at: "2026-10-02T09:59:00Z" },
+              {
+                type: "thread.created",
+                ref: "T-101",
+                at: "2026-10-02T09:59:00Z",
+              },
             ])
           : "",
         stderr: "",
@@ -554,4 +576,53 @@ test("a failed background pick says so on its card", async ($, on) => {
   const line =
     "background pick failed: the send refused the thread: it is closed; pick again or work it in the session";
   expect((await pane.find({ type: "Text", text: line }))?.text).toBe(line);
+});
+
+test("a card's title drops the reopened stamp and the readiness tail", () => {
+  const card = {
+    lane: "FAST",
+    since: "TODO|2026-11-10T04:45:56.446Z",
+    status: "Plain TODO",
+    act: "read the brief",
+    note:
+      "reopened (do 2026-11-06: Validated: cause bound (a date edit; comp; since then the wait moved: " +
+      "'TODO|2026-11-06T05:28:27.245Z' -> 'TODO|2026-11-10T04:45:56.446Z'): Second delivery · ready-for-human; owner nobody",
+  };
+  expect(titleOf(card, undefined)).toBe("Second delivery");
+  expect(reopenedOf(card.note)).toBe(
+    "back on the desk: closed 6 Nov (do), new activity since",
+  );
+  expect(titleOf(card, "Thread title")).toBe("Thread title");
+});
+
+test("a task card is titled by its task, and an agent's working note is never a title", () => {
+  expect(
+    titleOf(
+      {
+        lane: "TASK",
+        since: "Check the product in production",
+        note: "After pnpm sso: read the rows",
+        status: "",
+        act: "",
+      },
+      undefined,
+    ),
+  ).toBe("Check the product in production");
+  expect(
+    titleOf(
+      {
+        lane: "RUN",
+        since: "a,b",
+        note: "ORB-1 (blocked, screen idle_empty_prompt 0.85); T-2 (handoff-running)",
+        status: "7 worker terminals reached no card",
+        act: "look",
+      },
+      undefined,
+    ),
+  ).toBe("7 worker terminals reached no card");
+});
+
+test("the pane shows Berlin time", () => {
+  expect(berlinTime("2026-11-10T14:34:42Z")).toBe("15:34");
+  expect(berlinTime("")).toBe("");
 });

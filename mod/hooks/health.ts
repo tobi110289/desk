@@ -1,4 +1,5 @@
 import type { DeskDecision, PreparedBrief } from "../types";
+import { berlinTime } from "./cardText";
 
 // The health check before a card leads the pane. Eleven times a card on top could not be worked from the pane: no
 // options, no brief, or a background pick that failed with no word on the card. Such a card never takes the first row.
@@ -85,8 +86,8 @@ export const pickLine = (decision: DeskDecision | null): string => {
     return `background pick ${decision.state}: ${result}; pick again or work it in the session`;
   }
   if (decision.state === "running") {
-    const since = (decision.startedAt || decision.pickedAt).slice(11, 16);
-    return since === "" ? "running" : `running since ${since}Z`;
+    const since = berlinTime(decision.startedAt || decision.pickedAt);
+    return since === "" ? "running" : `running since ${since}`;
   }
   return "";
 };

@@ -24,6 +24,8 @@ export type DeskCard = {
   status: string;
   memory: string;
   note: string;
+  /** The wait the card stands for; a task card holds its title here. */
+  since: string;
   waits: string;
   age: number;
   links: DeskLink[];
@@ -33,7 +35,7 @@ export type DeskCard = {
   prepared: PreparedBrief | null;
   /** Why the pane cannot work the card ("no brief yet", "brief failed: …", "no options"), or "" when it can. */
   health: string;
-  /** The newest background pick's line: a failure or bounce with its result, or "running since HH:MMZ"; else "". */
+  /** The newest background pick's line: a failure or bounce with its result, or "running since HH:MM" (Berlin); else "". */
   pickLine: string;
 };
 
@@ -194,6 +196,8 @@ declare module "claude-code" {
       isListOpen: boolean;
       /** False while the pull-request list is folded (`o`). */
       isPrsOpen: boolean;
+      /** The card's raw lines (status, memory, note) are folded out. */
+      isDetailsOpen: boolean;
       /** True from the pane's close to its next open; the band then offers it back on ctrl+k. */
       isPaneHidden: boolean;
       /** Auto mode (`t`, file desk/.auto): the session takes queued session-class picks by itself when idle. */
