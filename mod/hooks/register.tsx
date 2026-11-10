@@ -2123,7 +2123,7 @@ export const register: Register = (on) => {
               label={auto ? "auto on" : "auto off"}
               onPress={() => void setAuto($, !auto)}
             />
-            {/* 2026-10-23: what the cards taught, asked in one memory question when the person wants it */}
+            {/* 2026-11-10: what the cards taught, walked one line at a time when the person presses m */}
             {desk.harvestPending > 0 && !busy && (
               <Button
                 key="harvest"
@@ -2134,7 +2134,7 @@ export const register: Register = (on) => {
                   await $.prompt.submit({
                     text:
                       "Harvest the desk's learned lines: follow the Harvest step of " +
-                      `${SKILL}/SKILL.md (desk-harvest.py list, one MEMORY question, memory.py propose per pick, desk-harvest.py mark --all).`,
+                      `${SKILL}/SKILL.md. Walk the queue one line at a time, oldest first: desk-harvest.py next, one MEMORY question for that line, memory.py propose on a store, desk-harvest.py done <id> stored|skipped, then the next line, until the queue is empty or I say stop.`,
                     asUser: true,
                   });
                 }}
