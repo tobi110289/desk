@@ -183,7 +183,7 @@ A caption that says an agent owns the work (`agent working`, `sent …`, `agent 
 Prepare: read the cache row (`desk/screens.json`: `state`, `progress`, `tmuxAlive`, `sentinel`); read the terminal by hand only when there is no row.
 Execute `Go`: rewrite the caption to what the row shows: `worker proposes: "<line>"` (SEND), `sign-off: <question>` (SEND), `worker stalled: <why>; respawn` (RUN), or the agent's real progress when it is working (the card then stays hidden for another 6 h). A pr-open card's `Go` adds `auto-review` or fixes CI, or spawns a babysit. Never write `updated`.
 
-### STUCK — a PR that oscillates or idles in HORST rounds (`prh:stuck`, batched)
+### STUCK — retired 2026-11-09 (was `prh:stuck`, batched: 26 closes, 16 defers, none since 21 Oct; a stuck PR shows as its own REVIEW card)
 
 Source: `~/orbit-scratch/desk/pr-health.json` (`jev/pr_health.py`, every open orbit PR we author). A member is a PR with `CHANGES_REQUESTED` and ≥ 5 HORST rounds, or ≥ 7 days old, or no commit for ≥ 5 days. Its status line carries the facts plus Jev's read of the last three HORST rounds (`oscillating_same_findings`, `new_findings_each_round`, `converging_minor`, `waiting_on_human`, `design_disagreement`) and the recommended move. Captions never hide a member: the facts come from GitHub, not from the loop entry.
 

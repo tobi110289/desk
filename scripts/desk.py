@@ -806,6 +806,9 @@ try:
     import sys as _sys2, os as _os2; _sys2.path.insert(0,_os2.path.expanduser('~/orbit-scratch/agent-loop/jev')); import pr_health as _prh
     for _c in _prh.cards(_prh_doc or _prh.build()):
         if _c.get('pr') and any(k.get('pr')==_c['pr'] and k.get('lane')=='REVIEW' for k in cards): continue   # the loop card already asks for the review
+        # 2026-11-09 (all desk history): the batched STUCK catch-all took 26 closes, 16 of them defers, had no close
+        # since 21 Oct and sat 32 days in the person tier. Retired; a stuck PR shows as its own REVIEW card when it waits.
+        if _c.get('lane')=='STUCK' or _c.get('id')=='prh:stuck': continue
         add(_c)
 except Exception as _e:
     failed_sources.append(('pr-health',str(_e)[:160]))
