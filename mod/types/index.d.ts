@@ -52,6 +52,8 @@ export type DeskView = {
   decisions: DeskDecision[];
   /** Learned lines (harvest.json) not yet asked; `m` asks them in one memory question. */
   harvestPending: number;
+  /** The AWS SSO login (cache/sso-state.json, written by sso-state.py): expired, expiring, ok or none. */
+  sso: { state: string; minutes: number };
 };
 
 /**

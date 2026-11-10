@@ -35,6 +35,8 @@ const EVENTS_LOCK_MS = 90_000;
 // While a full gather runs, the loop checks again after this long.
 const EVENTS_GATHER_WAIT_MS = 5_000;
 const PLAIN_MS = 5 * 60_000;
+// The SSO login check: the token cache only, no network (2026-11-10).
+const SSO_MS = 2 * 60_000;
 const TICKETS_MS = 30 * 60_000;
 const NOTION_TOOL = "mcp__notion__notion-query-data-sources";
 // The ids that belong to one company live in ~/orbit-scratch/desk/config.json, outside the repo
@@ -251,6 +253,7 @@ const EMPTY: DeskView = {
   due: [],
   decisions: [],
   harvestPending: 0,
+  sso: { state: "none", minutes: 0 },
 };
 
 /**
@@ -524,6 +527,7 @@ const toView = (
   briefs: Record<string, Raw> = {},
   decisions: Raw[] = [],
   harvestPending = 0,
+  sso: DeskView["sso"] = { state: "none", minutes: 0 },
 ): DeskView => {
   const cache = JSON.parse(cardsJson) as Raw;
   const desk = JSON.parse(deskJson) as Raw;
@@ -584,6 +588,7 @@ const toView = (
       .map(([name, one]) => `${name} (${text(one.reason)})`),
     decisions: picks,
     harvestPending,
+    sso,
   };
 };
 
@@ -659,6 +664,11 @@ async function showStatus($: EngineInterface) {
   const desk = await read($, view);
   const open = desk.cards.filter((card) => card.verb === null).length;
   const parts: string[] = [];
+  if (desk.sso.state === "expired") {
+    parts.push("⚠ SSO EXPIRED · pnpm sso");
+  } else if (desk.sso.state === "expiring") {
+    parts.push(`sso ↻ ${desk.sso.minutes}m`);
+  }
   if (open > 0) {
     parts.push(`${open} open`);
   }
@@ -742,7 +752,13 @@ async function refresh($: EngineInterface, isForced = false) {
       (stat) => stat.mtimeMs,
       () => 0,
     );
-    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${briefsAt}:${decisionsAt}:${decisionFiles.length}:${harvestAt}:${berlinDate(time)}`;
+    // 2026-11-10: the SSO login state, so an expired login shows on the pane and the status line, not in a failed run.
+    const ssoPath = `${home}/orbit-scratch/desk/cache/sso-state.json`;
+    const ssoAt = await $.fs.stat(ssoPath).then(
+      (stat) => stat.mtimeMs,
+      () => 0,
+    );
+    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${briefsAt}:${decisionsAt}:${decisionFiles.length}:${harvestAt}:${ssoAt}:${berlinDate(time)}`;
 
     if (next === stamp && !isForced) {
       return;
@@ -752,6 +768,13 @@ async function refresh($: EngineInterface, isForced = false) {
       $.fs.read(cardsPath),
       $.fs.read(deskPath),
     ]);
+    let sso = { state: "none", minutes: 0 };
+    try {
+      const raw = JSON.parse(await $.fs.read(ssoPath)) as Raw;
+      sso = { state: text(raw.state) || "none", minutes: typeof raw.minutes === "number" ? raw.minutes : 0 };
+    } catch {
+      // no state file yet: the next poll writes it
+    }
     const briefs: Record<string, Raw> = {};
     for (const entry of briefFiles) {
       const file = `${briefsDir}/${entry.name}`;
@@ -788,6 +811,7 @@ async function refresh($: EngineInterface, isForced = false) {
       briefs,
       decisions,
       harvestPending,
+      sso,
     );
     stamp = next;
     // The health check: a card the pane cannot work never leads, and the gather's own top card, when it is such a
@@ -894,6 +918,17 @@ async function syncTickets($: EngineInterface, isForced = false) {
 }
 
 // One Plain read every five minutes; the file it writes is what refresh() shows.
+/** Writes cache/sso-state.json from the AWS SSO token cache, then refreshes so the pane and the status line show it. */
+async function pollSso($: EngineInterface) {
+  const home = (await $.env.get("HOME")) ?? "";
+  try {
+    await $.process.run(["python3", `${home}/orbit-scratch/desk/sso-state.py`], { timeoutMs: 10_000 });
+  } catch {
+    // a missing python or cache: the state file keeps its last value
+  }
+  await refresh($, true);
+}
+
 async function pollPlain($: EngineInterface) {
   const home = (await $.env.get("HOME")) ?? "";
   const key = await $.env.get("PLAIN_API_KEY");
@@ -1574,6 +1609,8 @@ export const register: Register = (on) => {
     });
     void pollPlain($);
     $.clock.every(PLAIN_MS, () => void pollPlain($));
+    void pollSso($);
+    $.clock.every(SSO_MS, () => void pollSso($));
     $.clock.after(20_000, () => void syncTickets($));
     $.clock.every(TICKETS_MS, () => void syncTickets($));
 
@@ -1953,6 +1990,16 @@ export const register: Register = (on) => {
         <Text dimColor>
           {waiting} waiting · closed today {desk.closedToday}
         </Text>
+        {desk.sso.state === "expired" && (
+          <Text bold color={C("red")}>
+            ⚠ SSO EXPIRED · run pnpm sso
+          </Text>
+        )}
+        {desk.sso.state === "expiring" && (
+          <Text bold color={C("yellow")}>
+            sso ↻ {desk.sso.minutes}m
+          </Text>
+        )}
         {(await read($, isBusy)) && (
           <Text bold color={C("yellow")}>
             <Text dimColor={wave(await read($, tick)).isDim}>
