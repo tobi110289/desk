@@ -121,9 +121,10 @@ SCHEMA = {
         'replyReady': {'type': 'boolean', 'description': 'true when `draft` is customer text the person could send as it stands: every claim in checks or no refutable claim at all, openChecks empty, a reply is the move, no teammate holds the thread'},
         'deferTrigger': {'type': 'string', 'description': "when a Defer is among the sensible options: the one machine-checkable trigger it would use (a date YYYY-MM-DD, 'customer replies', 'manual:<person> answers …', 'deployed:<env>:<pr>', 'merged:<pr>'); empty when no defer makes sense. Never 'later'."},
         'deferAct': {'type': 'string', 'description': 'what to do when that trigger fires, one imperative sentence; empty when deferTrigger is empty'},
+        'threadAfter': {'type': 'string', 'enum': ['done', 'waiting', 'leave'], 'description': "the Plain thread's status once the recommended reply or close has happened: done (nothing owed, or only the customer's feedback awaited), waiting (the customer's answer feeds a change we still owe), leave (we still owe work the reply only reports on, or a teammate holds the thread)"},
         'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': 'facts about the tenant or the requester that the memory block lacks and the material shows (a role, an address form or greeting habit, who owns a config, a rollout state, a recurring theme): one plain line each, ending with its source and a confidence in parentheses; usually empty'},
     },
-    'required': ['why', 'decide', 'then', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady'],
+    'required': ['why', 'decide', 'then', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady', 'threadAfter'],
 }
 log_lock = threading.Lock()
 
@@ -386,6 +387,7 @@ The desk's rules for a card (from its skill):
 - When the context shows the card is already resolved (reply already sent, PR merged, line already submitted), say so in `fact`, set `resolved` true and leave `draft` empty.
 - When the card is a REVIEW card, `draft` is the recommended move and the one-line reason; when it is a RUN card, `draft` is the exact command or action.
 - `deferTrigger` and `deferAct`: when a Defer is a sensible pick, name the one trigger it would wait on (a date, "customer replies", "manual:<person> answers …", "deployed:<env>:<pr>", "merged:<pr>") and the act when it fires, so a Defer picked on the pane runs without a question. Empty when no defer makes sense.
+- `threadAfter`: where the Plain thread goes once the reply is sent or the card is closed; the executor applies it. `done` when nothing is owed or we only wait for the customer's feedback or confirmation; `waiting` when their answer feeds a change we still have to make (a config choice, an id, a retest that decides a fix), and when in doubt between these two; `leave` when we still owe work the reply only reports on, or a teammate holds the thread.
 - `learned`: what the material shows about the tenant or the requester that the memory block does not have (a role, an address form, who owns a config, a rollout state). One plain line each with its source and confidence in parentheses. The person answers one memory question for all cards at once, so write only what is worth a line in the support memory; usually empty.
 - `draft` holds only the text that would go out (or the command, or the decision). No remarks about the draft inside it: those belong in `fact` or `openChecks`.
 - A card whose material shows it already came back from a defer (`deferred` on the card) does not get Defer first again: it is acted on or dropped (111 of 321 defers were deferred again).
@@ -458,6 +460,8 @@ def prepare(card, dry=False):
         'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),
         'replyReady': ready, 'preparedAt': now_iso(), 'model': MODEL, 'costUsd': out.get('total_cost_usd'), 'ms': out.get('duration_ms'),
         'deferTrigger': (so.get('deferTrigger') or '').strip(), 'deferAct': (so.get('deferAct') or '').strip(),
+        # 2026-11-10: the thread's status after the pick (desk-execute.py thread_after applies it)
+        'threadAfter': so.get('threadAfter') if so.get('threadAfter') in ('done', 'waiting', 'leave') else '',
         'learned': [str(x).strip() for x in (so.get('learned') or []) if str(x).strip()][:6],
         # 2026-10-23: the facts the brief stands on; desk-execute.py reads them again before it acts on a pane pick
         'anchor': anc,

@@ -17,7 +17,8 @@ never touched here, the session executes them and desk-close.py marks them done.
   desk-execute.py --one <file> run one record (any class but session), for a look by hand
   desk-execute.py --dry        say what would run
   desk-execute.py --rehearse   model runs only look and report (done=false), nothing is executed: a test of the chain
-                               (the unattended validation runs in full, but every Plain write is dry: DESK_PLAIN_DRY=1)
+                               (the unattended validation runs in full, but every Plain write is dry: DESK_PLAIN_DRY=1);
+                               a script pick only says what it would run and which thread status it would set
 
 "Validate and draft (unattended)" (FAST cards, 2026-11-09) is a model run of its own (run_unattended): this script claims
 the thread, one headless run (DESK_VALIDATE_MODEL, default opus, in the Orbit checkout so its production guard hook
@@ -136,6 +137,85 @@ readiness_of = deskplain.readiness_of
 set_readiness = deskplain.set_readiness
 mark_done = deskplain.mark_done
 add_note = deskplain.add_note
+mark_todo = deskplain.mark_todo
+snooze_waiting = deskplain.snooze_waiting
+
+# 2026-11-10: one press closes the card and moves the Plain thread (asked 11 times, 09-09 to 11-06; until now three
+# memories held the rule and the session set the status by hand). The rule, once:
+#   done     nothing is owed, or we only wait for the customer's feedback (Plain reopens the thread on their next message)
+#   waiting  the customer's answer feeds a change we still owe: snoozed as "Waiting for customer", so it stays open work
+#   leave    a teammate wrote the newest visible message after the brief was prepared, a person already set the status
+#            with his own reply, or we still owe work the reply only reports on: the status stays as it is
+THREAD_AFTER = ('done', 'waiting', 'leave')
+NAMES_DONE = {'Nobody to tell (mark done)', 'Close the loop (nothing owed)'}   # the option itself names the status
+SETTLES = deskclass.SEND | NAMES_DONE | {'I sent it already'}
+
+
+def thread_after(label, brief, live):
+    """(action, reason) for the thread after the pick. `live`: the thread anchor read right before the write
+    (deskanchor.thread_anchor), or {} when it could not be read."""
+    live = live or {}
+    prepared = (brief.get('preparedAt') or '')[:19]
+    if live.get('newestActor') == 'UserActor' and prepared and (live.get('newestAt') or '') > prepared:
+        return 'leave', f"{live.get('newestWho') or 'a teammate'} wrote the newest message after the brief; their status stands"
+    if label in NAMES_DONE:
+        return 'done', 'the option names it'
+    if not live.get('status'):
+        return 'leave', 'the thread could not be read, so a teammate reply cannot be ruled out'
+    if label == 'I sent it already' and live.get('status') in ('SNOOZED', 'DONE'):
+        return 'leave', f"the reply went out by hand and the thread is already {live['status'].lower()}"
+    said = (brief.get('threadAfter') or '').strip().lower()
+    if said in THREAD_AFTER:
+        return said, 'the brief says so'
+    # briefs from before the field: a status reply on a promise reports work we still owe; an awaited answer counts
+    # as one that feeds a change (the memory: when in doubt, waiting), since a done thread hides what we owe
+    if brief.get('lane') == 'PROMISE' and label != 'I sent it already':
+        return 'leave', 'a status reply on a promise; the work is still owed'
+    if (brief.get('deferTrigger') or '').strip().lower().startswith('customer replies'):
+        return 'waiting', 'an answer from the customer is awaited'
+    return 'done', 'nothing is awaited'
+
+
+def apply_thread_after(thread, action, live, dry=False):
+    """Write the status `thread_after` chose; return one plain line for the result."""
+    if not thread or action == 'leave':
+        return 'thread status left as it is'
+    tag = ' (dry)' if dry or deskplain.dry_env() else ''
+    if action == 'done':
+        if (live or {}).get('status') == 'DONE':
+            return 'thread already done'
+        mark_done(thread, dry)
+        return 'thread set to done' + tag
+    snooze_waiting(thread, dry)
+    return 'thread snoozed as waiting for the customer' + tag
+
+
+def live_thread(thread):
+    if not thread:
+        return {}
+    try:
+        return deskanchor.thread_anchor(thread)
+    except Exception as e:
+        return {'error': str(e)[:200]}
+
+
+def settle_thread(rec, brief, thread, live=None, dry=False):
+    """The status rule for one pick, applied; returns the line for the result. A failed write is logged, never fatal:
+    the customer has the answer and the card is closed either way."""
+    if not thread:
+        return ''
+    live = live if live is not None else live_thread(thread)
+    if live.get('error'):
+        live = {}
+    action, why = thread_after(rec['option'], brief, live)
+    rec['threadAfter'] = {'action': action, 'reason': why}
+    try:
+        line = apply_thread_after(thread, action, live, dry)
+    except Exception as e:
+        log(f"{rec['cardId']}: thread status {action} failed: {e}")
+        return f'thread status {action} failed'
+    log(f"{rec['cardId']}: {line} ({why})")
+    return f'{line} ({why})'
 
 
 def close(rec, verb, note, caption=None, trigger=None, act=None, env=None, sent=False):
@@ -180,7 +260,7 @@ def bounce(path, rec, reason, dry=False):
     finish(path, rec, 'bounced', reason)
 
 
-def run_script(path, rec, brief, card, dry):
+def run_script(path, rec, brief, card, dry, live=None, rehearse=False):
     label = rec['option']
     verb = rec.get('verb') or 'do'
     ref = rec.get('ref') or card.get('ref') or ''
@@ -188,8 +268,20 @@ def run_script(path, rec, brief, card, dry):
     lane = rec.get('lane') or card.get('lane') or ''
     fact = (brief.get('fact') or '').strip()
     env = {'DESK_DECISION': path}
-    if dry:
-        finish(path, rec, 'queued', f'dry: would run {label}'); return
+    if live is None:
+        live = live_thread(thread)
+    if live.get('error'):
+        live = {}
+    if dry or rehearse:
+        # nothing is written: say what the pick would do, the thread's status included
+        plan = f'would run {label}'
+        if thread and label in SETTLES:
+            if label in deskclass.SEND and live.get('status') == 'DONE':
+                plan += '; reopen the done thread first'
+            action, why = thread_after(label, brief, live)
+            rec['threadAfter'] = {'action': action, 'reason': why}
+            plan += f'; then thread {action} ({why})'
+        finish(path, rec, 'queued', f"{'rehearse' if rehearse else 'dry'}: {plan}"); return
     if label in deskclass.SEND:
         if not thread:
             raise RuntimeError('no thread on the card: a send needs one')
@@ -200,6 +292,10 @@ def run_script(path, rec, brief, card, dry):
         argv = ['python3', f'{HERE}/luna-send.py', thread, '--file', draft_path]
         if re.match(r'^T-\d+$', ref):
             argv += ['--ref', ref]
+        reopened = False
+        if live.get('status') == 'DONE':
+            # the adapter refuses a send on a done thread (plain-thread-done) and the refused text is a dead fingerprint
+            mark_todo(thread); reopened = True
         code, out = sh(argv, 200, env)
         last = (out.splitlines() or [''])[-1]
         if code == 3:
@@ -215,38 +311,40 @@ def run_script(path, rec, brief, card, dry):
                     set_readiness(thread, was)
             if code == 3:
                 raise RuntimeError(f'Luna refused: {last[:200]}')
+        if code and code != 4 and reopened:
+            try:
+                mark_done(thread)   # nothing went out: the thread goes back the way we found it
+            except Exception as e:
+                log(f"{rec['cardId']}: send failed and the reopened thread stays open: {e}")
         if code == 4:
             raise RuntimeError(f'queued, not confirmed in time: {last[:200]}')
         if code:
             raise RuntimeError(f'send failed: {last[:200]}')
         at = hhmm()
-        if lane == 'NOTIFY':
-            try:
-                mark_done(thread)
-            except Exception as e:
-                log(f"{rec['cardId']}: sent, but mark done failed: {e}")
+        settled = settle_thread(rec, brief, thread)   # read again: our send is now the newest message
         caption = f'replied as Luna {at}; done' if lane != 'PROMISE' else None
         note = f'replied as Luna {at} (pane pick): {fact}' if lane == 'PROMISE' else f'replied as Luna {at} (pane pick)'
         close(rec, verb, note, caption=caption, env=env, sent=True)
-        finish(path, rec, 'done', f'sent as Luna {at}', brief, card)
+        finish(path, rec, 'done', f'sent as Luna {at}; {settled}', brief, card)
         return
     if label == 'I sent it already':
         at = hhmm()
+        settled = settle_thread(rec, brief, thread, live)
         close(rec, 'do', 'Tobias sent it himself (pane pick)', caption=f'replied {at}; done' if thread else None, env=env, sent=True)
-        finish(path, rec, 'done', 'recorded: sent by hand', brief, card); return
+        finish(path, rec, 'done', f'recorded: sent by hand; {settled}' if settled else 'recorded: sent by hand', brief, card); return
     if label == 'Nobody to tell (mark done)':
-        if thread:
-            mark_done(thread)
+        settled = settle_thread(rec, brief, thread, live)
         close(rec, 'do', 'nobody to tell (pane pick)', caption='done; nobody to tell' if thread else None, env=env, sent=True)
-        finish(path, rec, 'done', 'thread set to done, nobody to tell', brief, card); return
+        finish(path, rec, 'done', f'nobody to tell; {settled}' if settled else 'nobody to tell', brief, card); return
     if label == 'Close the loop (nothing owed)':
         if thread:
             try:
                 add_note(thread, f'desk: loop closed, nothing owed. {fact}'.strip())
             except Exception as e:
                 log(f"{rec['cardId']}: note failed: {e}")
+        settled = settle_thread(rec, brief, thread, live)
         close(rec, 'do', f'nothing owed (pane pick): {fact}', env=env, sent=True)
-        finish(path, rec, 'done', 'closed, nothing owed', brief, card); return
+        finish(path, rec, 'done', f'closed, nothing owed; {settled}' if settled else 'closed, nothing owed', brief, card); return
     if label.startswith('Drop'):
         close(rec, 'drop', f'dropped from the pane: {fact or label}', env=env)
         finish(path, rec, 'done', 'dropped', brief, card); return
@@ -612,14 +710,15 @@ def run_one(path, dry=False, force_class=False, rehearse=False):
             bounce(path, rec, 'the brief is gone; a new one is on its way', dry); return 'bounced'
         if brief.get('fingerprint') != rec.get('fingerprint'):
             bounce(path, rec, 'the brief was replaced after the pick', dry); return 'bounced'
-        reasons = deskanchor.changed(rec.get('anchor') or {}, deskanchor.anchor(card))
+        now = deskanchor.anchor(card)
+        reasons = deskanchor.changed(rec.get('anchor') or {}, now)
         if reasons:
             bounce(path, rec, '; '.join(reasons), dry); return 'bounced'
         try:
             if rec.get('class') == 'model':
                 run_model(path, rec, brief, card, dry, rehearse)
             else:
-                run_script(path, rec, brief, card, dry)
+                run_script(path, rec, brief, card, dry, live=now.get('thread') or {}, rehearse=rehearse)
         except Exception as e:
             if rec.get('closed'):
                 # 2026-10-26: a crash after desk-close (a typo in the done path) marked a finished hand-off failed, and the

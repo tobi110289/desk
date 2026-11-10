@@ -105,6 +105,24 @@ def mark_done(thread_id, dry=False):
     return {'dry': False, 'write': 'done'}
 
 
+def mark_todo(thread_id, dry=False):
+    """Reopen a thread. Only before a send to a DONE thread: the Luna adapter refuses a send there (plain-thread-done)."""
+    if dry or dry_env():
+        return {'dry': True, 'write': 'todo'}
+    gql('mutation($input: MarkThreadAsTodoInput!){ markThreadAsTodo(input:$input){ error{ message } } }', {'input': {'threadId': thread_id}})
+    return {'dry': False, 'write': 'todo'}
+
+
+def snooze_waiting(thread_id, dry=False):
+    """Plain's "Waiting for customer": SNOOZED with statusDetail WAITING_FOR_CUSTOMER, no duration, so a customer
+    message wakes it. Never WAITING_INDEFINITELY: that is "Close the loop", a person's own manual signal."""
+    if dry or dry_env():
+        return {'dry': True, 'write': 'waiting'}
+    gql('mutation($input: SnoozeThreadInput!){ snoozeThread(input:$input){ error{ message } } }',
+        {'input': {'threadId': thread_id, 'statusDetail': 'WAITING_FOR_CUSTOMER'}})
+    return {'dry': False, 'write': 'waiting'}
+
+
 def _age_s(stamp):
     """Seconds since a claim stamp in either shape Plain hands back (strict ISO, or 'YYYY-MM-DD HH:MM:SS.000' in UTC)."""
     s = re.sub(r'\.\d+$', '', (stamp or '').strip().replace('T', ' ').rstrip('Z'))
