@@ -10,6 +10,9 @@ Usage:
                           tenant_id (sweep-cache), plus PR cards those threads' loop entries name
   desk.py --today         scope the sitting to the Plain threads created today (Europe/Berlin): every open
                           thread from today is a card, nothing older is (--since YYYY-MM-DD for another day)
+  desk.py --as-of YYYY-MM-DD
+                          decide the release day for that date instead of today (Europe/Berlin); a what-if run:
+                          it prints the ranking and writes nothing (desk.json, cards.json and the board files stay)
   desk.py --fresh         read every source again (the Plain-heavy ones are cached for 20 min otherwise)
   desk.py --event <json>  apply one live event from the adapter's feed to cards.json and stop (deskevent.py; no
                           gather, no pre-flight, no board files; desk-events.py feeds it)
@@ -44,6 +47,11 @@ BERLIN=deskhold.BERLIN
 TODAY_BERLIN=now.astimezone(BERLIN).strftime('%Y-%m-%d')
 today=TODAY_BERLIN
 FRESH='--fresh' in sys.argv   # bypass the per-source caches (the pane passes it on a forced gather)
+# 2026-11-10: --as-of moves only the release-day decision (the calendar below); every other rule keeps the real day.
+AS_OF=TODAY_BERLIN; WHATIF='--as-of' in sys.argv
+if WHATIF:
+    _i=sys.argv.index('--as-of'); AS_OF=sys.argv[_i+1] if _i+1<len(sys.argv) else ''
+    if not re.match(r'\d{4}-\d{2}-\d{2}$',AS_OF): print('--as-of wants a date, YYYY-MM-DD',file=sys.stderr); sys.exit(2)
 
 def load(p,default):
     try: return json.load(open(p))
@@ -92,7 +100,7 @@ def latest_deploy(env):
 _pr_cache={}
 def pr_merge(pr):
     if pr in _pr_cache: return _pr_cache[pr]
-    d=gh(['pr','view',str(pr),'--repo',ORBIT,'--json','state,mergeCommit,mergedAt,title'],30) or {}
+    d=gh(['pr','view',str(pr),'--repo',ORBIT,'--json','state,mergeCommit,mergedAt,title,baseRefName'],30) or {}
     _pr_cache[pr]=d; return d
 def release_state(env,pr):
     """Is PR #pr contained in the newest successful deployment of env? {landed, deployAt, deploySha, merged}."""
@@ -273,6 +281,34 @@ _runs=sweep_runs(); _last=max((r['date'] for r in _runs),default=None); _paused=
 _sw_age=age_days(_last+'T00:00:00Z') if _last else None
 # 2026-09-29 (Tobias): the Superset cron `weekly-sentry-sweep` is the one trigger; the desk never starts a sweep.
 preflight['sweep']={'due':False,'reason':(f'last sweep {_sw_age}d ago' if _sw_age is not None else 'no sweep state')+'; the Superset cron starts it'+(f'; {len(_paused)} paused at the fix pass' if _paused else '')}
+# ---------------------------------------------------------------- release calendar (2026-11-10)
+# Fifteen times since 10 Sep the person asked the desk to rank by the day without hand pins, and on 4 Nov still sorted a
+# release day by hand. cache/release-calendar.json holds the release dates: {"updatedAt","source","note","releases":
+# [{"date":"YYYY-MM-DD","env":"staging|production","note":"..."}]}. The session writes it from the calendar connector
+# (only the session has it); the gather reads it and asks for a refresh when its updatedAt is RELEASE_CAL_DAYS old or
+# missing (the seed file carries none, so the first gather asks).
+RELEASE_CAL=os.environ.get('DESK_RELEASE_CALENDAR') or f'{CACHE_DIR}/release-calendar.json'
+RELEASE_CAL_DAYS=7
+def release_calendar():
+    doc=load(RELEASE_CAL,None)
+    rows=doc.get('releases') if isinstance(doc,dict) else doc
+    return [r for r in (rows if isinstance(rows,list) else []) if isinstance(r,dict) and r.get('env') in ('staging','production') and re.match(r'\d{4}-\d{2}-\d{2}$',str(r.get('date') or ''))]
+RELEASES=release_calendar()
+_next_day=(datetime.date.fromisoformat(AS_OF)+datetime.timedelta(days=1)).isoformat()
+PROD_TODAY=[r for r in RELEASES if r['env']=='production' and r['date']==AS_OF]
+CUT_TOMORROW=[r for r in RELEASES if r['env']=='staging' and r['date']==_next_day]
+# a production release day, or the day before a staging cut: rank() opens the release tier for the release order
+RELEASE_DAY=(f"production release {AS_OF}" if PROD_TODAY else f"staging cut {_next_day}") if (PROD_TODAY or CUT_TOMORROW) else None
+def _cal_updated():
+    doc=load(RELEASE_CAL,None); at=parse_iso(str(doc.get('updatedAt') or '')) if isinstance(doc,dict) else None
+    if at and at.tzinfo is None: at=at.replace(tzinfo=datetime.timezone.utc)
+    return (now-at).total_seconds() if at else None   # no updatedAt (the seed, a hand-written file): refresh due now
+_cal_age=_cal_updated()
+_upcoming=sorted((r for r in RELEASES if r['date']>=AS_OF),key=lambda r:r['date'])
+if _cal_age is None or _cal_age>RELEASE_CAL_DAYS*86400:
+    preflight['calendar']={'due':True,'reason':(f'release calendar {_cal_age/86400:.0f}d old' if _cal_age is not None else ('release calendar has no updatedAt' if os.path.exists(RELEASE_CAL) else 'no release calendar'))+': read the release calendar for the next 30 days, write cache/release-calendar.json (in the session, not an agent)'}
+else:
+    preflight['calendar']={'due':False,'reason':f'release calendar {_cal_age/86400:.0f}d old; '+(f'RELEASE DAY: {RELEASE_DAY}' if RELEASE_DAY else (f"next {_upcoming[0]['env']} {_upcoming[0]['date']}" if _upcoming else 'no release ahead'))}
 if '--preflight' in sys.argv:
     print(json.dumps(preflight,indent=1,ensure_ascii=False)); sys.exit(0)
 
@@ -373,6 +409,13 @@ def fire(card,d,prev):
         release_watch.append({'id':cid,'ref':card.get('ref'),'thread':card.get('thread'),'pr':int(prn) if prn.isdigit() else None,'env':env,
                               'landed':fired,'merged':rs.get('merged'),'deployAt':rs.get('deployAt'),'since':d.get('since') or prev.get('lastSeen'),'act':d.get('act','')})
         if fired: released(f"landed on {env} {(rs.get('deployAt') or '')[:16]}Z (PR #{prn}): customer not told",d.get('act') or f"Release landed on {env} (PR #{prn}): tell the customer, then close the thread",lane_to='NOTIFY')
+    elif trig.startswith('deploy-after:'):
+        # 2026-11-10: deploy-after:<env>:<iso> fires once the newest successful Deployment of env is newer than iso (the
+        # release-notes card's "Defer until the deploy lands": a release merge waiting for its production run)
+        try: _,env,iso=trig.split(':',2); dep=latest_deploy(env)
+        except Exception: dep=None; env='?'; iso=''
+        fired=bool(dep and dep['at']>iso)
+        if fired: released(f"a newer {env} deploy landed {dep['at'][:16]}Z",d.get('act') or card.get('act') or '',lane_from=())
     elif trig.startswith('a2a:'):
         # 2026-10-13 (Tobias: "make sure the desk picks up a2a answers automatically"): GetTask on the hub is the authority:
         # a completed task with a human reply fires and the card carries the reply; a cancelled task fires too.
@@ -1472,6 +1515,68 @@ for key,h in list(desk.get('holds',{}).items()):
          'act':d.get('act') or f"Release landed (PR #{prn}): tell {ref}, then close the thread",
          'score':round((IMPACT.get(lvl,1)+3)/3*10,1)})
 
+# ---------------------------------------------------------------- source 8: the release notes (2026-11-10)
+# 7 asks from 09-08 to 11-06: tie the release notes to the production deploy; on 11-06 they were still swept by hand. The
+# newest production release of the calendar (at most RELEASE_NOTES_DAYS back) is one card release-notes:<date>. It stays
+# parked until the release merge ("Merge branch 'staging' into production", dated on or after the release day) is inside
+# the newest successful production Deployment, checked like a deployed: trigger; then it ranks first in the release
+# tier until it gets a verb.
+RELEASE_NOTES_DAYS=14
+RELEASE_MERGE="Merge branch 'staging' into production"
+def release_merge(date):
+    """The release merge commit on production dated on or after the Berlin day `date`: {sha, at, title, url} or None."""
+    since=datetime.datetime.fromisoformat(date).replace(tzinfo=BERLIN).astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    rows=[r for r in (gh(['api',f'repos/{ORBIT}/commits?sha=production&since={since}&per_page=60'],30) or []) if isinstance(r,dict)]
+    hits=[r for r in rows if ((r.get('commit') or {}).get('message') or '').startswith(RELEASE_MERGE)]
+    if not hits: return None
+    r=hits[-1]   # newest first: the oldest merge after the day is the release, later ones carry hotfixes
+    return {'sha':r['sha'],'at':((r.get('commit') or {}).get('committer') or {}).get('date'),'title':(r['commit']['message'].splitlines() or [''])[0],'url':r.get('html_url')}
+def release_landed(sha):
+    """The newest production Deployment when it contains sha, else None."""
+    dep=latest_deploy('production')
+    if not dep: return None
+    cmp=(gh(['api',f'repos/{ORBIT}/compare/{sha}...{dep["sha"]}','--jq','{s:.status}'],30) or {}).get('s')
+    return dep if cmp in ('ahead','identical') else None
+_lo=(datetime.date.fromisoformat(AS_OF)-datetime.timedelta(days=RELEASE_NOTES_DAYS)).isoformat()
+_prod=sorted((r for r in RELEASES if r['env']=='production' and _lo<=r['date']<=AS_OF),key=lambda r:r['date'])
+if _prod and not SCOPE:
+    with source('release-notes'):
+        _r=_prod[-1]; _date=_r['date']
+        _m=release_merge(_date); _dep=release_landed(_m['sha']) if _m else None
+        _nm=re.search(r'\(([^)]*)\)\s*$',_m['title']) if _m else None
+        _name=_nm.group(1) if _nm else f'the release of {_date}'
+        _rc={'id':f'release-notes:{_date}','ref':f'release {_date}','lane':'RUN','mins':15,'impact':'P1','age':age_days(_date+'T00:00:00Z'),
+             'waits':'person','pr':None,'task':None,'thread':None,'url':(_m or {}).get('url'),'key':f'run:release-notes:{_date}','since':f'release:{_date}',
+             'note':_r.get('note') or '',
+             'act':f"Run the `release` skill (/release, Platform, staging → production) for {_name}: set the Production date on the release notes entry, publish the notes, move the tickets"}
+        if _dep:
+            _rc['status']=f"{_name} is in the production deploy of {_dep['at'][:16]}Z: release notes not posted"
+        else:
+            _last=latest_deploy('production')
+            _rc['status']=(f"release merge {_m['sha'][:9]} not in the newest production deploy" if _m else f"no release merge on production since {_date}")+f" (newest deploy {((_last or {}).get('at') or '?')[:16]}Z)"
+            _rc['score']=-1; _rc['waitingFor']='the release merge in a production deploy'
+        add(_rc)
+
+# ---------------------------------------------------------------- release order (2026-11-10)
+# On a release day (RELEASE_DAY) rank() lifts three groups into the release tier, in this order: 0 the release notes,
+# 1 a card whose PR is merged to develop and not yet on staging (it can still make the cut), 2 an open P0/P1 (or
+# release-blocker) thread. Everything else ranks as on any day. The release-notes card sits in the tier on every day.
+RELEASE_IMPACTS=('P0','RBP','RBS','P1')
+_cut={}
+def _before_cut(pr):
+    try: n=int(str(pr).lstrip('#'))
+    except (TypeError,ValueError): return False
+    if n not in _cut:
+        d=pr_merge(n)
+        _cut[n]=d.get('state')=='MERGED' and d.get('baseRefName')=='develop' and not release_state('staging',n).get('landed')
+    return _cut[n]
+def release_order(c):
+    if (c.get('id') or '').startswith('release-notes:'): return 0
+    if not RELEASE_DAY: return None
+    if c.get('pr') and 'orbot' not in f"{c.get('id')} {c.get('ref')}" and _before_cut(c['pr']): return 1
+    if c.get('impact') in RELEASE_IMPACTS and re.match(r'^T-\d+$',c.get('ref') or ''): return 2
+    return None
+
 # ---------------------------------------------------------------- batches
 def batch(lane,key=lambda c:'all',title=None,mins_each=1,waits='agent',act=None,pred=lambda c:True):
     grp={}
@@ -1494,15 +1599,21 @@ def batch(lane,key=lambda c:'all',title=None,mins_each=1,waits='agent',act=None,
 # "put the decisions on the top of my desk") · a thread opened today · a customer message today (2026-10-09) · a pin
 # (2026-09-10) · a hold that fired (a release, an answer) · an agent or a PR stopped for the person (SEND, REVIEW,
 # INBOX, STUCK; 2026-10-20) · a customer waits · a person waits · nobody waits · desk.json bottom (2026-10-15). Inside a
-# tier: impact, then age (capped), then a source's own nudge (deskhold.base_score). A batch takes its best member's tier
+# tier: impact, then age (capped), then a source's own nudge (deskhold.base_score). 2026-11-10: a release tier between
+# the fired holds and the person's agents and PRs: on a release day the release notes, then PRs that can still make the
+# staging cut, then P0/P1 threads (release_order above); the release-notes card ranks there on any day. A batch takes its best member's tier
 # and base; the brackets run before the batches so a batch inherits them. Minutes stay on the card for the pane only.
 def rank(c):
     if c.get('score',0)<0: return
     if c.get('holdCheck'): tier='person'
     elif c.get('released') or c.get('tier')=='fired': tier='fired'
     else: tier=deskhold.tier_of(c,TODAY_NEW,TODAY_ANSWERED,desk.get('top',[]),desk.get('bottom',[]))
+    base=deskhold.base_score(c.get('impact'),c.get('age'),c.get('bonus',0))
+    if tier in deskhold.RELEASE_FROM:
+        o=release_order(c)
+        if o is not None: tier='release'; base=(2-o)*333+min(base,332); c['releaseOrder']=o
     c['tier']=tier
-    c['base']=deskhold.base_score(c.get('impact'),c.get('age'),c.get('bonus',0))
+    c['base']=base
     c['score']=deskhold.score(tier,c['base'])
 for c in cards: rank(c)
 # desk.json top keeps its list order; bottom its reverse (2026-10-15: "put this task last in the queue")
@@ -1586,15 +1697,16 @@ def _stale(cid):
 for _k in ('top','bottom'):
     if desk.get(_k): desk[_k]=[i for i in desk[_k] if not _stale(i)]
 _seen=set(); release_watch=[r for r in release_watch if not ((r['ref'],r['pr'],r['env']) in _seen or _seen.add((r['ref'],r['pr'],r['env'])))]
-if not SCOPE: json.dump({'generatedAt':now.isoformat(),'rows':release_watch},open(f'{DESK}/release-watch.json','w'),indent=1,ensure_ascii=False)   # a tenant sitting sees a subset; the board files stay whole
+if not SCOPE and not WHATIF: json.dump({'generatedAt':now.isoformat(),'rows':release_watch},open(f'{DESK}/release-watch.json','w'),indent=1,ensure_ascii=False)   # a tenant sitting sees a subset; the board files stay whole
 import fcntl
+if WHATIF: DESKFILE=os.devnull; DESK_STAMP=_desk_stamp()   # --as-of: a what-if run writes no desk file
 _lock=open(f'{DESK}/.desk.lock','w'); fcntl.flock(_lock,fcntl.LOCK_EX)   # desk-close.py holds the same lock for its read-modify-write
 if _desk_stamp()!=DESK_STAMP:
     print("desk.json changed while this run gathered (a card was closed); nothing written, run again",file=sys.stderr); sys.exit(75)
 json.dump(desk,open(DESKFILE,'w'),indent=1,ensure_ascii=False)
 # scopeArgs: what the pane's background run passes so a tenant or today desk stays scoped until a bare `desk.py` widens it.
 _scope_args=(['--tenant',TENANT] if TENANT else [])+((['--today'] if '--today' in sys.argv and '--since' not in sys.argv else ['--since',SINCE]) if SINCE else [])
-json.dump({'generatedAt':now.isoformat(),'scope':SCOPE or '','scopeArgs':_scope_args,'preflight':preflight,'cards':live,'parked':parked},open(f'{DESK}/cards.json','w'),indent=1,ensure_ascii=False)
+if not WHATIF: json.dump({'generatedAt':now.isoformat(),'scope':SCOPE or '','scopeArgs':_scope_args,'preflight':preflight,'releaseDay':RELEASE_DAY,'cards':live,'parked':parked},open(f'{DESK}/cards.json','w'),indent=1,ensure_ascii=False)
 # board-sync.json: what the board needs to group rows the way the desk does (2026-09-14, Tobias: board and desk must agree).
 # parked: loop refs the desk holds on a trigger, with a readable "until"; live: loop refs the desk ranks as waiting on Tobias.
 def _until(trig):
@@ -1621,7 +1733,7 @@ for c in parked:
 # live: ref -> the loop caption the desk ranked; the board honours the entry only while that caption stands, so a
 # caption the desk wrote on closing a card ("sent … agent working") moves the row off "waiting on you" at once.
 _live={r:(state.get(r,{}).get('status') or '').strip() for c in live for r in _refs(c) if r not in _parked}
-if not SCOPE: json.dump({'generatedAt':now.isoformat(),'parked':_parked,'live':_live,'colleague':list(HELD.values())},open(f'{DESK}/board-sync.json','w'),indent=1,ensure_ascii=False)   # same: never let a scoped run shrink the board
+if not SCOPE and not WHATIF: json.dump({'generatedAt':now.isoformat(),'parked':_parked,'live':_live,'colleague':list(HELD.values())},open(f'{DESK}/board-sync.json','w'),indent=1,ensure_ascii=False)   # same: never let a scoped run shrink the board
 
 # ---------------------------------------------------------------- print
 def link(c):
@@ -1647,6 +1759,7 @@ due=[f"{k} ({v['reason']})" for k,v in preflight.items() if v['due']]
 quiet=[f"{k} ({v['reason']})" for k,v in preflight.items() if not v['due']]
 print(f"PRE-FLIGHT: due → {'; '.join(due) if due else 'none'}" + (f" · quiet → {'; '.join(quiet)}" if quiet else '')
       + f" · memory {MEMORY.get('head')}" + ('' if MEMORY.get('ok') else f" (not pulled: {MEMORY.get('reason')})") + (f"; merged: PR {', '.join(MEMORY['synced'])}" if MEMORY.get('synced') else ''))
+if RELEASE_DAY: print(f"RELEASE DAY ({RELEASE_DAY}{', as of '+AS_OF if WHATIF else ''}): release notes first, then PRs that can still make staging, then P0/P1 threads")
 print()
 print("TOP SIX (work from the top; the desk ranks again on every run)")
 for i,c in enumerate(live[:6],1):
@@ -1659,7 +1772,7 @@ by={}
 for c in live: by.setdefault(c['lane'],[]).append(c)
 print("\nLANES: "+' · '.join(f"{k} {len(v)}" for k,v in sorted(by.items(),key=lambda kv:-len(kv[1]))))
 if parked:
-    print("\nPARKED: "+' · '.join(f"{c['ref']} until {c['deferred']['trigger']}" for c in parked))
+    print("\nPARKED: "+' · '.join(f"{c['ref']} until {(c.get('deferred') or {}).get('trigger') or c.get('waitingFor')}" for c in parked))
 if feed and feed.get('waitingOnOthers'):
     rows=[]
     for t in feed['waitingOnOthers']:

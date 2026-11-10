@@ -11,7 +11,7 @@ fixed option sets from CARDS.md and desk-prepare.py OPTIONS; an unknown label ne
 SEND = {'Send it', 'Reply with a status'}
 SCRIPT = SEND | {'I sent it already', 'Nobody to tell (mark done)', 'Drop', 'Drop (unpin)', 'Drop (accepted risk, recorded)',
                  'Close the loop (nothing owed)'}
-DEFER = {'Defer', 'Defer until a trigger'}
+DEFER = {'Defer', 'Defer until a trigger', 'Defer until the deploy lands'}
 MODEL = {'Hand to a worker', 'Hand the rework to its agent', 'Hand it to agents', 'Hand to a worker / ticket',
          'Go (agent runs it now)', 'Close the PR',
          # 2026-11-03: single SEND and TICKET cards. A line goes to its worker's terminal, a ticket file gets its Status:

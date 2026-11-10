@@ -59,6 +59,8 @@ OPTIONS = {
     # 2026-11-03: a worker's own line, a picker or a sign-off is its own card; the draft is the line to type
     'SEND': ['Send as staged', 'Edit then send', 'Drop the line', 'Defer'],
 }
+# 2026-11-10: the release-notes card (desk.py source 8) is a RUN card with its own set (CARDS.md lanes table)
+RELEASE_NOTES_OPTIONS = ['Write the notes now', 'Defer until the deploy lands', 'Drop']
 # TICKET cards differ by kind (desk.py source 9 / 9b); the batch held them until 2026-11-03
 TICKET_OPTIONS = {
     'notion': ['Push (ask the owner / assign)', 'Hand to an agent', 'Archive', 'Defer'],
@@ -68,10 +70,12 @@ TICKET_OPTIONS = {
 }
 
 
-MACHINE_TRIGGER = re.compile(r'^(?:trigger:\s*)?(?:\d{4}-\d{2}-\d{2}|deployed:|merged:|pr-merged:|appstore:|a2a:)')
+MACHINE_TRIGGER = re.compile(r'^(?:trigger:\s*)?(?:\d{4}-\d{2}-\d{2}|deployed:|merged:|pr-merged:|appstore:|a2a:|deploy-after:)')
 
 
 def options_of(card, material=None):
+    if (card.get('id') or '').startswith('release-notes:'):
+        return list(RELEASE_NOTES_OPTIONS)
     if card.get('lane') == 'TICKET':
         return TICKET_OPTIONS.get(card.get('kind') or 'notion', TICKET_OPTIONS['notion'])
     opts = list(OPTIONS.get(card.get('lane'), []))
@@ -104,7 +108,8 @@ VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'de
          'Start it now': 'do', 'Hand it to agents': 'delegate', 'Answer': 'decide', 'Drop (accepted risk, recorded)': 'drop',
          'Send as staged': 'delegate', 'Drop the line': 'drop', 'Push (ask the owner / assign)': 'delegate', 'Hand to an agent': 'delegate',
          'Archive': 'drop', 'Ticket it in Notion': 'delegate', 'Ready for an agent': 'decide', 'Ready for a person': 'decide',
-         "Won't fix": 'drop', 'Close (PR landed)': 'do', 'Do it now': 'do'}
+         "Won't fix": 'drop', 'Close (PR landed)': 'do', 'Do it now': 'do',
+         'Write the notes now': 'do', 'Defer until the deploy lands': 'defer'}
 SCHEMA = {
     'type': 'object',
     'properties': {
@@ -310,6 +315,8 @@ def recipe(lane, cid):
     want = {lane}
     if cid.startswith('notion:'):
         want.add('RUN `notion:<ref>`')
+    if cid.startswith('release-notes:'):
+        want = {'RUN `release-notes:<date>`'}
     out = []
     for m in re.finditer(r'^### (.+?)$(.*?)(?=^##+ |\Z)', md, re.S | re.M):
         head = m.group(1)

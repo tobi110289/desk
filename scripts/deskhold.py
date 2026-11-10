@@ -32,7 +32,10 @@ KIND = {'SEND': 'send', 'REVIEW': 'review', 'STUCK': 'review', 'REPLY': 'reply',
         'FAST': 'reply', 'RUN': 'run', 'STALE': 'stale', 'INBOX': 'inbox', 'TICKET': 'ticket', 'TASK': 'task', 'SWEEP': 'sweep'}
 REF_RE = re.compile(r'^(T|ORB|ORBIT|SWEEP|[A-Z]{2,8})-\d+$|^(orbot)?#\d+$')
 # Ranking tiers (desk.py rank(), deskevent relift): score = tier * 1000 + base, base under 1000. Order, top first.
-TIER = {'top': 9, 'new': 8, 'answered': 7, 'pin': 6, 'fired': 5, 'me': 4, 'customer': 3, 'person': 2, 'nobody': 1, 'bottom': 0}
+# 2026-11-10: 'release' sits under 'fired' and over 'me': on a release day (desk.py RELEASE_DAY) the release notes, then
+# PRs merged to develop that are not on staging yet, then open P0/P1 threads; the release-notes card ranks there any day.
+TIER = {'top': 10, 'new': 9, 'answered': 8, 'pin': 7, 'fired': 6, 'release': 5, 'me': 4, 'customer': 3, 'person': 2, 'nobody': 1, 'bottom': 0}
+RELEASE_FROM = ('me', 'customer', 'person', 'nobody')   # the tiers the release order may lift a card out of
 ME_LANES = {'SEND', 'REVIEW', 'INBOX', 'STUCK'}   # an agent or a PR stopped for the person
 IMPACT = {'P0': 8, 'RBP': 6, 'RBS': 5, 'P1': 4, 'P2': 2}
 
