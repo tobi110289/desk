@@ -1,5 +1,6 @@
 import type { On } from "claude-code";
 import { expect, mock, test } from "claude-code/testing";
+import type { Engine } from "claude-code/testing";
 
 import { plainWordsProblems } from "../hooks/plainWords";
 
@@ -110,7 +111,13 @@ test("a verb goes through desk_close, never desk-close.py over Bash", async ($, 
 });
 
 test("desk_close keeps the caption rule and runs desk-close.py", async ($, on) => {
-  const { processes } = world(on);
+  const { processes: all } = world(on);
+  // The loaded card has no brief, so the pane also asks desk-prepare.py for one; only desk-close.py counts here.
+  const processes = {
+    get list() {
+      return all.filter((argv) => argv[1]?.endsWith("desk-close.py"));
+    },
+  };
   // The gather command starts the sitting and loads the cards.
   await $.tool.call({
     tool: "Bash",
@@ -121,7 +128,7 @@ test("desk_close keeps the caption rule and runs desk-close.py", async ($, on) =
 
   const bare = await close({ card_id: "loop:T-1", verb: "do", note: "sent" });
   expect(String(bare.result)).toContain("Not closed");
-  expect(processes).toEqual([]);
+  expect(processes.list).toEqual([]);
 
   const later = await close({
     card_id: "loop:T-1",
@@ -140,8 +147,8 @@ test("desk_close keeps the caption rule and runs desk-close.py", async ($, on) =
   // The desk is live: a close names the count and never a position in a sitting.
   expect(String(done.result)).toContain("Closed today:");
   expect(String(done.result)).not.toContain(" of 6");
-  expect(processes.length).toBe(1);
-  expect(processes[0]?.slice(2)).toEqual([
+  expect(processes.list.length).toBe(1);
+  expect(processes.list[0]?.slice(2)).toEqual([
     "loop:T-1",
     "do",
     "sent as Luna",
@@ -401,4 +408,150 @@ test("without liveEvents the pane never polls the feed", async ($, on) => {
 
   expect(processes.some((argv) => argv.includes("poll"))).toBe(false);
   expect(processes.some((argv) => argv.includes("--event"))).toBe(false);
+});
+
+// The health check (2026-11-10): eleven times the card on top could not be worked from the pane. A card with no brief
+// never leads, and a background pick that failed says so on the card.
+const healthWorld = (on: On, decision?: Record<string, unknown>) => {
+  const cards = JSON.stringify({
+    generatedAt: "2026-10-02T10:04:51+00:00",
+    cards: [
+      {
+        id: "loop:T-1",
+        ref: "T-1",
+        lane: "REPLY",
+        mins: 3,
+        impact: "P1",
+        act: "Answer the customer",
+        status: "new",
+      },
+      {
+        id: "loop:T-2",
+        ref: "T-2",
+        lane: "REPLY",
+        mins: 3,
+        impact: "P2",
+        act: "Send it",
+        status: "drafted",
+      },
+    ],
+    parked: [],
+  });
+  const prepared = JSON.stringify({
+    cardId: "loop:T-2",
+    status: "drafted",
+    act: "Send it",
+    preparedAt: "2026-10-02T09:50:00Z",
+    why: "The customer wrote this morning and has had no answer",
+    decide: "Send the answer as Luna?",
+    then: "Luna sends it now.",
+    fact: "customer asked once",
+    options: [{ label: "Send it", verb: "do" }],
+  });
+  mock.env(on, { HOME: "/home/t" });
+  mock.clock(on, { now: Date.parse("2026-10-02T10:00:00Z") });
+  on("session.root", () => ({ value: "/home/t/app" }));
+  on("fs.stat", () => ({
+    value: { kind: "file" as const, size: 1, mtimeMs: 1, isLink: false },
+  }));
+  const entry = (name: string) => ({
+    name,
+    kind: "file" as const,
+    size: 1,
+    mtimeMs: 1,
+    isLink: false,
+  });
+  on("fs.list", (_$, e) => ({
+    value: (e.path.endsWith("/briefs")
+      ? [entry("loop_T-2.json")]
+      : e.path.endsWith("/decisions") && decision
+        ? [entry("loop_T-2.json")]
+        : []) as never,
+  }));
+  on("fs.read", (_$, e) => ({
+    value: e.path.endsWith("cards.json")
+      ? cards
+      : e.path.endsWith("config.json")
+        ? CONFIG
+        : e.path.endsWith("/briefs/loop_T-2.json")
+          ? prepared
+          : e.path.endsWith("/decisions/loop_T-2.json")
+            ? JSON.stringify(decision)
+            : e.path.endsWith("desk.json")
+              ? DESK
+              : "",
+  }));
+  on("fs.write", () => ({ value: undefined as never }));
+  on("tool.call", () => ({ result: {} as never }));
+  on("ui.open", () => ({ value: { id: "desk" } as never }));
+  on("ui.status", () => ({ value: undefined as never }));
+  const processes: string[][] = [];
+  on("process.run", (_$, e) => {
+    processes.push([...e.argv]);
+
+    return {
+      value: {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    };
+  });
+
+  return processes;
+};
+
+const loadAndMount = async ($: Engine) => {
+  await $.tool.call({
+    tool: "Bash",
+    command: "python3 ~/orbit-scratch/desk/desk.py",
+  });
+  await settle();
+
+  return $.ui.mount({
+    plugin: "desk",
+    surface: "terminal",
+    component: "Pane",
+    requestId: "desk",
+    props: {
+      title: "Desk",
+      isFocused: false,
+      bodyColumns: 120,
+      placement: "dock",
+    } as never,
+  });
+};
+
+test("a card with no brief never leads, and the pane asks a brief for it", async ($, on) => {
+  const processes = healthWorld(on);
+  const pane = await loadAndMount($);
+
+  expect((await pane.find({ key: "pick-0" }))?.text).toContain("T-2");
+  expect((await pane.find({ key: "pick-1" }))?.text).toContain("T-1");
+  expect(
+    await pane.find({ type: "Text", text: "no brief yet · " }),
+  ).toBeDefined();
+  const asked = processes.find((argv) => argv[1]?.endsWith("desk-prepare.py"));
+  expect(asked?.slice(2)).toEqual(["loop:T-1"]);
+});
+
+test("a failed background pick says so on its card", async ($, on) => {
+  healthWorld(on, {
+    cardId: "loop:T-2",
+    ref: "T-2",
+    lane: "REPLY",
+    option: "Send it",
+    verb: "do",
+    class: "script",
+    state: "failed",
+    pickedAt: "2026-10-02T09:55:00Z",
+    result: "the send refused the thread: it is closed",
+  });
+  const pane = await loadAndMount($);
+
+  const line =
+    "background pick failed: the send refused the thread: it is closed; pick again or work it in the session";
+  expect((await pane.find({ type: "Text", text: line }))?.text).toBe(line);
 });

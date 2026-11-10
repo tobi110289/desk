@@ -31,6 +31,10 @@ export type DeskCard = {
   /** The verb the card got today, or null while it is open. */
   verb: string | null;
   prepared: PreparedBrief | null;
+  /** Why the pane cannot work the card ("no brief yet", "brief failed: …", "no options"), or "" when it can. */
+  health: string;
+  /** The newest background pick's line: a failure or bounce with its result, or "running since HH:MMZ"; else "". */
+  pickLine: string;
 };
 
 export type DeskView = {
@@ -63,6 +67,7 @@ export type DeskDecision = {
   kind: "script" | "model" | "session";
   state: "queued" | "running" | "done" | "bounced" | "failed";
   pickedAt: string;
+  startedAt: string;
   finishedAt: string;
   result: string;
 };

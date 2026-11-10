@@ -12,6 +12,7 @@ import type {
   PlainStats,
   PreparedBrief,
 } from "../types";
+import { healthOf, pickLine, rankWorkable, takesSession } from "./health";
 import { BRIEF_FIELDS, plainWordsProblems } from "./plainWords";
 
 const PANE = "desk";
@@ -511,6 +512,7 @@ const decisionOf = (d: Raw): DeskDecision => ({
     ? text(d.state)
     : "failed") as DeskDecision["state"],
   pickedAt: text(d.pickedAt),
+  startedAt: text(d.startedAt),
   finishedAt: text(d.finishedAt),
   result: text(d.result),
 });
@@ -526,16 +528,27 @@ const toView = (
   const cache = JSON.parse(cardsJson) as Raw;
   const desk = JSON.parse(deskJson) as Raw;
   const log = (desk.log ?? []) as Raw[];
+  const picks = decisions
+    .map(decisionOf)
+    .sort((a, b) => (a.pickedAt < b.pickedAt ? 1 : -1));
 
   const cards = ((cache.cards ?? []) as Raw[]).map((card): DeskCard => {
     const id = text(card.id);
+    const prepared = preparedOf(card, briefs);
+    const failed = briefs[id]?.error;
     const members = ((card.members ?? []) as Raw[]).map(
       (member) =>
         `${text(member.ref)} ${text(member.task)}: ${text(member.status)}`,
     );
 
     return {
-      prepared: preparedOf(card, briefs),
+      prepared,
+      health: healthOf(
+        { id, lane: text(card.lane) },
+        prepared,
+        failed === undefined ? null : text(failed) || String(failed),
+      ),
+      pickLine: pickLine(picks.find((d) => d.cardId === id) ?? null),
       id,
       ref: text(card.ref),
       lane: text(card.lane),
@@ -569,9 +582,7 @@ const toView = (
     due: Object.entries(preflight)
       .filter(([, one]) => one.due === true)
       .map(([name, one]) => `${name} (${text(one.reason)})`),
-    decisions: decisions
-      .map(decisionOf)
-      .sort((a, b) => (a.pickedAt < b.pickedAt ? 1 : -1)),
+    decisions: picks,
     harvestPending,
   };
 };
@@ -619,6 +630,8 @@ let isClosedThisTurn = false;
 let gatherRun: Promise<void> | null = null;
 // The desk-prepare.py pass in flight.
 let prepareRun: Promise<void> | null = null;
+let prepareFull = false;
+let prepareIsPartial = false;
 // The desk-execute.py drain in flight, and whether a pick landed while it ran.
 let executeRun: Promise<void> | null = null;
 let executeAgain = false;
@@ -777,7 +790,20 @@ async function refresh($: EngineInterface, isForced = false) {
       harvestPending,
     );
     stamp = next;
+    // The health check: a card the pane cannot work never leads, and the gather's own top card, when it is such a
+    // card and a prepare pass can fix it, gets one at once.
+    const live = (await read($, brief))?.cardId ?? null;
+    const top = fresh.cards.find((card) => card.verb === null);
+    fresh.cards = rankWorkable(fresh.cards, live);
     await update($, view, () => fresh);
+    if (
+      top !== undefined &&
+      top.health !== "" &&
+      top.id !== live &&
+      !takesSession(top)
+    ) {
+      askPrepare($, top.id, time);
+    }
     // A card that left the desk, or got its verb elsewhere, is no longer worked and keeps no brief.
     const isOpen = (id: string | null | undefined) =>
       fresh.cards.some((card) => card.id === id && card.verb === null);
@@ -965,15 +991,18 @@ async function runGather($: EngineInterface, when: "due" | "now") {
 // After every gather: desk-prepare.py drafts the top cards in the background (one headless sonnet run per card,
 // scripts collect the raw material), so `w` shows the options at once. Fire and forget; the briefs land in
 // briefs/<id>.json and refresh() picks them up. A child never starts children (DESK_PREPARE=1 is set inside).
-function prepare($: EngineInterface) {
+function prepare($: EngineInterface, ids: string[] = []) {
   if (prepareRun !== null) {
+    // a full pass asked while a one-card pass runs follows it, so the top five are not skipped
+    prepareFull ||= ids.length === 0 && prepareIsPartial;
     return;
   }
+  prepareIsPartial = ids.length > 0;
   prepareRun = (async () => {
     const home = (await $.env.get("HOME")) ?? "";
     const key = await $.env.get("PLAIN_API_KEY");
     await $.process.run(
-      ["python3", `${home}/orbit-scratch/desk/desk-prepare.py`],
+      ["python3", `${home}/orbit-scratch/desk/desk-prepare.py`, ...ids],
       { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 6 * 60_000 },
     );
     await refresh($, true);
@@ -989,7 +1018,26 @@ function prepare($: EngineInterface) {
     })
     .finally(() => {
       prepareRun = null;
+      if (prepareFull) {
+        prepareFull = false;
+        prepare($);
+      }
     });
+}
+
+// The gather's top card has no workable brief: one prepare pass for that card alone, at most every two minutes per
+// card. desk-prepare.py keeps its own back-off after a failed brief, so a card that keeps failing is not hammered.
+const PREPARE_ASK_MS = 2 * 60_000;
+let lastAsk = { id: "", at: 0 };
+function askPrepare($: EngineInterface, id: string, now: number) {
+  if (prepareRun !== null) {
+    return;
+  }
+  if (lastAsk.id === id && now - lastAsk.at < PREPARE_ASK_MS) {
+    return;
+  }
+  lastAsk = { id, at: now };
+  prepare($, [id]);
 }
 
 // 2026-10-23: a pick on a prepared card is a decision record, not a prompt. desk-execute.py drains the script-class
@@ -1345,6 +1393,8 @@ async function showCard($: EngineInterface, input: Raw): Promise<string> {
     options,
     at,
   }));
+  // options on the card make it workable: it may lead again
+  await update($, view, (d) => ({ ...d, cards: rankWorkable(d.cards, id) }));
   await update($, picked, () => id);
   await update($, working, () => id);
   void $.ui
@@ -2065,6 +2115,19 @@ export const register: Register = (on) => {
                 {card.act}
               </Text>
             </Box>
+            {/* the health check: why the pane has no options for this card, and what a failed pick left behind */}
+            {card.verb === null && card.health !== "" && current === null && (
+              <Text key="health" wrap="wrap" color={C("yellow")}>
+                {`not ready: ${card.health} · w works it in the session`}
+              </Text>
+            )}
+            {card.verb === null &&
+              card.pickLine !== "" &&
+              pendingOf(desk, card.id) === null && (
+                <Text key="pick-line" wrap="wrap" color={C("red")}>
+                  {card.pickLine}
+                </Text>
+              )}
             {card.prepared !== null && current === null && (
               <Box marginTop={1} flexDirection="column">
                 <Text dimColor>
@@ -2127,7 +2190,7 @@ export const register: Register = (on) => {
                     {pending.kind === "session"
                       ? " · needs you: press w to hand it to Claude"
                       : pending.state === "running"
-                        ? " · running in the background"
+                        ? ` · ${card.pickLine || "running"} in the background`
                         : " · queued for the background"}
                   </Text>
                 </Box>
@@ -2370,6 +2433,9 @@ export const register: Register = (on) => {
                     <Text color={C("green")}>✓ {one.verb} · </Text>
                   ) : (
                     <Text dimColor>{one.mins}m · </Text>
+                  )}
+                  {!isDone && one.health !== "" && one.id !== shown?.cardId && (
+                    <Text color={C("yellow")}>{one.health} · </Text>
                   )}
                   {stats?.titles[one.ref] ?? (one.note || one.act)}
                 </Text>
