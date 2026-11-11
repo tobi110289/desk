@@ -429,6 +429,17 @@ const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
  * the file desk/.auto ("on …" / "off …"), so every session and the pane in each of them see the same state.
  */
 const isAuto = atom({ plugin: "desk", key: "isAuto" } as const, false);
+// 2026-11-11: the switch file names the one session that owns auto mode. Before, every session read "on" and sent
+// itself the next queued pick at the end of its own turn, so picks landed in sessions that had nothing to do with the desk.
+const isAutoElsewhere = atom(
+  { plugin: "desk", key: "isAutoElsewhere" } as const,
+  false,
+);
+let ownId: string | null = null;
+async function sessionId($: EngineInterface) {
+  ownId ??= await $.session.id().catch(() => null);
+  return ownId;
+}
 /** The option label the user pressed per card, until its close: desk-close.py scores it against the prepared brief. */
 const picks = atom({ plugin: "desk", key: "picks" } as const, {});
 // 2026-11-11: a pressed option shows as picked at once, while desk-decide.py still records it (up to 20 s).
@@ -760,10 +771,20 @@ async function refresh($: EngineInterface, isForced = false) {
       ...decisionFiles.map((entry) => entry.mtimeMs),
     );
     // the auto switch follows the file, so a toggle in another session shows here within a poll
-    const autoOn = (
+    // "on <time> <session id>": auto runs only in the session the file names; a file without an id counts as off
+    const [autoState, , autoOwner = ""] = (
       await $.fs.read(`${home}/orbit-scratch/desk/.auto`).catch(() => "")
-    ).startsWith("on");
-    await update($, isAuto, () => autoOn);
+    )
+      .trim()
+      .split(/\s+/);
+    const me = await sessionId($);
+    const autoHere = autoState === "on" && me !== null && autoOwner === me;
+    await update($, isAuto, () => autoHere);
+    await update(
+      $,
+      isAutoElsewhere,
+      () => autoState === "on" && autoOwner !== "" && !autoHere,
+    );
     const harvestPath = `${home}/orbit-scratch/desk/harvest.json`;
     const harvestAt = await $.fs.stat(harvestPath).then(
       (stat) => stat.mtimeMs,
@@ -1157,7 +1178,7 @@ async function autoNext($: EngineInterface) {
   if (!(await read($, isAuto))) {
     return;
   }
-  // the switch is one file for all sessions, so only the session with the pane takes the queue
+  // isAuto is true only in the session the switch file names, and that session takes the queue only with its pane
   if (!(await isPaneOpen($))) {
     return;
   }
@@ -1186,11 +1207,21 @@ async function autoNext($: EngineInterface) {
 async function setAuto($: EngineInterface, on: boolean) {
   const home = (await $.env.get("HOME")) ?? "";
   const path = `${home}/orbit-scratch/desk/.auto`;
-  // the file holds "on <time>" or "off <time>": every session reads the same switch
+  // the file holds "on <time> <session id>" or "off <time>": "on" names this session as the only one that runs auto
+  const me = await sessionId($);
+  if (on && me === null) {
+    return;
+  }
   await $.fs
-    .write(path, `${on ? "on" : "off"} ${new Date().toISOString()}`)
+    .write(
+      path,
+      on
+        ? `on ${new Date().toISOString()} ${me}`
+        : `off ${new Date().toISOString()}`,
+    )
     .catch(() => undefined);
   await update($, isAuto, () => on);
+  await update($, isAutoElsewhere, () => false);
   if (on) {
     await autoNext($);
   }
@@ -2081,6 +2112,7 @@ export const register: Register = (on) => {
     const liveFeed = await read($, feed);
     const busy = await read($, isBusy);
     const auto = await read($, isAuto);
+    const autoElsewhere = await read($, isAutoElsewhere);
     const beat = wave(await read($, tick));
     const stats = await read($, plain);
     const isOpen = await read($, isPlainOpen);
@@ -2160,7 +2192,13 @@ export const register: Register = (on) => {
               plain
               hotkey="t"
               dimColor={!auto}
-              label={auto ? "auto on" : "auto off"}
+              label={
+                auto
+                  ? "auto on"
+                  : autoElsewhere
+                    ? "auto runs in another session · t moves it here"
+                    : "auto off"
+              }
               onPress={() => void setAuto($, !auto)}
             />
             {/* 2026-11-10: what the cards taught, walked one line at a time when the person presses m */}

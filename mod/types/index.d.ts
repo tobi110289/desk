@@ -210,6 +210,8 @@ declare module "claude-code" {
       isPaneHidden: boolean;
       /** Auto mode (`t`, file desk/.auto): the session takes queued session-class picks by itself when idle. */
       isAuto: boolean;
+      /** Auto mode is on, and the switch file names another session as its owner. */
+      isAutoElsewhere: boolean;
       /** null until checked; then whether the session root lies inside a desk project (config `projects` or `repo`). */
       isHome: boolean | null;
       plain: PlainStats | null;

@@ -435,7 +435,7 @@ test("without liveEvents the pane never polls the feed", async ($, on) => {
 
 // The health check (2026-11-10): eleven times the card on top could not be worked from the pane. A card with no brief
 // never leads, and a background pick that failed says so on the card.
-const healthWorld = (on: On, decision?: Record<string, unknown>) => {
+const healthWorld = (on: On, decision?: Record<string, unknown>, auto = "") => {
   const cards = JSON.stringify({
     generatedAt: "2026-10-02T10:04:51+00:00",
     cards: [
@@ -474,6 +474,7 @@ const healthWorld = (on: On, decision?: Record<string, unknown>) => {
   mock.env(on, { HOME: "/home/t" });
   mock.clock(on, { now: Date.parse("2026-10-02T10:00:00Z") });
   on("session.root", () => ({ value: "/home/t/app" }));
+  on("session.id", () => ({ value: "this-session" }));
   on("fs.stat", () => ({
     value: { kind: "file" as const, size: 1, mtimeMs: 1, isLink: false },
   }));
@@ -496,13 +497,15 @@ const healthWorld = (on: On, decision?: Record<string, unknown>) => {
       ? cards
       : e.path.endsWith("config.json")
         ? CONFIG
-        : e.path.endsWith("/briefs/loop_T-2.json")
-          ? prepared
-          : e.path.endsWith("/decisions/loop_T-2.json")
-            ? JSON.stringify(decision)
-            : e.path.endsWith("desk.json")
-              ? DESK
-              : "",
+        : e.path.endsWith("/.auto")
+          ? auto
+          : e.path.endsWith("/briefs/loop_T-2.json")
+            ? prepared
+            : e.path.endsWith("/decisions/loop_T-2.json")
+              ? JSON.stringify(decision)
+              : e.path.endsWith("desk.json")
+                ? DESK
+                : "",
   }));
   on("fs.write", () => ({ value: undefined as never }));
   on("tool.call", () => ({ result: {} as never }));
@@ -577,6 +580,31 @@ test("a failed background pick says so on its card", async ($, on) => {
   const line =
     "background pick failed: the send refused the thread: it is closed; pick again or work it in the session";
   expect((await pane.find({ type: "Text", text: line }))?.text).toBe(line);
+});
+
+// 2026-11-11: the switch was one file that every session read as "on", and each session sent itself the next queued
+// pick at the end of its own turn. Three sessions with other work got desk cards. The file now names one session.
+test("auto mode belongs to the session the switch file names", async ($, on) => {
+  healthWorld(on, undefined, "on 2026-10-02T09:00:00Z another-session");
+  const pane = await loadAndMount($);
+
+  expect((await pane.find({ key: "auto" }))?.text).toContain(
+    "auto runs in another session",
+  );
+});
+
+test("the session the switch file names shows auto on", async ($, on) => {
+  healthWorld(on, undefined, "on 2026-10-02T09:00:00Z this-session");
+  const pane = await loadAndMount($);
+
+  expect((await pane.find({ key: "auto" }))?.text).toBe("auto on");
+});
+
+test("a switch file with no session name counts as off", async ($, on) => {
+  healthWorld(on, undefined, "on 2026-10-02T09:00:00Z");
+  const pane = await loadAndMount($);
+
+  expect((await pane.find({ key: "auto" }))?.text).toBe("auto off");
 });
 
 test("a card's title drops the reopened stamp and the readiness tail", () => {
