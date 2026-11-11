@@ -1157,6 +1157,10 @@ async function autoNext($: EngineInterface) {
   if (!(await read($, isAuto))) {
     return;
   }
+  // the switch is one file for all sessions, so only the session with the pane takes the queue
+  if (!(await isPaneOpen($))) {
+    return;
+  }
   if (
     (await read($, isBusy)) ||
     (await read($, working)) !== null ||
