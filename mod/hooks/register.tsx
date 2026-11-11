@@ -431,6 +431,8 @@ const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
 const isAuto = atom({ plugin: "desk", key: "isAuto" } as const, false);
 /** The option label the user pressed per card, until its close: desk-close.py scores it against the prepared brief. */
 const picks = atom({ plugin: "desk", key: "picks" } as const, {});
+// 2026-11-11: a pressed option shows as picked at once, while desk-decide.py still records it (up to 20 s).
+const recording = atom({ plugin: "desk", key: "recording" } as const, {});
 const brief = atom({ plugin: "desk", key: "brief" } as const, null);
 const summaries = atom({ plugin: "desk", key: "summaries" } as const, {});
 
@@ -1197,18 +1199,32 @@ async function setAuto($: EngineInterface, on: boolean) {
  */
 async function decide($: EngineInterface, card: DeskCard, option: DeskOption) {
   const home = (await $.env.get("HOME")) ?? "";
-  const ran = await $.process.run(
-    [
-      "python3",
-      `${home}/orbit-scratch/desk/desk-decide.py`,
-      card.id,
-      option.label,
-    ],
-    { timeoutMs: 20_000 },
-  );
+  const settle = () =>
+    update(
+      $,
+      recording,
+      ({ [card.id]: _gone, ...rest }: Record<string, string>) => rest,
+    );
+  await update($, recording, (r) => ({ ...r, [card.id]: option.label }));
+  const ran = await $.process
+    .run(
+      [
+        "python3",
+        `${home}/orbit-scratch/desk/desk-decide.py`,
+        card.id,
+        option.label,
+      ],
+      { timeoutMs: 20_000 },
+    )
+    .catch(() => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: "desk-decide did not run",
+    }));
   const kind = ran.stdout.trim();
   if (ran.exitCode === 0) {
     await refresh($, true);
+    await settle();
     if (kind === "script" || kind === "model") {
       execute($);
     } else {
@@ -1216,6 +1232,7 @@ async function decide($: EngineInterface, card: DeskCard, option: DeskOption) {
     }
     return;
   }
+  await settle();
   if (ran.exitCode === 3) {
     await handToSession($, card.id, option);
     return;
@@ -2071,6 +2088,22 @@ export const register: Register = (on) => {
     const current = card && shown?.cardId === card.id ? shown : null;
     const summary = card ? (await read($, summaries))[card.id] : undefined;
     const open = desk.cards.filter((one) => one.verb === null).length;
+    // 2026-11-11: a card shows one state. Open: the question and its options. Picked: the pick and where it runs.
+    // In the session: what Claude works on. The options never stay up beside a pick or a running session.
+    const workingId = (await read($, working)) as string | null;
+    const workingCard = desk.cards.find((one) => one.id === workingId);
+    const workingName =
+      workingCard === undefined
+        ? ""
+        : workingCard.lane === "TASK"
+          ? "a task"
+          : workingCard.ref;
+    const chosen = (await read($, picks)) as Record<string, string>;
+    const beingRecorded = card
+      ? ((await read($, recording)) as Record<string, string>)[card.id]
+      : undefined;
+    const inSession =
+      card !== undefined && workingId === card.id && current === null;
     // The engine's own frame has one color; this border is the one the eye finds when the desk holds the keyboard.
     const focused = e.props.isFocused;
     const width = Math.max(20, e.props.bodyColumns - 4);
@@ -2108,7 +2141,10 @@ export const register: Register = (on) => {
           <Box gap={1}>
             {busy && (
               <Text bold color={C("yellow")}>
-                <Text dimColor={beat.isDim}>{beat.frame}</Text> CLAUDE WORKING
+                <Text dimColor={beat.isDim}>{beat.frame}</Text>{" "}
+                {workingName === ""
+                  ? "CLAUDE WORKING"
+                  : `CLAUDE WORKS ${workingName}`}
               </Text>
             )}
             <Text dimColor>
@@ -2172,6 +2208,9 @@ export const register: Register = (on) => {
         {card &&
           (() => {
             const pending = pendingOf(desk, card.id);
+            // settled: the person chose already, so the question, its options and the old result leave the card
+            const settled =
+              pending !== null || inSession || beingRecorded !== undefined;
             const hasBrief = card.prepared !== null || current !== null;
             const reopened = reopenedOf(card.note);
             // A brief tells the story; without one the status is all the card has, so it shows.
@@ -2205,13 +2244,11 @@ export const register: Register = (on) => {
                       {`not ready: ${card.health} · w works it in the session`}
                     </Text>
                   )}
-                {card.verb === null &&
-                  card.pickLine !== "" &&
-                  pending === null && (
-                    <Text key="pick-line" wrap="wrap" color={C("red")}>
-                      {card.pickLine}
-                    </Text>
-                  )}
+                {card.verb === null && card.pickLine !== "" && !settled && (
+                  <Text key="pick-line" wrap="wrap" color={C("red")}>
+                    {card.pickLine}
+                  </Text>
+                )}
                 {!hasBrief && (
                   <Box marginTop={1} flexDirection="column">
                     <Text dimColor>DO</Text>
@@ -2226,11 +2263,8 @@ export const register: Register = (on) => {
                       [
                         ["WHY", card.prepared.why],
                         // A pick is taken: the question and its consequence are history, the pick line follows.
-                        [
-                          "DECIDE",
-                          pending === null ? card.prepared.decide : "",
-                        ],
-                        ["THEN", pending === null ? card.prepared.then : ""],
+                        ["DECIDE", settled ? "" : card.prepared.decide],
+                        ["THEN", settled ? "" : card.prepared.then],
                       ] as const
                     )
                       .filter(([, line]) => Boolean(line))
@@ -2242,13 +2276,13 @@ export const register: Register = (on) => {
                           {line}
                         </Text>
                       ))}
-                    {pending === null && (
+                    {!settled && (
                       <Text wrap="wrap" color={C("yellow")}>
                         <Text dimColor>{"FACT".padEnd(7)}</Text>
                         {card.prepared.fact}
                       </Text>
                     )}
-                    {pending === null && card.prepared.draft !== "" && (
+                    {!settled && card.prepared.draft !== "" && (
                       <Box marginTop={1} flexDirection="column">
                         <Text dimColor>DRAFT</Text>
                         <Text wrap="wrap">
@@ -2259,10 +2293,11 @@ export const register: Register = (on) => {
                       </Box>
                     )}
                     {/* 2026-10-23: the brief's options are the pane's; a press records the pick without the session */}
-                    {card.verb === null && pending === null && (
+                    {card.verb === null && !settled && (
                       <Box marginTop={1} flexDirection="column">
                         <Text dimColor>
-                          PICK · runs in the background · prepared{" "}
+                          {card.pickLine !== "" ? "PICK AGAIN" : "PICK"} · runs
+                          in the background · prepared{" "}
                           {berlinTime(card.prepared.at)}
                           {card.prepared.openChecks.length > 0
                             ? ` · ${card.prepared.openChecks.length} checks open`
@@ -2313,7 +2348,32 @@ export const register: Register = (on) => {
                     )}
                   </Box>
                 )}
-                {pending !== null && (
+                {beingRecorded !== undefined &&
+                  pending === null &&
+                  !inSession && (
+                    <Box key="recording" marginTop={1} flexDirection="column">
+                      <Text dimColor>PICKED</Text>
+                      <Text wrap="wrap" color={C("cyan")}>
+                        {STATE_GLYPH.queued} {beingRecorded} · recording your
+                        pick
+                      </Text>
+                    </Box>
+                  )}
+                {inSession && card.verb === null && (
+                  <Box key="in-session" marginTop={1} flexDirection="column">
+                    <Text dimColor>IN THE SESSION</Text>
+                    <Text wrap="wrap" color={C("yellow")}>
+                      {busy ? `${beat.frame} ` : ""}
+                      {chosen[card.id] !== undefined
+                        ? `You chose: ${chosen[card.id]}. `
+                        : ""}
+                      {busy
+                        ? "Claude works this card now. A question from Claude shows here with new options."
+                        : "Claude stopped without a question. Answer in the prompt, press w to continue, or leave the card on the band."}
+                    </Text>
+                  </Box>
+                )}
+                {pending !== null && !inSession && (
                   <Box marginTop={1} flexDirection="column">
                     <Text dimColor>PICKED</Text>
                     <Text wrap="wrap" color={C("cyan")}>
@@ -2422,12 +2482,17 @@ export const register: Register = (on) => {
                       {`closed (${card.verb}) · the next gather drops it · pick another row (ctrl+↑/↓)`}
                     </Text>
                   )}
-                  {busy && card.verb === null && current === null && (
-                    <Text color={C("yellow")}>
-                      Claude is working, wait for the turn to end before the
-                      next card
-                    </Text>
-                  )}
+                  {busy &&
+                    card.verb === null &&
+                    current === null &&
+                    !inSession && (
+                      <Text dimColor>
+                        {`Claude works ${workingName === "" ? "another task" : workingName} · `}
+                        {card.prepared !== null && !settled
+                          ? "a pick here still runs in the background"
+                          : "w is free when the turn ends"}
+                      </Text>
+                    )}
                   {!busy && card.verb === null && current === null && (
                     <Button
                       key="work"
@@ -2436,7 +2501,9 @@ export const register: Register = (on) => {
                       label={
                         pendingOf(desk, card.id)?.kind === "session"
                           ? "Hand the pick to Claude"
-                          : "Work this card"
+                          : inSession
+                            ? "Continue this card"
+                            : "Work this card"
                       }
                       onPress={async () => {
                         const pending = pendingOf(desk, card.id);
@@ -2555,6 +2622,9 @@ export const register: Register = (on) => {
                   {/* ◆ = a prepared brief waits for this card; ◌ ◍ = a pick waits or runs; · = not prepared */}
                   {(() => {
                     const pending = pendingOf(desk, one.id);
+                    if (one.id === workingId && !isDone) {
+                      return <Text color={C("yellow")}>▶</Text>;
+                    }
                     if (pending !== null && !isDone) {
                       return (
                         <Text color={C("cyan")}>

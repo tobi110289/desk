@@ -195,6 +195,8 @@ declare module "claude-code" {
       captioned: string[];
       /** The option label the user pressed per card id, until desk_close hands it to desk-close.py as --pick. */
       picks: Record<string, string>;
+      /** A pressed option per card while desk-decide.py still records it; the pane shows it as picked at once. */
+      recording: Record<string, string>;
       isPlainOpen: boolean;
       /** False while the open-cards list is folded to its header line (`l`). */
       isListOpen: boolean;
