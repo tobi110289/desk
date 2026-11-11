@@ -41,6 +41,9 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+# Same rule as desk-prepare.py: what a run may queue for the memory harvest (walk of 2026-11-11).
+LEARNED_RULE = "Queue a line only when it is ONE lasting fact about the tenant or a person there: who a person is (role, account, language, address form, test tenant), who owns what, how the tenant works day to day, a standing wish. One fact per line: never join it to a state, an incident or a product behaviour. Never queue: a state with a date on it (a release, fix or deploy state, a staging or production read 'as of', an app version, a thread's assignee or counter, a meeting), product behaviour or a defect that holds for every tenant, the contents of configuration (tariff rules, template wording, profile settings, filters), the mood or a dispute of one day, a fact the memory block already holds, a line whose tenant is unknown. Each line ends with its source and a confidence in parentheses. Usually empty."
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 import deskanchor  # noqa: E402
@@ -66,7 +69,7 @@ VERDICT = {
         'result': {'type': 'string', 'description': 'one plain sentence for the pane: what happened, or why nothing did (under 160 characters, no paths, ids or code words)'},
         'note': {'type': 'string', 'description': 'the close note for the desk log: what was done, with the identifiers the log may carry (PR numbers, terminal or workspace names, times); under 300 characters'},
         'caption': {'type': 'string', 'description': "the loop caption under 50 characters when the lane recipe names one (e.g. 'rework sent 14:02Z; agent on HORST round'); empty otherwise"},
-        'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': 'facts about the tenant or requester the memory lacked, one line each with its source; usually empty'},
+        'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': LEARNED_RULE},
     },
     'required': ['done', 'result', 'note', 'caption', 'learned'],
 }

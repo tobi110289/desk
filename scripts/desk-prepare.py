@@ -42,6 +42,9 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+# What a card may queue for the memory harvest. From the walk of 2026-11-11: 15 of 60 queued lines were stored.
+LEARNED_RULE = "Queue a line only when it is ONE lasting fact about the tenant or a person there: who a person is (role, account, language, address form, test tenant), who owns what, how the tenant works day to day, a standing wish. One fact per line: never join it to a state, an incident or a product behaviour. Never queue: a state with a date on it (a release, fix or deploy state, a staging or production read 'as of', an app version, a thread's assignee or counter, a meeting), product behaviour or a defect that holds for every tenant, the contents of configuration (tariff rules, template wording, profile settings, filters), the mood or a dispute of one day, a fact the memory block already holds, a line whose tenant is unknown. Each line ends with its source and a confidence in parentheses. Usually empty."
+
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import deskanchor  # noqa: E402
 
@@ -231,7 +234,7 @@ SCHEMA = {
         'deferTrigger': {'type': 'string', 'description': "when a Defer is among the sensible options: the one machine-checkable trigger it would use (a date YYYY-MM-DD, 'customer replies', 'manual:<person> answers …', 'deployed:<env>:<pr>', 'merged:<pr>'); empty when no defer makes sense. Never 'later'."},
         'deferAct': {'type': 'string', 'description': 'what to do when that trigger fires, one imperative sentence; empty when deferTrigger is empty'},
         'threadAfter': {'type': 'string', 'enum': ['done', 'waiting', 'leave'], 'description': "the Plain thread's status once the recommended reply or close has happened: done (nothing owed, or only the customer's feedback awaited), waiting (the customer's answer feeds a change we still owe), leave (we still owe work the reply only reports on, or a teammate holds the thread)"},
-        'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': 'facts about the tenant or the requester that the memory block lacks and the material shows (a role, an address form or greeting habit, who owns a config, a rollout state, a recurring theme): one plain line each, ending with its source and a confidence in parentheses; usually empty'},
+        'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': LEARNED_RULE},
     },
     'required': ['why', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady', 'threadAfter'],
 }
@@ -496,7 +499,7 @@ Write every field in English and speak to the person as "you". Only customer tex
 - `options`: EVERY label of the menu below, verbatim, best first. Each carries its own `decide` (one yes/no question for exactly that option, never "A or B?") and `then` (what that option sets in motion, and what is at stake if nothing happens). The desk picks which option leads and shows that option's question, so each pair must stand alone.
 - `resolved`: true when the material shows the card is already settled (reply sent and nothing else owed, PR merged, promise kept). Then say so in `fact` and leave `draft` empty.
 - `deferTrigger` and `deferAct`: the one trigger a Defer would wait on (a date YYYY-MM-DD, "customer replies", "manual:<person> answers …", "deployed:<env>:<pr>", "merged:<pr>") and the act when it fires. Empty when no defer makes sense. Never "later".
-- `learned`: what the material shows about the tenant or the requester that the memory block lacks, one line each with source and confidence in parentheses. Usually empty.{lane_rules}
+- `learned`: {LEARNED_RULE}{lane_rules}
 
 ## Plain words
 The person reads `why`, `fact`, `draft`, `decide` and `then` on a small pane without opening any file, often at the end of a long day. Never in those fields: the card's id or a task slug, the `seen` number as a number of views, file paths, function or variable names, commit hashes, entity ids, status enum values, ticket folder slugs, backticked code. PR numbers, thread refs, ticket ids, dates and amounts may stay. `checks` and `openChecks` are for the agent and may carry identifiers.

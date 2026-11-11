@@ -45,14 +45,21 @@ def save(d):
     os.replace(tmp, PATH)
 
 
+def _norm(line):
+    return ' '.join((line or '').lower().split())
+
+
 def add(card_id, lines, ref='', tenant='', customer=''):
     d = load()
-    have = {(i['cardId'], i['line']) for i in d['items']}
+    # 2026-11-11: a line is known by its text, whichever card found it and whether it was asked or not, so a fact
+    # that two cards learn, or one the person already skipped, is not asked again.
+    have = {_norm(i['line']) for i in d['items']}
     n = 0
     for line in lines:
         line = (line or '').strip()
-        if not line or (card_id, line) in have:
+        if not line or _norm(line) in have:
             continue
+        have.add(_norm(line))
         d['items'].append({'cardId': card_id, 'ref': ref, 'tenant': tenant, 'customer': customer, 'line': line,
                            'addedAt': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), 'asked': False})
         n += 1
