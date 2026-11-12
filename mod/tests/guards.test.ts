@@ -607,6 +607,22 @@ test("a switch file with no session name counts as off", async ($, on) => {
   expect((await pane.find({ key: "auto" }))?.text).toBe("auto off");
 });
 
+test("r reads every source afresh and ranks again", async ($, on) => {
+  const processes = healthWorld(on);
+  on("ui.panes", () => ({ value: [{ id: "desk" }] as never }));
+  const pane = await loadAndMount($);
+  processes.length = 0;
+
+  await pane.press({ key: "refresh" });
+  await settle();
+
+  const gathered = processes.find((argv) => argv[1]?.endsWith("/desk.py"));
+  expect(gathered?.[2]).toBe("--fresh");
+  expect(processes.some((argv) => argv[1]?.endsWith("plain-stats.py"))).toBe(
+    true,
+  );
+});
+
 test("a card's title drops the reopened stamp and the readiness tail", () => {
   const card = {
     lane: "FAST",

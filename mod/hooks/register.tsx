@@ -2187,6 +2187,25 @@ export const register: Register = (on) => {
               {isRunning ? "ranking… " : ""}
               {berlinTime(desk.generatedAt)}
             </Text>
+            {/* 2026-11-12: r reads every source afresh now (new Plain threads included) and ranks again. A card in
+                work keeps its row, so the press waits for that card. */}
+            <Button
+              key="refresh"
+              plain
+              hotkey="r"
+              dimColor={isRunning || workingId !== null || shown !== null}
+              label={
+                isRunning
+                  ? "refreshing…"
+                  : workingId !== null || shown !== null
+                    ? "refresh after this card"
+                    : "refresh"
+              }
+              onPress={() => {
+                void gather($, "now");
+                void pollPlain($).catch(() => undefined);
+              }}
+            />
             <Button
               key="auto"
               plain
