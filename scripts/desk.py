@@ -218,6 +218,11 @@ except Exception as _e:
     memory=None; MEMORY={'ok':False,'head':'?','reason':str(_e)[:80]}
 
 IMPACT=deskevent.IMPACT
+def level(lvl,title=''):
+    # 2026-11-12: two threads titled "P0: ..." had no impact_level field yet and ranked as P2, below a P2 of the same day
+    if lvl in IMPACT: return lvl
+    m=re.match(r'\s*\[?(P[0-2])\b',title or '')
+    return m.group(1) if m else 'P2'
 def impact_of(ref):
     r=byref.get(ref)
     if not r: return 'P2',2
@@ -1120,7 +1125,7 @@ def fast_thread_cards(threads,prefix):
     for th in threads or []:
         ref=th['ref']
         if ref in on_desk or ref in state: continue   # a loop entry means an agent, HORST or a release owns it (or a gap/loop card already exists)
-        f=th['fields']; rd=f.get('agent_readiness') or 'needs-triage'; lvl=f.get('impact_level') if f.get('impact_level') in IMPACT else 'P2'
+        f=th['fields']; rd=f.get('agent_readiness') or 'needs-triage'; lvl=level(f.get('impact_level'),th.get('title'))
         t=state.get(ref,{}); r=byref.get(ref) or {}
         age=age_days(th['newestAt']) if th['newestAt'] else 0
         who='customer' if th['newestActor']=='CustomerActor' else ('nobody' if rd=='needs-info' else 'customer')
@@ -1152,7 +1157,7 @@ def unanswered_cards(threads):
         ref=th['ref']; since=th.get('waitSince')
         if not since or f'today:{ref}' in have: continue
         if TODAY_BERLIN not in (berlin_day(th['createdAt']),berlin_day(th['customerAt'])): continue
-        f=th['fields']; lvl=f.get('impact_level') if f.get('impact_level') in IMPACT else 'P2'
+        f=th['fields']; lvl=level(f.get('impact_level'),th.get('title'))
         hm=parse_iso(since).astimezone(datetime.timezone.utc).strftime('%H:%MZ')
         facts=[f"Plain {th.get('status') or 'TODO'}",f"customer wrote {th['customerAt'][:10]}"]
         if th.get('createdAt'): facts.append(f"opened {parse_iso(th['createdAt']).astimezone(BERLIN).strftime('%Y-%m-%d %H:%M')} Berlin")
@@ -1220,14 +1225,14 @@ try:
             if SCOPE and not in_scope({'id':f'owe:{ref}','ref':ref,'thread':tid}): continue
             age=age_days((_date or today)+'T00:00:00Z') if re.match(r'\d{4}-\d{2}-\d{2}$',_date or '') else 0
             if age<minage: _cov.explain(ref,f'needs-info, customer silent {age}d (card from day {minage})'); continue
-            lvl=lvl if lvl in IMPACT else 'P2'
+            lvl=level(lvl,title)
             # E = bot stalled (Tobias 2026-10-12): the triage pass ended needs-triage, so nobody holds the thread; the desk claims it for local triage
             why={'D':'ready-for-human, nobody listed it','E':'bot stalled (needs-triage), claim it here','J':'never swept','F':'needs-info, customer silent'}[bucket]
             add({'id':f'owe:{ref}','ref':ref,'lane':'FAST','mins':10,'impact':lvl,'age':age,'waits':'customer',
                  'pr':None,'task':None,'thread':tid,'url':url,
                  'status':f"{why}: {st[:50]}",'note':title[:200],'since':f"{bucket}:{st}",'activityAt':((byref.get(ref) or {}).get('fingerprint') or {}).get('newestAt'),
                  'act':f"{ref} ({title[:60]}): {why}. Claim + validate, draft the reply, or hand it to a worker",
-                 'score':base+IMPACT.get(lvl,1)+min(age,10)})
+                 'score':base+IMPACT.get(lvl,1)+min(age,10)+(100 if lvl=='P0' else 0)})   # a P0 leads its group
             _carded.add(ref)
 except Exception as _e:
     failed_sources.append(('owe source',str(_e)[:160]))

@@ -209,6 +209,31 @@ DRAFTED = ['Send it', 'Edit then send', 'I sent it already', 'Defer', 'Drop']
 # A reported fault goes to a worker; a question gets a short answer the person passes on themselves.
 ANSWER_COLLEAGUE = 'Answer the colleague yourself'
 COLLEAGUE = ['Hand to a worker', ANSWER_COLLEAGUE, 'Defer', 'Drop (unpin)']
+# 2026-11-12 (Tobias: "wir nehmen zu viel auf unsere Schulter"): what gets built is decided by what the request is.
+# A P0 bug is fixed at once as a hotfix. Any other bug goes to a worker, against develop, with a test. A feature
+# request is never built from the desk: it becomes a board ticket and the triage decides.
+HOTFIX = 'Hand to a worker (hotfix)'
+WORKER = 'Hand to a worker'
+TICKET_IT = 'Ticket it in Notion'
+KINDS = ('bug', 'feature', 'question', 'unknown')
+ROUTE_RULE = ('Where the work goes: a P0 bug is a hotfix (branch HOTFIX/<slug> off origin/production, pull request into production). '
+              'Every other bug is a branch off origin/develop with its pull request into develop, never into staging or production, '
+              'and the fix carries a test that fails without it. A feature request is not built: it becomes a board ticket.')
+
+
+def routed(menu, card, f, kind):
+    """The menu after the request's kind is known. Only FAST cards and a colleague's thread carry the worker option."""
+    if WORKER not in menu and not (card.get('lane') == 'FAST' and f['thread']):
+        return menu
+    out = [o for o in menu if o not in (WORKER, HOTFIX, TICKET_IT)]
+    at = next((i for i, o in enumerate(out) if is_exit(o)), len(out))
+    if kind == 'feature':
+        out.insert(at, TICKET_IT)
+    elif kind == 'bug' and card.get('impact') == 'P0':
+        out.insert(0, HOTFIX)   # a P0 does not wait for a validation note
+    elif WORKER in menu:
+        out.insert(menu.index(WORKER) if menu.index(WORKER) <= len(out) else at, WORKER)
+    return out
 
 
 def drafted(lane, so):
@@ -218,7 +243,7 @@ def drafted(lane, so):
 VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'delegate', 'Defer': 'defer', 'Defer until a trigger': 'defer',
          'Drop': 'drop', 'Drop (unpin)': 'drop', 'Nobody to tell (mark done)': 'do', 'Reply with a status': 'delegate',
          'Close the loop (nothing owed)': 'do', 'Hand to a worker / ticket': 'delegate', 'Claim + validate now': 'do', UNATTENDED: 'delegate',
-         'Draft the reply': 'delegate', 'Hand to a worker': 'delegate', 'Hand the rework to its agent': 'delegate',
+         'Draft the reply': 'delegate', 'Hand to a worker': 'delegate', 'Hand to a worker (hotfix)': 'delegate', 'Hand the rework to its agent': 'delegate',
          'Review it now': 'do', ANSWER_COLLEAGUE: 'do', 'Check the examples, then answer': 'do', 'Close the PR': 'drop', 'Go (agent runs it now)': 'do', 'Show me the command first': 'decide',
          'Answer now': 'decide', 'Drop (reply as human: declined)': 'drop', 'Close as read': 'do', 'Reply with a note': 'delegate',
          'Start it now': 'do', 'Hand it to agents': 'delegate', 'Answer': 'decide', 'Drop (accepted risk, recorded)': 'drop',
@@ -241,6 +266,7 @@ SCHEMA = {
         'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence line in the context that backs it'},
         'openChecks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'claims the draft needs that the context does not back; Claude verifies these live before desk_card'},
         'resolved': {'type': 'boolean', 'description': 'true when the context shows the card is already resolved (reply sent, PR merged, line submitted)'},
+        'requestKind': {'type': 'string', 'enum': ['bug', 'feature', 'question', 'unknown'], 'description': 'what the request is: bug (the product does not do what it is built to do), feature (a wish for something the product does not do, or does on purpose in another way), question (how-to, status, data), unknown (no thread, or the material does not say)'},
         'causeOpen': {'type': 'boolean', 'description': 'true when the customer reports a fault or asks why something happened and the material does not establish the cause; then `draft` stays empty'},
         'replyReady': {'type': 'boolean', 'description': 'true when `draft` is customer text the person could send as it stands: every claim in checks or no refutable claim at all, openChecks empty, a reply is the move, no teammate holds the thread'},
         'deferTrigger': {'type': 'string', 'description': "when a Defer is among the sensible options: the one machine-checkable trigger it would use (a date YYYY-MM-DD, 'customer replies', 'manual:<person> answers …', 'deployed:<env>:<pr>', 'merged:<pr>'); empty when no defer makes sense. Never 'later'."},
@@ -248,7 +274,7 @@ SCHEMA = {
         'threadAfter': {'type': 'string', 'enum': ['done', 'waiting', 'leave'], 'description': "the Plain thread's status once the recommended reply or close has happened: done (nothing owed, or only the customer's feedback awaited), waiting (the customer's answer feeds a change we still owe), leave (we still owe work the reply only reports on, or a teammate holds the thread)"},
         'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': LEARNED_RULE},
     },
-    'required': ['why', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'causeOpen', 'replyReady', 'threadAfter'],
+    'required': ['why', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'requestKind', 'causeOpen', 'replyReady', 'threadAfter'],
 }
 log_lock = threading.Lock()
 
@@ -490,6 +516,14 @@ def prompt(card, ctx, f):
     menu = menu_of(card, f)
     if reply and 'Send it' not in menu and not f.get('colleague'):
         menu = ['Send it'] + menu
+    routing = ''
+    if WORKER in menu or (lane == 'FAST' and f['thread']):
+        # every routing option gets its question; brief_of keeps the one that fits `requestKind`
+        menu = menu + [o for o in (WORKER, HOTFIX, TICKET_IT) if o not in menu]
+        routing = f"""
+- `requestKind` decides who builds. The card's `impact` is the priority. {ROUTE_RULE}
+- "{HOTFIX}" is for a P0 bug only, "{WORKER}" for every other bug, "{TICKET_IT}" for a feature request. The desk shows only the one that fits; write `decide` and `then` for all three. `then` of a worker option names the branch target and the test; `then` of the ticket says that nothing gets built until the triage decides.
+- A report that holds a bug and a wish: `requestKind` is "bug" when the bug can be fixed alone, and `then` says that the wish needs a ticket of its own."""
     lane_rules = ''
     if reply:
         lane_rules = """
@@ -513,6 +547,7 @@ def prompt(card, ctx, f):
         lane_rules = '\n- `draft` is the exact command or action. Set `replyReady` false and `threadAfter` "leave".'
     else:
         lane_rules = '\n- `draft` on a task or batch card is at most three numbered lines: each names the thing in product words, says whether it is still true, and ends with the verb. Set `replyReady` false and `threadAfter` "leave".'
+    lane_rules += routing
     return f"""You prepare ONE card of a support desk for the person who runs it. You cannot use tools: everything you may rely on is in this message. Answer with the JSON the schema asks for.
 
 ## What you write
@@ -713,12 +748,17 @@ def brief_of(card, so, f):
     else:
         so = {**so, 'causeOpen': False}
     ready = drafted(lane, so) and not (f['examples'] and not f['validated'])   # the examples come before the answer
-    menu = menu_of(card, f, ready, so['causeOpen'])
+    kind = so.get('requestKind') if so.get('requestKind') in KINDS else 'unknown'
+    menu = routed(menu_of(card, f, ready, so['causeOpen']), card, f, kind)
     wrote = {o.get('label'): o for o in so.get('options') or [] if o.get('label')}
     if so['causeOpen']:
         wrote['Check the examples, then answer'] = {'label': 'Check the examples, then answer', 'decide': CAUSE_DECIDE, 'then': CAUSE_THEN}
     order = [label for label in wrote if label in menu] + [label for label in menu if label not in wrote]
     lead = lead_of(card, f, so, order, ready)
+    if HOTFIX in order:
+        lead = HOTFIX
+    elif TICKET_IT in order and f.get('colleague'):
+        lead = TICKET_IT
     order = pane_order(lead, order)
     options = [{'label': label, 'verb': VERBS.get(label, 'do'),
                 'decide': (wrote.get(label) or {}).get('decide', '').strip(), 'then': (wrote.get(label) or {}).get('then', '').strip()} for label in order]
@@ -729,7 +769,7 @@ def brief_of(card, so, f):
         'why': so.get('why', ''), 'decide': first['decide'] or f"{first['label']}?", 'then': first['then'],
         'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options, 'shown': SHOWN,
         'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),
-        'causeOpen': so['causeOpen'], 'replyReady': ready,
+        'causeOpen': so['causeOpen'], 'replyReady': ready, 'requestKind': kind,
         'deferTrigger': (so.get('deferTrigger') or '').strip(), 'deferAct': (so.get('deferAct') or '').strip(),
         # 2026-11-10: the thread's status after the pick (desk-execute.py thread_after applies it)
         'threadAfter': so.get('threadAfter') if so.get('threadAfter') in ('done', 'waiting', 'leave') else '',

@@ -15,7 +15,7 @@ SEND = {'Send it', 'Reply with a status'}
 SCRIPT = SEND | {'I sent it already', 'Nobody to tell (mark done)', 'Drop', 'Drop (unpin)', 'Drop (accepted risk, recorded)',
                  'Close the loop (nothing owed)', 'Drop the line'}
 DEFER = {'Defer', 'Defer until a trigger', 'Defer until the deploy lands'}
-MODEL = {'Hand to a worker', 'Hand the rework to its agent', 'Hand it to agents', 'Hand to a worker / ticket',
+MODEL = {'Hand to a worker', 'Hand to a worker (hotfix)', 'Hand the rework to its agent', 'Hand it to agents', 'Hand to a worker / ticket',
          'Go (agent runs it now)', 'Close the PR',
          # 2026-11-03: single SEND and TICKET cards. A line goes to its worker's terminal, a ticket file gets its Status:
          # both are Bash work with the lane recipe. Notion moves (push, archive, ticket it) need the Notion MCP: session.

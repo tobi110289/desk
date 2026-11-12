@@ -119,6 +119,25 @@ def test_a_colleague_gets_the_fix_and_no_customer_reply():
     assert dp.menu_of(FAST, dp.facts_of(FAST, m)) == dp.COLLEAGUE
 
 
+def test_the_kind_of_request_decides_who_builds():
+    # 2026-11-12: only a P0 is fixed at once, other bugs go against develop, a wish becomes a ticket
+    labels = lambda b: [o['label'] for o in b['options']]
+    every = ['Draft the reply', dp.WORKER, dp.HOTFIX, dp.TICKET_IT, 'Defer', 'Drop (unpin)']
+    b = brief({**FAST, 'impact': 'P2'}, answer(every, requestKind='bug'), material(validated=True))
+    assert dp.WORKER in labels(b) and dp.HOTFIX not in labels(b) and dp.TICKET_IT not in labels(b), labels(b)
+    b = brief({**FAST, 'impact': 'P0'}, answer(every, requestKind='bug'), material())
+    assert labels(b)[0] == dp.HOTFIX and dp.WORKER not in labels(b), labels(b)
+    b = brief({**FAST, 'impact': 'P0'}, answer(every, requestKind='feature'), material(validated=True))
+    assert dp.TICKET_IT in labels(b) and not {dp.WORKER, dp.HOTFIX} & set(labels(b)), labels(b)
+    # no kind named: the menu stays as it was
+    b = brief({**FAST, 'impact': 'P1'}, answer(['Draft the reply', dp.WORKER, 'Defer']), material(validated=True))
+    assert dp.WORKER in labels(b) and dp.TICKET_IT not in labels(b), labels(b)
+    # a colleague's wish leads with the ticket
+    m = HOLD + 'requester: a colleague (Dana), not a customer\n' + material(validated=True)[len(HOLD):]
+    b = brief(FAST, answer([dp.WORKER, dp.TICKET_IT, dp.ANSWER_COLLEAGUE, 'Defer'], requestKind='feature'), m)
+    assert labels(b)[0] == dp.TICKET_IT and dp.WORKER not in labels(b), labels(b)
+
+
 def test_the_pane_shows_lead_alternative_and_one_way_out():
     b = brief({'id': 'task:x', 'lane': 'TASK'}, answer(['Start it now', 'Drop', 'Defer', 'Hand it to agents']), '')
     assert [o['label'] for o in b['options']] == ['Start it now', 'Hand it to agents', 'Drop', 'Defer'] and b['shown'] == 3

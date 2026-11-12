@@ -417,6 +417,13 @@ Hard rules:
     if entry:
         parts.append('## The agent loop entry for this card (state.json; workspace, host, terminal, phase)\n' + json.dumps(entry, ensure_ascii=False, indent=1)[:4000])
     if label.startswith('Hand'):
+        # 2026-11-12: the option fixes where the work goes; the worker's own default (a hotfix into staging) does not apply
+        parts.append('## Branch and base for the spawn (the desk decides, not the worker)\n' + (
+            'This is a P0 hotfix: BRANCH HOTFIX/<slug>, BASE production. The pull request goes into production.'
+            if 'hotfix' in label else
+            'BRANCH fix/<ref in lower case>-<slug>, BASE develop. The pull request goes into develop, never into staging or production.')
+            + ' Say so in the brief file that travels with the prompt, and add: the fix carries a test that fails without it. '
+              'A feature request is never spawned: done=false, result says it needs a board ticket.')
         parts.append('## How workers are spawned and reached (plain-agent-loop skill, Superset constants)\n' + '\n'.join(_read(LOOP_SKILL, 40000).splitlines()[28:62]))
         parts.append('## spawn-worker.sh and worker-prompt.sh (usage headers)\n' + '\n'.join(_read(f'{LOOP}/spawn-worker.sh', 6000).splitlines()[:30])
                      + '\n\n' + '\n'.join(_read(f'{LOOP}/worker-prompt.sh', 4000).splitlines()[:12]))

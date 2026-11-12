@@ -23,6 +23,10 @@ const HINTS: [RegExp, string][] = [
     "Claude writes and checks a reply here; you send later",
   ],
   [
+    /^Hand to a worker \(hotfix\)$/,
+    "a background agent fixes it against production, now",
+  ],
+  [
     /^Hand (to a worker|it to agents|to an agent|it to a worker)/,
     "a background agent does the work; the card returns with its result",
   ],
