@@ -104,6 +104,21 @@ def test_a_holding_reply_is_dropped_and_the_check_leads():
         assert not dp.HOLDING.search(text), text
 
 
+def test_a_colleague_gets_the_fix_and_no_customer_reply():
+    # 2026-11-12: a colleague reported a fault and the brief drafted a status reply to send as Luna
+    m = HOLD + 'requester: a colleague (Dana), not a customer\n' + material(validated=True)[len(HOLD):]
+    b = brief(FAST, answer(['Hand to a worker', dp.ANSWER_COLLEAGUE, 'Defer', 'Drop (unpin)'], draft='Hi Dana, here is the status.', replyReady=True), m)
+    labels = [o['label'] for o in b['options']]
+    assert labels[0] == 'Hand to a worker' and not b['replyReady'], b
+    assert not {'Send it', 'Edit then send', 'Draft the reply'} & set(labels), labels
+    # a pure question: the model ranks the answer first, and it still is no send
+    b = brief(FAST, answer([dp.ANSWER_COLLEAGUE, 'Hand to a worker', 'Defer'], draft='Ja, seit gestern live.', replyReady=True), m)
+    assert b['options'][0]['label'] == dp.ANSWER_COLLEAGUE and b['options'][0]['verb'] == 'do' and not b['replyReady'], b
+    # no validation run is offered on a colleague's thread, checked or not
+    m = HOLD + 'requester: a colleague (Dana), not a customer\n' + material()[len(HOLD):]
+    assert dp.menu_of(FAST, dp.facts_of(FAST, m)) == dp.COLLEAGUE
+
+
 def test_the_pane_shows_lead_alternative_and_one_way_out():
     b = brief({'id': 'task:x', 'lane': 'TASK'}, answer(['Start it now', 'Drop', 'Defer', 'Hand it to agents']), '')
     assert [o['label'] for o in b['options']] == ['Start it now', 'Hand it to agents', 'Drop', 'Defer'] and b['shown'] == 3

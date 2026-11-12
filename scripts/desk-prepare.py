@@ -97,6 +97,7 @@ def facts_of(card, material):
         # the customer pointed at a video, a screenshot or a case and nobody has looked (2026-11-09: five drafts stopped for this)
         'examples': bool(re.search(r'examples named in the newest customer message: [1-9]\d* and nobody has replied since', m)),
         'ours_newest': 'newest visible message: ours' in m,
+        'colleague': has_thread and 'requester: a colleague' in m,
         'unattended_draft': 'Draft from the unattended validation' in m,
         'deferred': bool(card.get('deferred')),
         'agent': bool(card.get('terminal') or card.get('workspace')),
@@ -115,6 +116,8 @@ def menu_of(card, f, ready=False, cause_open=False):
         return list(RELEASE_NOTES_OPTIONS)
     if lane == 'TICKET':
         return list(TICKET_OPTIONS.get(card.get('kind') or 'notion', TICKET_OPTIONS['notion']))
+    if lane in REPLY_LANES and f.get('colleague'):
+        return list(COLLEAGUE)
     if lane in REPLY_LANES and ready:
         return [o for o in DRAFTED if o != 'I sent it already' or f['ours_newest']]
     opts = list(OPTIONS.get(lane, []))
@@ -202,6 +205,10 @@ AUTO_MAX_AGE_DAYS = 2
 REPLY_LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST'}
 UNATTENDED = 'Validate and draft (unattended)'   # deskplain.VALIDATE; desk-execute.py runs it as one background job
 DRAFTED = ['Send it', 'Edit then send', 'I sent it already', 'Defer', 'Drop']
+# 2026-11-12: a thread a colleague opened (config.json internalDomains) gets no customer reply and no send as Luna.
+# A reported fault goes to a worker; a question gets a short answer the person passes on themselves.
+ANSWER_COLLEAGUE = 'Answer the colleague yourself'
+COLLEAGUE = ['Hand to a worker', ANSWER_COLLEAGUE, 'Defer', 'Drop (unpin)']
 
 
 def drafted(lane, so):
@@ -212,7 +219,7 @@ VERBS = {'Send it': 'delegate', 'I sent it already': 'do', 'Edit then send': 'de
          'Drop': 'drop', 'Drop (unpin)': 'drop', 'Nobody to tell (mark done)': 'do', 'Reply with a status': 'delegate',
          'Close the loop (nothing owed)': 'do', 'Hand to a worker / ticket': 'delegate', 'Claim + validate now': 'do', UNATTENDED: 'delegate',
          'Draft the reply': 'delegate', 'Hand to a worker': 'delegate', 'Hand the rework to its agent': 'delegate',
-         'Review it now': 'do', 'Check the examples, then answer': 'do', 'Close the PR': 'drop', 'Go (agent runs it now)': 'do', 'Show me the command first': 'decide',
+         'Review it now': 'do', ANSWER_COLLEAGUE: 'do', 'Check the examples, then answer': 'do', 'Close the PR': 'drop', 'Go (agent runs it now)': 'do', 'Show me the command first': 'decide',
          'Answer now': 'decide', 'Drop (reply as human: declined)': 'drop', 'Close as read': 'do', 'Reply with a note': 'delegate',
          'Start it now': 'do', 'Hand it to agents': 'delegate', 'Answer': 'decide', 'Drop (accepted risk, recorded)': 'drop',
          'Send as staged': 'delegate', 'Drop the line': 'drop', 'Push (ask the owner / assign)': 'delegate', 'Hand to an agent': 'delegate',
@@ -308,7 +315,12 @@ def holder_block(t, rows):
     import deskconfig
     f = {x['key']: x.get('stringValue') for x in t.get('threadFields') or []}
     a = t.get('assignedTo') or {}
-    out = [f"assignee: {a.get('fullName') or 'nobody'}" + (f" ({a['__typename']})" if a.get('__typename') else ''),
+    out = []
+    c = t.get('customer') or {}
+    if deskconfig.is_internal((c.get('email') or {}).get('email')):
+        # 2026-11-12: a brief drafted a Luna status reply to a colleague who had reported a fault. A colleague wants the fix.
+        out.append(f"requester: a colleague ({c.get('fullName') or 'unnamed'}), not a customer")
+    out += [f"assignee: {a.get('fullName') or 'nobody'}" + (f" ({a['__typename']})" if a.get('__typename') else ''),
            f"triage claim: {f.get('triage_owner') or 'none'}" + (f" since {f['triage_claimed_at'][:16]}" if f.get('triage_claimed_at') else '')]
     notes = [r for r in rows if r['kind'] == 'Note' and r['actor'] == 'UserActor']
     if notes:
@@ -476,7 +488,7 @@ def prompt(card, ctx, f):
     lane = card['lane']
     reply = lane in REPLY_LANES
     menu = menu_of(card, f)
-    if reply and 'Send it' not in menu:
+    if reply and 'Send it' not in menu and not f.get('colleague'):
         menu = ['Send it'] + menu
     lane_rules = ''
     if reply:
@@ -489,6 +501,12 @@ def prompt(card, ctx, f):
 - When "Who holds this thread" shows a teammate assigned, or the newest customer message names a teammate and we have not replied since, the answer is theirs: rank Defer (trigger: that teammate answers) or the drop option first, name the holder in `why`, leave `draft` empty.
 - When the material carries a draft from the unattended validation and no customer message came after it, start from that draft: keep it unless a line refutes it, and carry its checks over.
 - `threadAfter`: the thread's status once the reply is sent or the card closed. `done`: nothing owed, or only the customer's feedback awaited. `waiting`: their answer feeds a change we still owe (also when in doubt between the two). `leave`: we still owe work, or a teammate holds the thread."""
+    if reply and f.get('colleague'):
+        lane_rules = f"""
+- The requester is a colleague of the person, not a customer. Nothing goes out as Luna and no customer reply is drafted. Set `replyReady` false, `causeOpen` false and `threadAfter` "leave".
+- The newest message reports a fault or asks for a change: rank "Hand to a worker" first and leave `draft` empty. `fact` says what is broken and whether a fix or a pull request exists. `then` of that option names what the worker builds.
+- The newest message only asks a question, or a fix the colleague waits for is live: rank "{ANSWER_COLLEAGUE}" first. `draft` is the answer in at most four plain sentences in the colleague's language, as one teammate to another: no greeting formula, no apology, no signature, no Luna. Every claim is backed by a line in the material; a claim you cannot back goes into `openChecks` and stays out.
+- A message that does both gets "Hand to a worker" first."""
     elif lane == 'REVIEW':
         lane_rules = '\n- `draft` is the recommended move and its one-line reason. Set `replyReady` false and `threadAfter` "leave".'
     elif lane == 'RUN':
@@ -685,7 +703,10 @@ def brief_of(card, so, f):
     """The model's answer becomes the brief: the menu and the first option come from facts, and the question on the
     pane is the one the model wrote for exactly that option."""
     lane = card['lane']
-    if cause_open(lane, so):
+    if lane in REPLY_LANES and f.get('colleague'):
+        # the cause search is the worker's job here, and nothing on this card is ever sent
+        so = {**so, 'causeOpen': False, 'replyReady': False}
+    elif cause_open(lane, so):
         # no draft and no send while the cause is open: the check leads, and the pane says why
         so = {**so, 'causeOpen': True, 'draft': '', 'replyReady': False,
               'openChecks': [CAUSE_CHECK] + [c for c in so.get('openChecks') or [] if c != CAUSE_CHECK]}

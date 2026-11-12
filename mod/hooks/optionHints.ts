@@ -30,6 +30,10 @@ const HINTS: [RegExp, string][] = [
     /^Hand the rework to its agent$/,
     "the review goes to the agent that built it",
   ],
+  [
+    /^Answer the colleague yourself$/,
+    "a short answer on your clipboard; the desk sends nothing",
+  ],
   [/^Start it now$|^Do it now$/, "you and Claude do it in this session, now"],
   [/^Review it now$/, "you and Claude read the change in this session"],
   [/^Go\b/, "a background agent runs it now"],
