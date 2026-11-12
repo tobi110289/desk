@@ -103,7 +103,7 @@ def facts_of(card, material):
     }
 
 
-def menu_of(card, f, ready=False):
+def menu_of(card, f, ready=False, cause_open=False):
     """The options a card may show, from facts. An option that cannot be the right pick is not on the menu:
     - a checked draft (ready) puts the send set on a customer-text card;
     - a FAST card offers a validation only while no note exists, the unattended one only while it can run, and a handoff
@@ -128,7 +128,11 @@ def menu_of(card, f, ready=False):
             drop |= {UNATTENDED, 'Claim + validate now'}
         else:
             drop |= {'Draft the reply', 'Hand to a worker', 'Claim + validate now' if can_run else UNATTENDED}
-        if not f['examples']:
+        if cause_open:
+            # the check comes first whatever the note says; a bare draft would be the holding reply again
+            drop -= {'Check the examples, then answer'}
+            drop.add('Draft the reply')
+        elif not f['examples']:
             drop.add('Check the examples, then answer')
     if lane in REPLY_LANES and not f['ours_newest']:
         drop.add('I sent it already')
@@ -152,7 +156,7 @@ def lead_of(card, f, so, order, ready):
     validation = next((o for o in (UNATTENDED, 'Claim + validate now') if o in order), None)
     if ready and 'Send it' in order:
         return 'Send it'
-    if f['examples'] and not f['validated'] and 'Check the examples, then answer' in order:
+    if (so.get('causeOpen') or (f['examples'] and not f['validated'])) and 'Check the examples, then answer' in order:
         return 'Check the examples, then answer'
     if lane == 'PROMISE' and so.get('resolved') and 'Close the loop (nothing owed)' in order:
         return 'Close the loop (nothing owed)'
@@ -230,13 +234,14 @@ SCHEMA = {
         'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence line in the context that backs it'},
         'openChecks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'claims the draft needs that the context does not back; Claude verifies these live before desk_card'},
         'resolved': {'type': 'boolean', 'description': 'true when the context shows the card is already resolved (reply sent, PR merged, line submitted)'},
+        'causeOpen': {'type': 'boolean', 'description': 'true when the customer reports a fault or asks why something happened and the material does not establish the cause; then `draft` stays empty'},
         'replyReady': {'type': 'boolean', 'description': 'true when `draft` is customer text the person could send as it stands: every claim in checks or no refutable claim at all, openChecks empty, a reply is the move, no teammate holds the thread'},
         'deferTrigger': {'type': 'string', 'description': "when a Defer is among the sensible options: the one machine-checkable trigger it would use (a date YYYY-MM-DD, 'customer replies', 'manual:<person> answers …', 'deployed:<env>:<pr>', 'merged:<pr>'); empty when no defer makes sense. Never 'later'."},
         'deferAct': {'type': 'string', 'description': 'what to do when that trigger fires, one imperative sentence; empty when deferTrigger is empty'},
         'threadAfter': {'type': 'string', 'enum': ['done', 'waiting', 'leave'], 'description': "the Plain thread's status once the recommended reply or close has happened: done (nothing owed, or only the customer's feedback awaited), waiting (the customer's answer feeds a change we still owe), leave (we still owe work the reply only reports on, or a teammate holds the thread)"},
         'learned': {'type': 'array', 'items': {'type': 'string'}, 'description': LEARNED_RULE},
     },
-    'required': ['why', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'replyReady', 'threadAfter'],
+    'required': ['why', 'fact', 'draft', 'options', 'checks', 'openChecks', 'resolved', 'causeOpen', 'replyReady', 'threadAfter'],
 }
 log_lock = threading.Lock()
 
@@ -478,6 +483,7 @@ def prompt(card, ctx, f):
         lane_rules = """
 - Customer text: German "du" unless the customer wrote "Sie"; warm and short; signed as Luna, never with the person's name. It never quotes memory, tenant ids, sources or inferred facts. Address form and greeting habits come from the memory block.
 - Every claim in the draft is backed by a line in the material: put each claim with its evidence into `checks`. A claim you need and cannot back goes into `openChecks` and stays out of the draft. `openChecks` holds only claims the draft itself would state.
+- Never draft a holding reply. When the customer reports a fault or asks why something happened and the material does not establish the cause, set `causeOpen` true, leave `draft` empty, set `replyReady` false, say in `fact` what is known and what is not, and name in `openChecks` the live reads that would find the cause. A draft never says that we do not know yet, that we are still checking, or that we will write once we know more. A validation note that could not reproduce the fault leaves the cause open.
 - `replyReady` is true when the person could send `draft` as it stands: every claim backed, or no claim a check could refute (a how-to from the material, a thanks, a question back). An unclaimed thread does not make it unready.
 - "Send it" is on the menu so that it has its question. The desk shows it only when `replyReady` is true; rank it where it belongs.
 - When "Who holds this thread" shows a teammate assigned, or the newest customer message names a teammate and we have not replied since, the answer is theirs: rank Defer (trigger: that teammate answers) or the drop option first, name the holder in `why`, leave `draft` empty.
@@ -653,13 +659,43 @@ def prepare(card, dry=False):
     log(f"{cid}: prepared in {(datetime.datetime.now() - t0).seconds}s, {len(brief['openChecks'])} open checks, first {brief['options'][0]['label'] if brief['options'] else '-'}, ${out.get('total_cost_usd', 0):.3f}")
 
 
+# 2026-11-12: a brief drafted "Warum die Warnung bei dir erschien, wissen wir noch nicht sicher. Wir prüfen das
+# weiter und melden uns" on a thread nobody was checking any more. A reply that says the cause is unknown, or that we
+# are still looking, is a holding reply: the check comes first, the draft after it.
+HOLDING = re.compile(
+    r"wissen wir (?:noch |bisher |aktuell |leider )*nicht|k[öo]nnen wir (?:noch |bisher |aktuell |leider )*nicht (?:sagen|nachvollziehen|erkl[äa]ren)"
+    r"|(?:ursache|grund)\b[^.!?\n]{0,80}\b(?:unklar|unbekannt|offen|noch nicht)|noch (?:nicht|un)gekl[äa]rt"
+    r"|wir (?:pr[üu]fen|untersuchen|schauen uns|analysieren|kl[äa]ren)\b[^.!?\n]{0,40}\b(?:weiter|noch|gerade|aktuell|derzeit|intern)"
+    r"|sobald wir (?:die ursache|den grund|mehr|n[äa]heres|genaueres)"
+    r"|we (?:do not|don't|cannot|can't) (?:yet )?(?:know|say|tell|explain)|(?:still|currently|keep) (?:investigating|looking into|checking)"
+    r"|cause (?:is|remains) (?:still )?(?:unknown|unclear|open)|once we (?:know|have found|find) (?:the cause|more|why)", re.I)
+CAUSE_CHECK = 'Find the cause before any reply: read the named cases live (data, logs, replay, code). The draft was a holding reply and is dropped.'
+CAUSE_DECIDE = 'Find the cause first, then draft the reply?'
+CAUSE_THEN = 'Claude reads the named cases live in this session and writes the finding into the draft. No reply goes out while the cause is open.'
+
+
+def cause_open(lane, so):
+    """True when a customer-text card has no cause to tell yet: the model says so, or its draft is a holding reply."""
+    if lane not in REPLY_LANES or so.get('resolved'):
+        return False
+    return bool(so.get('causeOpen')) or bool(HOLDING.search(so.get('draft') or ''))
+
+
 def brief_of(card, so, f):
     """The model's answer becomes the brief: the menu and the first option come from facts, and the question on the
     pane is the one the model wrote for exactly that option."""
     lane = card['lane']
+    if cause_open(lane, so):
+        # no draft and no send while the cause is open: the check leads, and the pane says why
+        so = {**so, 'causeOpen': True, 'draft': '', 'replyReady': False,
+              'openChecks': [CAUSE_CHECK] + [c for c in so.get('openChecks') or [] if c != CAUSE_CHECK]}
+    else:
+        so = {**so, 'causeOpen': False}
     ready = drafted(lane, so) and not (f['examples'] and not f['validated'])   # the examples come before the answer
-    menu = menu_of(card, f, ready)
+    menu = menu_of(card, f, ready, so['causeOpen'])
     wrote = {o.get('label'): o for o in so.get('options') or [] if o.get('label')}
+    if so['causeOpen']:
+        wrote['Check the examples, then answer'] = {'label': 'Check the examples, then answer', 'decide': CAUSE_DECIDE, 'then': CAUSE_THEN}
     order = [label for label in wrote if label in menu] + [label for label in menu if label not in wrote]
     lead = lead_of(card, f, so, order, ready)
     order = pane_order(lead, order)
@@ -672,7 +708,7 @@ def brief_of(card, so, f):
         'why': so.get('why', ''), 'decide': first['decide'] or f"{first['label']}?", 'then': first['then'],
         'fact': so.get('fact', ''), 'draft': so.get('draft', ''), 'options': options, 'shown': SHOWN,
         'checks': so.get('checks', []), 'openChecks': so.get('openChecks', []), 'resolved': bool(so.get('resolved')),
-        'replyReady': ready,
+        'causeOpen': so['causeOpen'], 'replyReady': ready,
         'deferTrigger': (so.get('deferTrigger') or '').strip(), 'deferAct': (so.get('deferAct') or '').strip(),
         # 2026-11-10: the thread's status after the pick (desk-execute.py thread_after applies it)
         'threadAfter': so.get('threadAfter') if so.get('threadAfter') in ('done', 'waiting', 'leave') else '',

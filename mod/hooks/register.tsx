@@ -536,6 +536,7 @@ const preparedOf = (
     shown: typeof b.shown === "number" && b.shown > 0 ? b.shown : 99,
     openChecks: ((b.openChecks ?? []) as unknown[]).map(text),
     resolved: b.resolved === true,
+    causeOpen: b.causeOpen === true,
   };
 };
 
@@ -1903,6 +1904,9 @@ export const register: Register = (on) => {
       if (card.prepared !== null) {
         lines.push(
           `A prepared brief for this card waits at ${card.prepared.file} (desk-prepare.py, ${card.prepared.at}, caption unchanged since). ` +
+            (card.prepared.causeOpen
+              ? "The cause of what the customer reports is open: find it first with live reads (data, logs, replay, code), as far as the tools reach, and draft only after that. Never draft a holding reply (we do not know yet, we are still checking, we will write once we know more). "
+              : "") +
             "Read it and start from it: verify each of its openChecks live, confirm no customer-visible message is newer than preparedAt, " +
             "then call desk_card with its why, decide, then, fact, draft and options (edit what the checks changed). Skip the raw reads the brief already did; " +
             "its context file (.ctx.md beside it) holds what it saw.",
@@ -2378,6 +2382,9 @@ export const register: Register = (on) => {
                             ? ` · ${card.prepared.openChecks.length} checks open`
                             : ""}
                           {card.prepared.resolved ? " · already resolved" : ""}
+                          {card.prepared.causeOpen
+                            ? " · cause open: the check comes before any draft"
+                            : ""}
                         </Text>
                         {card.prepared.options
                           .slice(0, moreOpen ? undefined : card.prepared.shown)

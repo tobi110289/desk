@@ -83,6 +83,27 @@ def test_a_kept_promise_closes_the_loop():
     assert b['options'][0]['label'] == 'Close the loop (nothing owed)'
 
 
+def test_a_holding_reply_is_dropped_and_the_check_leads():
+    # 2026-11-12: validated, cause not reproducible, and the brief drafted "we do not know yet, we keep checking"
+    holding = 'Hallo Dana,\n\nWarum die Warnung bei dir erschien, wissen wir noch nicht sicher. Wir prüfen das weiter und melden uns, sobald wir die Ursache kennen.'
+    b = brief(FAST, answer(['Draft the reply', 'Hand to a worker', 'Defer', 'Drop (unpin)'], draft=holding, replyReady=True), material(validated=True))
+    assert b['causeOpen'] and b['draft'] == '' and not b['replyReady'], b
+    assert b['options'][0]['label'] == 'Check the examples, then answer', b['options']
+    assert b['decide'] == dp.CAUSE_DECIDE and 'Draft the reply' not in [o['label'] for o in b['options']], b
+    assert b['openChecks'][0] == dp.CAUSE_CHECK, b['openChecks']
+    # the model's own flag does the same without a draft
+    b = brief(FAST, answer(['Draft the reply', 'Defer'], causeOpen=True), material(validated=True))
+    assert b['causeOpen'] and b['options'][0]['label'] == 'Check the examples, then answer', b
+    # a reply with a known cause and a promise tied to a deploy is no holding reply
+    fine = 'Hallo Dana,\n\nder Fehler lag an der Sortierung der Stopps. Der Fix ist gemergt, wir melden uns, sobald er live ist.'
+    b = brief(FAST, answer(['Send it', 'Draft the reply', 'Defer'], draft=fine, replyReady=True), material(validated=True))
+    assert not b['causeOpen'] and b['draft'] == fine, b
+    for text in ('We are still investigating why this happened.', 'Die Ursache ist bisher unklar.', "We don't know yet why the warning showed."):
+        assert dp.HOLDING.search(text), text
+    for text in ('Wir prüfen deine Rechnung und schicken sie dir morgen.', 'Danke, wir wissen Bescheid.'):
+        assert not dp.HOLDING.search(text), text
+
+
 def test_the_pane_shows_lead_alternative_and_one_way_out():
     b = brief({'id': 'task:x', 'lane': 'TASK'}, answer(['Start it now', 'Drop', 'Defer', 'Hand it to agents']), '')
     assert [o['label'] for o in b['options']] == ['Start it now', 'Hand it to agents', 'Drop', 'Defer'] and b['shown'] == 3

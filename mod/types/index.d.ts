@@ -16,6 +16,8 @@ export type PreparedBrief = {
   shown: number;
   openChecks: string[];
   resolved: boolean;
+  /** The cause of what the customer reports is open: the brief carries no draft and the check leads. */
+  causeOpen: boolean;
 };
 
 export type DeskCard = {
