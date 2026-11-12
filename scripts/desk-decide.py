@@ -12,7 +12,7 @@ involved, and desk-execute.py runs the records in the background. The record nam
 Exit 0: record written, the class on stdout. 2: the option is not one of the brief's. 3: no fresh brief for the card
 (the pick must come through the session). 4: a decision for the card is already queued or running.
 
-Files: ~/orbit-scratch/desk/decisions/<card id>.json (DESK_DIR overrides the desk folder for tests).
+Files: decisions/<card id>.json in the desk folder (deskconfig.py; DESK_DIR points it at a copy for tests).
 """
 import datetime
 import json
@@ -22,8 +22,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import deskclass  # noqa: E402
+import deskconfig  # noqa: E402
 
-DESK = os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk')
+DESK = deskconfig.DESK
 BRIEFS = f'{DESK}/briefs'
 DECISIONS = f'{DESK}/decisions'
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""task.py — local tasks for the desk (lane TASK). Stored in ~/orbit-scratch/desk/tasks.json, never anywhere else.
+"""task.py — local tasks for the desk (lane TASK). Stored in tasks.json in the desk folder, never anywhere else.
 
   task.py add "<title>" [--step "<step>"]... [--body "<context>"] [--mins N] [--impact P1|P2|P3]
   task.py list            open tasks, one line each
@@ -10,7 +10,8 @@
 Tobias 2026-10-09: work that has no Plain thread, no PR and no Notion ticket (a help-center sweep, a cleanup) still
 belongs on the desk. A task is one card, `task:<slug>`, until it gets a verb."""
 import json,sys,os,re,datetime
-P=os.path.expanduser('~/orbit-scratch/desk/tasks.json')
+import deskconfig
+P=f'{deskconfig.DESK}/tasks.json'
 def load():
     try: return json.load(open(P))
     except Exception: return {'tasks':[]}
