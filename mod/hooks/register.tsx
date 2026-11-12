@@ -487,6 +487,18 @@ const verbOf = (card: Raw): string | null => {
   return verb === "" ? null : verb;
 };
 
+// 2026-11-12: desk-prepare.py marks a card whose question is gone (a REVIEW card whose PR merged or closed after the
+// gather read it). Such a card leaves the pane at once; the next gather drops it from cards.json.
+const isGone = (card: Raw, briefs: Record<string, Raw>): boolean => {
+  const b = briefs[text(card.id)];
+  return (
+    b !== undefined &&
+    text(b.gone) !== "" &&
+    text(b.key) === text(card.key) &&
+    text(b.since) === text(card.since)
+  );
+};
+
 // A prepared brief counts only while the card's wait (key + since) is the one it was written for; a brief from before
 // the wait keys binds to the caption (status + act) as it did then.
 const preparedOf = (
@@ -494,7 +506,7 @@ const preparedOf = (
   briefs: Record<string, Raw>,
 ): PreparedBrief | null => {
   const b = briefs[text(card.id)];
-  if (b === undefined || b.error !== undefined) {
+  if (b === undefined || b.error !== undefined || isGone(card, briefs)) {
     return null;
   }
   // 2026-10-23: a card with a wait key binds only a brief written for that key; a brief from before the keys
@@ -563,43 +575,45 @@ const toView = (
     .map(decisionOf)
     .sort((a, b) => (a.pickedAt < b.pickedAt ? 1 : -1));
 
-  const cards = ((cache.cards ?? []) as Raw[]).map((card): DeskCard => {
-    const id = text(card.id);
-    const prepared = preparedOf(card, briefs);
-    const failed = briefs[id]?.error;
-    const members = ((card.members ?? []) as Raw[]).map(
-      (member) =>
-        `${text(member.ref)} ${text(member.task)}: ${text(member.status)}`,
-    );
+  const cards = ((cache.cards ?? []) as Raw[])
+    .filter((card) => !isGone(card, briefs))
+    .map((card): DeskCard => {
+      const id = text(card.id);
+      const prepared = preparedOf(card, briefs);
+      const failed = briefs[id]?.error;
+      const members = ((card.members ?? []) as Raw[]).map(
+        (member) =>
+          `${text(member.ref)} ${text(member.task)}: ${text(member.status)}`,
+      );
 
-    return {
-      prepared,
-      health: healthOf(
-        { id, lane: text(card.lane) },
+      return {
         prepared,
-        failed === undefined ? null : text(failed) || String(failed),
-      ),
-      pickLine: pickLine(picks.find((d) => d.cardId === id) ?? null),
-      id,
-      ref: text(card.ref),
-      lane: text(card.lane),
-      mins: typeof card.mins === "number" ? card.mins : 0,
-      impact: text(card.impact),
-      act: text(card.act),
-      status: text(card.status),
-      memory: text((card.memory as Raw | undefined)?.summary).replace(
-        /^memory: /,
-        "",
-      ),
-      note: text(card.note),
-      since: text(card.since),
-      waits: text(card.waits),
-      age: typeof card.age === "number" ? card.age : 0,
-      links: linksOf(card),
-      members,
-      verb: verbOf(card),
-    };
-  });
+        health: healthOf(
+          { id, lane: text(card.lane) },
+          prepared,
+          failed === undefined ? null : text(failed) || String(failed),
+        ),
+        pickLine: pickLine(picks.find((d) => d.cardId === id) ?? null),
+        id,
+        ref: text(card.ref),
+        lane: text(card.lane),
+        mins: typeof card.mins === "number" ? card.mins : 0,
+        impact: text(card.impact),
+        act: text(card.act),
+        status: text(card.status),
+        memory: text((card.memory as Raw | undefined)?.summary).replace(
+          /^memory: /,
+          "",
+        ),
+        note: text(card.note),
+        since: text(card.since),
+        waits: text(card.waits),
+        age: typeof card.age === "number" ? card.age : 0,
+        links: linksOf(card),
+        members,
+        verb: verbOf(card),
+      };
+    });
 
   const preflight = (cache.preflight ?? {}) as Record<string, Raw>;
 

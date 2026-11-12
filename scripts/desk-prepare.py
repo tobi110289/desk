@@ -594,12 +594,31 @@ def start_validation(card, ctx_path, anc):
     log(f'{cid}: validation started in the background (auto)')
 
 
+def gone_reason(card, anc):
+    """Why a card has nothing left to decide, or ''. A REVIEW card asks what happens with an open PR; once GitHub says
+    the PR is merged or closed there is no question. 2026-11-12: a PR merged 95 seconds before a gather that still read
+    its cached PR list; the brief then asked "review it even though it is merged?" with the lane's three options."""
+    state = ((anc or {}).get('pr') or {}).get('state')
+    if card.get('lane') == 'REVIEW' and state in ('MERGED', 'CLOSED'):
+        return f"the pull request is {state.lower()}"
+    return ''
+
+
 def prepare(card, dry=False):
     cid = card['id']
     t0 = datetime.datetime.now()
+    anc = deskanchor.anchor(card)   # read before the model runs: a message that lands during the run is "after the brief"
+    gone = gone_reason(card, anc)
+    if gone:
+        # no model run and no brief: the pane drops the card on this marker, and the next gather drops it for good
+        log(f"{cid}: gone, {gone}")
+        if not dry:
+            json.dump({'cardId': cid, 'fingerprint': fingerprint(card), 'key': card.get('key'), 'since': card.get('since'),
+                       'status': card.get('status'), 'act': card.get('act'), 'gone': gone, 'preparedAt': now_iso(), 'anchor': anc},
+                      open(brief_path(cid), 'w'), ensure_ascii=False, indent=1)
+        return
     ctx = material(card)
     f = facts_of(card, ctx)
-    anc = deskanchor.anchor(card)   # read before the model runs: a message that lands during the run is "after the brief"
     p = prompt(card, ctx, f)
     ctx_path = brief_path(cid).replace('.json', '.ctx.md')
     with open(ctx_path, 'w') as fh:

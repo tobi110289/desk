@@ -435,7 +435,12 @@ test("without liveEvents the pane never polls the feed", async ($, on) => {
 
 // The health check (2026-11-10): eleven times the card on top could not be worked from the pane. A card with no brief
 // never leads, and a background pick that failed says so on the card.
-const healthWorld = (on: On, decision?: Record<string, unknown>, auto = "") => {
+const healthWorld = (
+  on: On,
+  decision?: Record<string, unknown>,
+  auto = "",
+  brief?: Record<string, unknown>,
+) => {
   const cards = JSON.stringify({
     generatedAt: "2026-10-02T10:04:51+00:00",
     cards: [
@@ -500,7 +505,9 @@ const healthWorld = (on: On, decision?: Record<string, unknown>, auto = "") => {
         : e.path.endsWith("/.auto")
           ? auto
           : e.path.endsWith("/briefs/loop_T-2.json")
-            ? prepared
+            ? brief
+              ? JSON.stringify(brief)
+              : prepared
             : e.path.endsWith("/decisions/loop_T-2.json")
               ? JSON.stringify(decision)
               : e.path.endsWith("desk.json")
@@ -605,6 +612,20 @@ test("a switch file with no session name counts as off", async ($, on) => {
   const pane = await loadAndMount($);
 
   expect((await pane.find({ key: "auto" }))?.text).toBe("auto off");
+});
+
+// 2026-11-12: a PR merged 95 seconds before a gather that still read its cached list. The card asked "review it even
+// though it is merged?" and offered the lane's three options.
+test("a card the prepare step marks as gone leaves the pane", async ($, on) => {
+  healthWorld(on, undefined, "", {
+    cardId: "loop:T-2",
+    gone: "the pull request is merged",
+    preparedAt: "2026-10-02T09:50:00Z",
+  });
+  const pane = await loadAndMount($);
+
+  expect((await pane.find({ key: "pick-0" }))?.text).toContain("T-1");
+  expect(await pane.find({ key: "pick-1" })).toBeUndefined();
 });
 
 test("r reads every source afresh and ranks again", async ($, on) => {
