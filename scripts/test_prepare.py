@@ -3,9 +3,13 @@
 
   python3 scripts/test_prepare.py
 """
+import base64
 import importlib.util
+import json
 import os
 import sys
+import tempfile
+import types
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 spec = importlib.util.spec_from_file_location('desk_prepare', f'{HERE}/desk-prepare.py')
@@ -187,6 +191,44 @@ def test_the_validation_fact_comes_from_the_ticket_record():
         assert dp.UNATTENDED not in dp.menu_of(FAST, dp.facts_of(FAST, m)), dp.menu_of(FAST, dp.facts_of(FAST, m))
     finally:
         dp.orbot_pass_of, dp.validation_of = keep, keep_v
+
+
+def inline(att, w, h):
+    ref = json.dumps({'attachmentId': att, 'width': f'{w}px', 'height': f'{h}px'}).encode()
+    return f'![](data:application/json;base64,{base64.b64encode(ref).decode()})'
+
+
+def test_mail_images_skip_signature_icons():
+    mail = {'markdownContent': f"Hallo\n{inline('att_shot', 626, 332)}\n{inline('att_logo', 150, 110)}\n{inline('att_rule', 392, 19)}",
+            'attachments': [{'id': 'att_icon', 'fileMimeType': 'image/png', 'fileSize': {'bytes': 530}},
+                            {'id': 'att_photo', 'fileMimeType': 'image/jpeg', 'fileSize': {'bytes': 240000}},
+                            {'id': 'att_pdf', 'fileMimeType': 'application/pdf', 'fileSize': {'bytes': 90000}}]}
+    refs = dp.image_refs(mail)
+    assert [r['id'] for r in refs if not r['small']] == ['att_shot', 'att_photo']
+    assert {r['id'] for r in refs if r['small']} == {'att_logo', 'att_rule', 'att_icon'}
+
+
+def test_a_failed_download_never_fails_the_pass():
+    fake = types.ModuleType('deskplain')
+    calls = []
+    def gql(query, variables, timeout=40):
+        calls.append(variables['input']['attachmentId'])
+        raise RuntimeError('plain is down')
+    fake.gql = gql
+    real = sys.modules.get('deskplain')
+    sys.modules['deskplain'] = fake
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            open(f'{folder}/att_cached.png', 'wb').write(b'\x89PNG\r\n')
+            refs = [{'id': i, 'size': '', 'small': False, 'at': '2026-11-03T21:18', 'who': 'Kim'} for i in ('att_cached', 'att_new')]
+            block = dp.image_block(folder, refs)
+    finally:
+        if real:
+            sys.modules['deskplain'] = real
+        else:
+            sys.modules.pop('deskplain', None)
+    assert calls == ['att_new']   # a saved image is not fetched again
+    assert f'{folder}/att_cached.png' in block and 'not saved: att_new: plain is down' in block
 
 
 if __name__ == '__main__':

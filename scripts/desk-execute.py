@@ -520,7 +520,17 @@ def write_pass(thread, ref, path):
 
 def unattended_prompt(rec, brief, card, rehearse, pass_file):
     ref, thread = card.get('ref') or '', rec.get('thread') or card.get('thread')
-    timeline = _prepare_mod().plain_timeline(thread, n=40, width=8000)[:70000]
+    prep = _prepare_mod()
+    folder = prep.image_dir(rec['cardId'])
+    timeline = prep.plain_timeline(thread, n=40, width=8000, images=folder)[:70000]
+    # 2026-11-12: the mails' screenshots, saved by the timeline read; without them the run called them unreadable
+    images = [p for p in prep.saved_images(folder) if p in timeline]
+    see_images, no_reads = '', 'no MCP, so no Sentry, PostHog replay or attachment reads'
+    if images:
+        see_images = (f"\n   The mails carry {len(images)} image{'s' if len(images) > 1 else ''} (screenshots pasted into the mail), saved as local files and"
+                      ' listed under\n   "Images in the mails" in the thread below. Open each one with the Read tool before you validate: they often'
+                      ' hold the\n   answer. When a claim rests on an image, say in the note what it showed.')
+        no_reads = 'no MCP, so no Sentry or PostHog replay reads; the mail images were read from local copies'
     ctx = _read(brief.get('context') or '', 60000)
     memory = re.search(r'(?ms)^## Support memory block.*?(?=^## |\Z)', ctx)
     prod = 'STAGE=production pnpm -s -C ' + ORBIT   # the one shape the production guard lets through
@@ -530,7 +540,7 @@ no MCP servers, in the Orbit checkout ({ORBIT}). No one answers questions.
 
 The desk has already claimed the thread for you (triage_owner=local) and releases the claim after you answer. Your job:
 1. Read the Hermes pass in {pass_file} (the desk wrote it from the thread's ticket record: the newest brief, then each
-   delta after it, oldest first) and extract its claim sheet. Read the thread below for everything else.
+   delta after it, oldest first) and extract its claim sheet. Read the thread below for everything else.{see_images}
 2. Validate the load-bearing claims by the /triage rules below, in about six minutes of work: CONFIRMED, REFUTED or
    UNVERIFIED, each with your own evidence. Sample the rest.
 3. Record ONE validation on the thread's ticket record (its Notion page, next to the pass in {pass_file}) with:
@@ -539,7 +549,7 @@ The desk has already claimed the thread for you (triage_owner=local) and release
    Write the note file under {DECISIONS}/runs/ first. The note's first line is exactly:
    {deskplain.UNATTENDED_LINE}
    then an empty line, then the note in the "## Local triage validation (Claude)" format of step 10a, with these changes:
-   - right under the heading: "> _Unattended desk run ({VALIDATE_MODEL}); no MCP, so no Sentry, PostHog replay or attachment reads._"
+   - right under the heading: "> _Unattended desk run ({VALIDATE_MODEL}); {no_reads}._"
    - "**Validated against:**" names what you read (branch@commit, entities re-queried, files) and what you could not read.
    - a line "**Readiness (unattended view):** <ready-for-agent | ready-for-human | needs-info | wontfix>" with one reason.
    - keep the format's sections: the claim table, "### Corrections" when something was refuted or missing, and

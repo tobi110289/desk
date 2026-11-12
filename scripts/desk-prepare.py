@@ -31,15 +31,18 @@ pass writes a new one. Batch cards and lanes that take the session over are neve
 Env: PLAIN_API_KEY (thread reads), DESK_PREPARE_MODEL (default sonnet), DESK_PREPARE_TOP (default 5).
 Never runs inside a prepare child (DESK_PREPARE=1) so a child cannot start children.
 """
+import base64
 import datetime
 import glob
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 # What a card may queue for the memory harvest. From the walk of 2026-11-11: 15 of 60 queued lines were stored.
@@ -297,13 +300,15 @@ PLAIN_Q = '''query($id: ID!, $n: Int!){ thread(threadId:$id){ ref title status s
  assignedTo{ __typename ... on User{ fullName } ... on MachineUser{ fullName } }
  customer{ fullName email{ email } } timelineEntries(first: $n){ edges{ node{ timestamp{ iso8601 }
  actor{ __typename ... on UserActor{ user{ fullName } } ... on MachineUserActor{ machineUser{ fullName } } ... on CustomerActor{ customer{ fullName } } }
- entry{ __typename ... on NoteEntry{ noteText: text } ... on EmailEntry{ subject textContent } ... on ChatEntry{ chatText: text }
+ entry{ __typename ... on NoteEntry{ noteText: text } ... on EmailEntry{ subject textContent markdownContent
+ attachments{ id fileMimeType fileSize{ bytes } } } ... on ChatEntry{ chatText: text }
  ... on SlackMessageEntry{ slackText: text } ... on SlackReplyEntry{ slackReplyText: text } ... on ThreadStatusTransitionedEntry{ nextStatus } } } } } } }'''
 
 
-def plain_timeline(thread_id, n=14, width=2500):
+def plain_timeline(thread_id, n=14, width=2500, images=None):
     """The thread's head and its newest n timeline entries, notes and mails in full (plain-tl.sh cuts them at 160 chars,
-    which loses the Hermes brief and the validation note the draft depends on). Read-only, one request."""
+    which loses the Hermes brief and the validation note the draft depends on). Read-only, one request; with `images`
+    (a folder) the mails' images are saved there too and listed on top (save_images)."""
     key = os.environ.get('PLAIN_API_KEY')
     if not key:
         return '(no PLAIN_API_KEY: thread not read)'
@@ -320,7 +325,7 @@ def plain_timeline(thread_id, n=14, width=2500):
         return '(thread not found)'
     lines = [f"{t['ref']} {t['status']}/{(t.get('statusDetail') or {}).get('__typename')} · {t['title']} · customer {t['customer']['fullName']} <{(t['customer'].get('email') or {}).get('email')}>",
              '; '.join(f"{f['key']}={f['stringValue']}" for f in t.get('threadFields') or [])]
-    rows = []
+    rows, refs = [], []
     for e in t['timelineEntries']['edges']:
         n_ = e['node']; a = n_.get('actor') or {}; en = n_.get('entry') or {}
         who = ((a.get('user') or {}).get('fullName') or (a.get('machineUser') or {}).get('fullName') or (a.get('customer') or {}).get('fullName') or a.get('__typename'))
@@ -330,7 +335,118 @@ def plain_timeline(thread_id, n=14, width=2500):
         text = re.sub(r'\n{3,}', '\n\n', text or '').strip()
         rows.append({'at': n_['timestamp']['iso8601'][:16], 'kind': en.get('__typename', '').replace('Entry', ''), 'who': who, 'actor': a.get('__typename') or '', 'text': text})
         lines.append(f"\n--- {rows[-1]['at']} {rows[-1]['kind']} {who}\n{text[:width]}{'…' if len(text) > width else ''}")
-    return holder_block(t, rows, thread_id) + '\n'.join(lines)
+        refs += [{**r, 'at': rows[-1]['at'], 'who': who} for r in image_refs(en)]
+    return (image_block(images, refs) if images else '') + holder_block(t, rows, thread_id) + '\n'.join(lines)
+
+
+# ---- 2026-11-12: the mails' images ------------------------------------------------------------------------------------
+# A screenshot pasted into a mail is no attachment: its markdown holds ![](data:application/json;base64,…), and the JSON
+# names the attachment ({"attachmentId", "width", "height"}). The text shows only [cid:image00N.png@…]. On one thread
+# the unattended run and the session both called six such screenshots unreadable, and four of eight points stayed open
+# while the answers were in the images. The pass saves them next to the brief, so a run with Read can look at them.
+IMG_MAX = 8                       # images per card
+IMG_MAX_BYTES = 5 * 1024 * 1024   # per image
+IMG_MIN_PX = 120                  # an inline image narrower or flatter than this is a signature logo or a rule line
+IMG_MIN_BYTES = 5 * 1024          # an image attachment smaller than this is a signature icon
+IMG_TYPES = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp'}
+IMG_MAGIC = (b'\x89PNG', b'\xff\xd8\xff', b'GIF8', b'RIFF')
+INLINE_IMG = re.compile(r'data:application/json;base64,([A-Za-z0-9+/=]+)')
+DOWNLOAD_Q = '''mutation($input: CreateAttachmentDownloadUrlInput!){ createAttachmentDownloadUrl(input:$input){
+ attachmentDownloadUrl{ downloadUrl attachment{ fileMimeType fileSize{ bytes } } } error{ message } } }'''
+
+
+def image_dir(cid):
+    return brief_path(cid)[:-len('.json')] + '.img'
+
+
+def saved_images(folder):
+    """The image files a pass saved in `folder`, oldest attachment id first."""
+    return sorted(p for p in glob.glob(f'{folder}/*') if os.path.splitext(p)[1] in IMG_TYPES.values())
+
+
+def _px(v):
+    m = re.match(r'\s*(\d+)', str(v or ''))
+    return int(m.group(1)) if m else None
+
+
+def image_refs(entry):
+    """The images of one mail entry: the inline refs in its markdown, then its image attachments. `small` marks a
+    signature icon, which is never fetched."""
+    out = []
+    for b64 in INLINE_IMG.findall(entry.get('markdownContent') or ''):
+        try:
+            ref = json.loads(base64.b64decode(b64 + '=' * (-len(b64) % 4)))
+        except Exception:
+            continue
+        w, h = _px(ref.get('width')), _px(ref.get('height'))
+        if ref.get('attachmentId'):
+            out.append({'id': ref['attachmentId'], 'size': f'{w}x{h}' if w and h else '',
+                        'small': any(x is not None and x < IMG_MIN_PX for x in (w, h))})
+    for a in entry.get('attachments') or []:
+        if a.get('id') and (a.get('fileMimeType') or '') in IMG_TYPES:
+            out.append({'id': a['id'], 'size': '', 'small': int((a.get('fileSize') or {}).get('bytes') or 0) < IMG_MIN_BYTES})
+    return out
+
+
+def save_images(folder, refs):
+    """Fetch each image once into `folder` as <attachment id><ext>; a file already there is not fetched again. Only the
+    download-url mutation goes to Plain, and it writes nothing. → (saved [(ref, path)], small skipped, failures).
+    Never raises: a failed download is a line in the material, never a failed pass."""
+    import deskplain
+    seen, want = set(), []
+    for r in refs:
+        if r['id'] not in seen:
+            seen.add(r['id']); want.append(r)
+    small = sum(1 for r in want if r['small'])
+    want = [r for r in want if not r['small']]
+    saved, failed = [], []
+    for r in want[:IMG_MAX]:
+        name = re.sub(r'[^A-Za-z0-9._-]', '_', r['id'])
+        have = [p for p in saved_images(folder) if os.path.basename(p).startswith(name + '.')]
+        if have:
+            saved.append((r, have[0])); continue
+        try:
+            d = deskplain.gql(DOWNLOAD_Q, {'input': {'attachmentId': r['id']}})['createAttachmentDownloadUrl']['attachmentDownloadUrl']
+            att = d.get('attachment') or {}
+            ext = IMG_TYPES.get(att.get('fileMimeType') or '')
+            if not ext:
+                raise RuntimeError(f"not an image ({att.get('fileMimeType')})")
+            if int((att.get('fileSize') or {}).get('bytes') or 0) > IMG_MAX_BYTES:
+                raise RuntimeError(f'over {IMG_MAX_BYTES // 2**20} MB')
+            # the URL lives three minutes: fetch it at once
+            req = urllib.request.Request(d['downloadUrl'], headers={'User-Agent': 'desk-prepare/1 (+python-urllib)'})
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                data = resp.read(IMG_MAX_BYTES + 1)
+            if len(data) > IMG_MAX_BYTES:
+                raise RuntimeError(f'over {IMG_MAX_BYTES // 2**20} MB')
+            if not data.startswith(IMG_MAGIC):
+                raise RuntimeError('the file is no image')
+            os.makedirs(folder, exist_ok=True)
+            path = f'{folder}/{name}{ext}'
+            with open(path + '.part', 'wb') as fh:
+                fh.write(data)
+            os.replace(path + '.part', path)
+            saved.append((r, path))
+        except Exception as e:
+            failed.append(f"{r['id']}: {str(e)[:160]}")
+    if len(want) > IMG_MAX:
+        failed.append(f'{len(want) - IMG_MAX} more not fetched (at most {IMG_MAX} per card)')
+    return saved, small, failed
+
+
+def image_block(folder, refs):
+    """The saved images as a list of paths, on top of the thread. Empty when the mails carry none."""
+    if not refs:
+        return ''
+    try:
+        saved, small, failed = save_images(folder, refs)
+    except Exception as e:
+        saved, small, failed = [], 0, [f'images not saved: {str(e)[:160]}']
+    out = [f"- {r['at']} mail from {r['who']}: {p}" + (f" ({r['size']})" if r['size'] else '') for r, p in saved]
+    if small:
+        out.append(f'skipped: {small} signature icon{"s" if small > 1 else ""}')
+    out += [f'not saved: {x}' for x in failed]
+    return ('## Images in the mails (saved locally: Read a path to see the image)\n' + '\n'.join(out) + '\n\n') if out else ''
 
 
 _index = {}
@@ -512,7 +628,7 @@ def material(card):
     ref = card.get('ref') or ''
     thread = card.get('thread')
     if thread:
-        parts.append('## Plain thread (newest 14 timeline entries, newest last)\n' + plain_timeline(thread)[:30000])
+        parts.append('## Plain thread (newest 14 timeline entries, newest last)\n' + plain_timeline(thread, images=image_dir(card['id']))[:30000])
     if card.get('memory') and (card['memory'].get('tenant') or card['memory'].get('customer')):
         parts.append('## Support memory block (memory.py show)\n' + sh(['python3', f'{DESK}/memory.py', 'show', ref], 60)[:8000])
     elif thread:
@@ -847,6 +963,9 @@ def main():
                 for g in (f, f.replace('.json', '.ctx.md')):
                     try: os.remove(g)
                     except FileNotFoundError: pass
+        for d in glob.glob(f'{BRIEFS}/*.img'):
+            if d[:-len('.img')] + '.json' not in live:
+                shutil.rmtree(d, ignore_errors=True)
         if not todo:
             print(f'prepare: {len(cards)} candidates, all fresh'); return 0
         log(f"pass: {', '.join(c['id'] for c in todo)}")
