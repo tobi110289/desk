@@ -1003,8 +1003,14 @@ async function pollPlain($: EngineInterface) {
 
 // The live desk: desk.py again when cards.json is old, in the background, while the pane is open and no card is
 // mid-work (a card's draft must not lose its row to a new ranking). "now" skips the age check: a close just landed.
+// 2026-11-12: a press on r while a card was open did nothing and left no trace. The press is kept until a run starts.
+let isFreshWanted = false;
+
 function gather($: EngineInterface, when: "due" | "now" = "due") {
-  gatherRun ??= runGather($, when)
+  if (when === "now") {
+    isFreshWanted = true;
+  }
+  gatherRun ??= runGather($, isFreshWanted ? "now" : when)
     .catch((error: unknown) => {
       try {
         $.ui.log(`gather failed: ${String(error)}`.slice(0, 200), {
@@ -1025,7 +1031,12 @@ async function runGather($: EngineInterface, when: "due" | "now") {
   if (!(await isPaneOpen($))) {
     return;
   }
-  if ((await read($, working)) !== null || (await read($, brief)) !== null) {
+  // The timed run waits while a card is open, so the list does not move under the reader. A press never waits:
+  // the person asked for the new cards (2026-11-12: a card stood open for hours and every press was dropped).
+  if (
+    when === "due" &&
+    ((await read($, working)) !== null || (await read($, brief)) !== null)
+  ) {
     return;
   }
   const home = (await $.env.get("HOME")) ?? "";
@@ -1055,6 +1066,7 @@ async function runGather($: EngineInterface, when: "due" | "now") {
     return;
   }
   await $.fs.write(marker, new Date(time).toISOString());
+  isFreshWanted = false;
   await update($, isGathering, () => true);
   try {
     const key = await $.env.get("PLAIN_API_KEY");
@@ -2205,20 +2217,14 @@ export const register: Register = (on) => {
               {isRunning ? "ranking… " : ""}
               {berlinTime(desk.generatedAt)}
             </Text>
-            {/* 2026-11-12: r reads every source afresh now (new Plain threads included) and ranks again. A card in
-                work keeps its row, so the press waits for that card. */}
+            {/* 2026-11-12: r reads every source afresh now (new Plain threads included) and ranks again, also while
+                a card is open. */}
             <Button
               key="refresh"
               plain
               hotkey="r"
-              dimColor={isRunning || workingId !== null || shown !== null}
-              label={
-                isRunning
-                  ? "refreshing…"
-                  : workingId !== null || shown !== null
-                    ? "refresh after this card"
-                    : "refresh"
-              }
+              dimColor={isRunning}
+              label={isRunning ? "refreshing…" : "refresh"}
               onPress={() => {
                 void gather($, "now");
                 void pollPlain($).catch(() => undefined);

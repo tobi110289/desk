@@ -644,6 +644,27 @@ test("r reads every source afresh and ranks again", async ($, on) => {
   );
 });
 
+test("r gathers while a card shows its question", async ($, on) => {
+  // 2026-11-12: a card sat on the pane with its question for hours and every press on r was dropped
+  const processes = healthWorld(on);
+  on("ui.panes", () => ({ value: [{ id: "desk" }] as never }));
+  const pane = await loadAndMount($);
+  await $.tool.call({
+    tool: "mcp__desk__desk_card",
+    card_id: "loop:T-1",
+    ...PLAIN_SHAPE,
+    fact: "customer asked twice",
+    options: [{ label: "Send it", verb: "do" }],
+  } as never);
+  processes.length = 0;
+
+  await pane.press({ key: "refresh" });
+  await settle();
+
+  const gathered = processes.find((argv) => argv[1]?.endsWith("/desk.py"));
+  expect(gathered?.[2]).toBe("--fresh");
+});
+
 test("a card's title drops the reopened stamp and the readiness tail", () => {
   const card = {
     lane: "FAST",
