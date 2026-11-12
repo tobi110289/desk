@@ -4,20 +4,21 @@ Writes `status` (+ a `desk:` note marker) on the loop entry, never `updated`, an
 captions[ref] = {status, at} so desk.py can age an agent-owned caption from the moment the desk wrote it
 (2026-09-17: seven freshly sent lines came straight back as liveness cards because `updated` was 8 days old)."""
 import json,os,sys,tempfile,datetime
+import deskconfig
 ref,status=sys.argv[1],sys.argv[2]; note=sys.argv[3] if len(sys.argv)>3 else ''
 now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 def save(p,obj):
     fd,tmp=tempfile.mkstemp(dir=os.path.dirname(p) or '.')
     with os.fdopen(fd,'w') as f: json.dump(obj,f,indent=2,ensure_ascii=False)
     os.replace(tmp,p)
-sys.path.insert(0,os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import loopstate; loopstate.revive(ref)   # an archived entry comes back when the desk writes to it
-S=os.path.expanduser('~/orbit-scratch/agent-loop/state.json'); s=json.load(open(S))
+D=deskconfig.need(f'{deskconfig.DESK}/desk.json','desk file')   # checked before the loop state is written
+sys.path.insert(0,deskconfig.need(deskconfig.JEV)); import loopstate; loopstate.revive(ref)   # an archived entry comes back when the desk writes to it
+S=deskconfig.need(f'{deskconfig.LOOP}/state.json','loop state'); s=json.load(open(S))
 t=s['threads'].get(ref)
 if t is None: sys.exit(f'{ref}: no loop entry')
 old_status=(t.get('status') or '').strip(); t['status']=status
 if note: t['note']=(t.get('note') or '')+f' desk: {now[:10]} {note}'
 save(S,s)
-D=os.path.expanduser('~/orbit-scratch/desk/desk.json')
 # 2026-11-09: a caption written before or after a close moved the loop card's since away from the one the close was
 # bound to, and the card came back on the next gather (W45: one loop card closed six times, one close read "caption
 # already reads ..."). Holds bound to the old caption follow it, under the lock desk-close.py takes.

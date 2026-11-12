@@ -25,21 +25,23 @@ desk.json (deferrals, seen counts, captions of non-loop cards, done log).
 Read-only towards every source except desk.json / cards.json.
 """
 import json, re, sys, os, subprocess, datetime, glob, zoneinfo
-HOME=os.path.expanduser('~')
-LOOP=f'{HOME}/orbit-scratch/agent-loop'
-DESK=f'{HOME}/orbit-scratch/desk'
-DESKFILE=f'{DESK}/desk.json'
-HERMES_LOG=f'{HOME}/orbit-scratch/hermes-feedback/LOG.md'
 import deskconfig, deskhold
+# every folder comes from the resolver (deskconfig.py); the gather needs the desk folder and the loop helpers
+HOME=deskconfig.HOME
+LOOP=deskconfig.LOOP
+DESK=deskconfig.need(deskconfig.DESK)
+JEV=deskconfig.JEV   # needed by the gather, not by --event (checked below)
+DESKFILE=f'{DESK}/desk.json'
+HERMES_LOG=deskconfig.HERMES_LOG
 import deskcoverage
 _cov=deskcoverage.Coverage()   # 2026-11-09: what each source saw vs what reached the desk (deskcoverage.py)
 PLAIN=deskconfig.PLAIN_THREAD
-ORBIT=deskconfig.REPO; ORBOT=deskconfig.BOT_REPO
+ORBIT=deskconfig.key('repo'); ORBOT=deskconfig.key('botRepo')   # the gather reads PRs from both
 GH=f'https://github.com/{ORBIT}/pull/'; GHO=f'https://github.com/{ORBOT}/'
 LOOP_TICK_DUE_HOURS=4          # loop is "due" when nothing wrote the loop state for this long
 HARVEST_DUE_OPEN=3             # harvest is "due" at this many open LOG entries …
 HARVEST_DUE_AGE_DAYS=7         # … or when the oldest open entry is older than this
-SWEEPS=f'{HOME}/orbit-scratch/sentry-sweeps'   # the weekly Sentry sweep's state + reports (desk owns its follow-through since 2026-09-11)
+SWEEPS=deskconfig.SWEEPS   # the weekly Sentry sweep's state + reports (desk owns its follow-through since 2026-09-11)
 now=datetime.datetime.now(datetime.timezone.utc)
 # 2026-10-22: one clock. The desk's day is the Berlin day the person works in; the close script and the live feed use the
 # same one (the gather used UTC before, so a drop after Berlin midnight counted for the wrong day for one or two hours).
@@ -64,7 +66,7 @@ def age_days(iso):
 def hours_since(dt): return (now-dt).total_seconds()/3600 if dt else None
 # 2026-10-22: rebuild only what changed. The Plain-heavy sources (every TODO and SNOOZED thread with its timeline) are
 # read again at most every CACHE_S; the pane gathers every 10 min and the live feed moves the pane between two reads.
-# `desk.py --fresh` (the pane's forced gather) reads everything again. Cache files: ~/orbit-scratch/desk/cache/<name>.json.
+# `desk.py --fresh` (the pane's forced gather) reads everything again. Cache files: <desk folder>/cache/<name>.json.
 CACHE_S=20*60
 CACHE_DIR=f'{DESK}/cache'
 def cached(name,fn,max_age_s=CACHE_S):
@@ -119,13 +121,14 @@ import deskevent
 if '--event' in sys.argv:
     _i=sys.argv.index('--event')
     sys.exit(deskevent.main(sys.argv[_i+1] if _i+1<len(sys.argv) else ''))
+deskconfig.need(JEV)   # the Plain reader and the PR and lane helpers live there
 
 def a2a_feed():
     """GET /inbox/feed on the A2A hub with this machine's own token. None when the hub or the
     token is unavailable (old hub without the endpoint, no config, network down)."""
     cfg={}
     try:
-        for line in open(f'{HOME}/.orbit-a2a/config.env'):
+        for line in open(deskconfig.A2A_ENV):
             m=re.match(r'\s*([A-Z0-9_]+)=(.*)$',line.strip())
             if m: cfg[m.group(1)]=m.group(2).strip().strip('"').strip("'").replace('\\ ',' ').replace('\\(','(').replace('\\)',')')
     except Exception: return None
@@ -141,7 +144,7 @@ feed=a2a_feed()
 def a2a_cfg():
     cfg={}
     try:
-        for line in open(f'{HOME}/.orbit-a2a/config.env'):
+        for line in open(deskconfig.A2A_ENV):
             m=re.match(r'\s*([A-Z0-9_]+)=(.*)$',line.strip())
             if m: cfg[m.group(1)]=m.group(2).strip().strip('"').strip("'")
     except Exception: pass
@@ -206,7 +209,7 @@ byref={_ref(v):dict(v,id=k) for k,v in cache.items() if _ref(v)}
 
 # ---------------------------------------------------------------- support memory (orbot, read locally)
 # Tobias 2026-09-24: every customer draft must be informed by the orbot support memory (tenant profile + requester file),
-# and what a sitting learns must flow back. Reads come from the local ~/orbot checkout (memory.py pulls main here, so
+# and what a sitting learns must flow back. Reads come from the local orbot clone (memory.py pulls main here, so
 # a sitting is at most one pull stale); writes queue in memory-proposals.jsonl and go up as one orbot PR (memory:pr card).
 sys.path.insert(0,DESK)
 try:
@@ -497,7 +500,7 @@ def add(card):
 # our side is a teammate's and comes after the customer's newest one. It comes back when the assignee is cleared or
 # becomes the person, or when the customer writes after the holder's last move: then it is a new wait. A pin still shows,
 # with the holder in its status. One header line counts them; cache/colleague-held.json lists ref, who and since.
-sys.path.insert(0,os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import plain as _plain
+sys.path.insert(0,JEV); import plain as _plain
 _Q_HELD='query($after:String){ threads(first:50, after:$after, filters:{statuses:[TODO,SNOOZED]}) { pageInfo{ hasNextPage endCursor } edges{ node{ id ref title assignedAt{ iso8601 } assignedTo{ __typename ... on User{ fullName } } threadFields{ key stringValue } timelineEntries(first:20){ edges{ node{ timestamp{ iso8601 } actor{ __typename ... on UserActor{ user{ fullName } } } entry{ __typename } } } } } } } }'
 _Q_TAKEOVER='query($id:ID!){ thread(threadId:$id){ timelineEntries(first:30){ edges{ node{ timestamp{ iso8601 } entry{ __typename ... on NoteEntry{ markdown } } } } } } }'
 _HELD_MSG={'EmailEntry','ChatEntry','SlackMessageEntry','SlackReplyEntry','MSTeamsMessageEntry','DiscordMessageEntry'}
@@ -572,7 +575,7 @@ def _my_prs():
     board and the desk share), rebuilt when older than 15 min; the plain gh list below is the fallback when it fails."""
     global _prh_doc
     try:
-        import sys as _s, os as _o; _s.path.insert(0,_o.path.expanduser('~/orbit-scratch/agent-loop/jev')); import pr_health as _p
+        import sys as _s, os as _o; _s.path.insert(0,JEV); import pr_health as _p
         _prh_doc=_p.load(900) or _p.build()
         return {int(n):{'ci':'red' if r.get('ci_red') else 'ok','labels':r.get('labels') or [],'review':'' if r.get('review') in (None,'-') else r['review'],'draft':bool(r.get('draft'))} for n,r in _prh_doc['prs'].items()}
     except Exception as _e:
@@ -583,11 +586,11 @@ def _my_prs():
         red=any((c.get('conclusion') or c.get('state')) in ('FAILURE','ERROR') for c in checks)
         out[p['number']]={'ci':'red' if red else 'ok','labels':[l['name'] for l in p['labels']],'review':p.get('reviewDecision') or '','draft':bool(p.get('isDraft'))}
     return out
-# 2026-09-23: Jev lane hints, promote-only (~/orbit-scratch/agent-loop/jev/desk_lanes.py; JEV_DESK=0 disables). The regex
+# 2026-09-23: Jev lane hints, promote-only (jev/desk_lanes.py in the loop folder; JEV_DESK=0 disables). The regex
 # detectors keep the first word; Jev only lifts a row the regex left unmatched into a real lane at confidence >= 0.85
 # (T-105 "awaits human review" -> REVIEW, T-109 "waiting on Kim" -> ASK, T-125 "Robin: verify" -> ASK). It never hides a card.
 try:
-    import sys as _sys, os as _os; _sys.path.insert(0,_os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import desk_lanes as _jev
+    import sys as _sys, os as _os; _sys.path.insert(0,JEV); import desk_lanes as _jev
     _jev.prefetch([(r,t) for r,t in state.items() if t.get('phase') in ('handoff-running','pr-open','blocked')])
 except Exception:
     class _jev:
@@ -606,7 +609,7 @@ my_prs=_my_prs()
 _screens={}
 if os.environ.get('DESK_SCREENS','1')!='0':
     try:
-        import sys as _sys3, os as _os3; _sys3.path.insert(0,_os3.path.expanduser('~/orbit-scratch/agent-loop/jev')); import desk_screens as _ds
+        import sys as _sys3, os as _os3; _sys3.path.insert(0,JEV); import desk_screens as _ds
         _screens=_ds.cached(900) or _ds.screen(state)   # the tick's screen cache when fresh
     except Exception as _e:
         failed_sources.append(('screens',str(_e)[:160]))
@@ -801,9 +804,9 @@ cards[:]=[c for c in cards if not (c['id'].startswith('loop:') and c['lane'] in 
 # 2026-09-23 (Tobias: "5 waiting for me, 22 open PRs, something is wrong"): eleven PRs had 8-14 HORST rounds and nine
 # had no commit for five days while their loop captions said "agent working", so the 6 h trust rule hid them. Facts
 # trigger (rounds >= 5, age >= 7 d, no commit >= 5 d, human review asked); Jev judges the round trajectory and
-# recommends the move. One batched STUCK card, one REVIEW card per PR that asks for a human. ~/orbit-scratch/agent-loop/jev/pr_health.py.
+# recommends the move. One batched STUCK card, one REVIEW card per PR that asks for a human. jev/pr_health.py in the loop folder.
 try:
-    import sys as _sys2, os as _os2; _sys2.path.insert(0,_os2.path.expanduser('~/orbit-scratch/agent-loop/jev')); import pr_health as _prh
+    import sys as _sys2, os as _os2; _sys2.path.insert(0,JEV); import pr_health as _prh
     for _c in _prh.cards(_prh_doc or _prh.build()):
         if _c.get('pr') and any(k.get('pr')==_c['pr'] and k.get('lane')=='REVIEW' for k in cards): continue   # the loop card already asks for the review
         # 2026-11-09 (all desk history): the batched STUCK catch-all took 26 closes, 16 of them defers, had no close
@@ -845,12 +848,12 @@ if feed:
 # The orbit CI (.github/scripts/plain-fix-lifecycle.sh) posts a FIX_DEPLOYED note on every linked thread when a stage
 # deploy succeeds and wakes the thread up. A thread that still carries no customer-visible message from us after that
 # note is a NOTIFY card: draft the reply, Tobias says send, the send marks the thread done.
-sys.path.insert(0,os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import plain as _plain
+sys.path.insert(0,JEV); import plain as _plain
 MSG_ENTRIES={'EmailEntry','ChatEntry','SlackMessageEntry','SlackReplyEntry','MSTeamsMessageEntry','DiscordMessageEntry'}
 FIX_DEPLOYED=re.compile(r'<!-- FIX_DEPLOYED env=(\w+) sha=(\S+) at=(\S+) prs=(\S*) run=(\S*) -->')
 def plain_gql(q,variables):
     if not os.environ.get('PLAIN_API_KEY'): return None
-    return _plain.try_gql(q,variables)   # the one Plain reader: ~/orbit-scratch/agent-loop/jev/plain.py (sets a User-Agent Cloudflare accepts)
+    return _plain.try_gql(q,variables)   # the one Plain reader: jev/plain.py in the loop folder (sets a User-Agent Cloudflare accepts)
 def notify_cards():
     """Refs that got a NOTIFY card. Two phases: page every TODO thread with its fields (cheap), then read the newest
     12 timeline entries of the ones with a github_pr field. Newest entry first: the first FIX_DEPLOYED marker wins,
@@ -1071,7 +1074,7 @@ def plain_tenant_threads(tenant):
     """Every TODO thread on Plain that belongs to <tenant>. The tenant_id thread field exists only on Hermes/Sentry
     auto-flags; a customer thread carries its tenant through the customer's company domain or email domain
     (dana@acme.example -> acme). Match: tenant_id field == tenant, or the tenant id (letters and digits only) is inside
-    the domain with punctuation stripped (north-wind.example -> northwind). ~/orbit-scratch/desk/tenants.json may map
+    the domain with punctuation stripped (north-wind.example -> northwind). tenants.json in the desk folder may map
     {tenant: [domains]} for the cases the heuristic misses. Found 2026-09-15: /desk acme showed none of acme's
     five open threads because none of them carries a tenant_id field."""
     try: extra=json.load(open(f'{DESK}/tenants.json')).get(tenant,[])
@@ -1311,10 +1314,10 @@ for r in (_runs[-1:] if _runs else []):
                  'status':f"{d['id']}: {d['title'][:60]}",'note':d['text'][:300]+(f" (also @{', @'.join(others)})" if others else ''),'since':d['id'],
                  'act':f"Decide {d['id']} from the {r['date']} sweep: {d['title'][:80]}",'score':round((IMPACT['P1']+2+min(age,6))/2*10,1)})
 # 2026-09-16 (Tobias): the sweep's ticket files are the "bugs to be fixed" that got lost. Every ticket of the newest run
-# under ~/orbit-scratch/sentry-sweep-<date>/issues/NN-*.md with `Status: needs-triage|ready-for-agent` that no decision
+# under <scratch root>/sentry-sweep-<date>/issues/NN-*.md with `Status: needs-triage|ready-for-agent` that no decision
 # line covers (`Owner: … decision N`) and that names no PR of its own is one RUN card: hand it to a worker, ticket it, or drop it.
 for r in (_runs[-1:] if _runs else []):
-    tdir=f"{HOME}/orbit-scratch/sentry-sweep-{r['date']}/issues"
+    tdir=f"{deskconfig.SCRATCH}/sentry-sweep-{r['date']}/issues"
     for f in sorted(glob.glob(f'{tdir}/*.md')):
         try: head=open(f).read(3000)
         except Exception: continue
@@ -1332,7 +1335,7 @@ for r in (_runs[-1:] if _runs else []):
              'score':round((IMPACT['P2']+1+min(age,6))/2*10,1)})
 
 # ---------------------------------------------------------------- source 9c: local ticket files (2026-10-12)
-# The to-tickets / triage skills file tickets as ~/orbit-scratch/<feature>/issues/NN-<slug>.md with a `Status:` line.
+# The to-tickets / triage skills file tickets as <scratch root>/<feature>/issues/NN-<slug>.md with a `Status:` line.
 # Only the newest sweep's folder was read (above); about 150 open files in 60 other folders sat where no card saw them.
 # Every open file with no PR, no worker and no unfinished `Depends on:` / `Blocked by:` ticket in its folder is one TICKET
 # member, in two batches that read differently: `batch:TICKET:local-agent` (ready-for-agent: a brief waits for a worker)
@@ -1346,7 +1349,7 @@ def local_ticket_head(f):
     m=re.search(r'^Status:\s*(.+)$',head,re.M); return (m.group(1).strip() if m else ''),head
 if not SCOPE:
     _newest_sweep=f"sentry-sweep-{_runs[-1]['date']}" if _runs else None
-    for tdir in sorted(glob.glob(f'{HOME}/orbit-scratch/*/issues')):
+    for tdir in sorted(glob.glob(f'{deskconfig.SCRATCH}/*/issues')):
         feat=os.path.basename(os.path.dirname(tdir))
         if feat==_newest_sweep: continue
         files=sorted(glob.glob(f'{tdir}/*.md'))
@@ -1385,11 +1388,11 @@ if not SCOPE:
                  'pr':(prs[-1] if human and prs else None),'task':None,'thread':None,'url':None,'kind':kind_key,
                  'status':f"{head_word} · {st[:60]}"+(f" · from {tref}" if tref else '')+(f" · owner: {owner[:30]}" if human and owner else ''),
                  'note':title[:200],'since':st,
-                 'act':act+f" · {f.replace(HOME,'~')}",
+                 'act':act+f" · {deskconfig.show(f)}",
                  'score':round((IMPACT.get(lvl,1)+1+min(age/14,3))/3*10,1)})
 
 # ---------------------------------------------------------------- source 9b: Notion follow-up tickets we created (Tobias, 2026-10-06)
-# tickets.py reads ~/orbit-scratch/desk/notion-tickets.json (the desk mod writes it through the Notion MCP) and links
+# tickets.py reads notion-tickets.json in the desk folder (the desk mod writes it through the Notion MCP) and links
 # each ticket to Plain threads (notion_ticket field, ORB-<id> in loop notes). Two cards: one TICKET batch of the idle
 # tickets (open, unassigned, no PR, >= 14 days old or in no sprint), and one NOTIFY card per shipped ticket whose linked
 # Plain thread is still open (the customer never heard). The NOTIFY card steps aside when gap:/loop: already carries the ref.
@@ -1424,7 +1427,7 @@ if not SCOPE:
 # stage" into the PR body, and this card carries the section onto the ticket from the desk session (CARDS.md, RUN notion:).
 # The PR body is read once a day per PR and cached in notion-sync.json; the card's status is the PR plus the section's hash,
 # so a closed card comes back only when the section changes.
-_NSYNC=os.path.expanduser('~/orbit-scratch/desk/notion-sync.json')
+_NSYNC=f'{DESK}/notion-sync.json'
 def _departures(pr):
     try: cache=json.load(open(_NSYNC))
     except Exception: cache={}
@@ -1465,7 +1468,7 @@ if not SCOPE:
 
 # ---------------------------------------------------------------- source 10: queued support-memory proposals (memory.py queue)
 # Facts Tobias okayed in sittings wait in memory-proposals.jsonl. Three or more, or one three days old, is one RUN card:
-# `memory.py pr` applies them on a branch in ~/orbot, validates with the orbot parser, opens the PR. One open memory PR at a
+# `memory.py pr` applies them on a branch in the orbot clone, validates with the orbot parser, opens the PR. One open memory PR at a
 # time (the next batch waits for the merge, so the files never conflict). Tobias merges orbot PRs himself; no HORST there.
 MEMORY_PR_MIN=3; MEMORY_PR_AGE_DAYS=3
 if memory and not SCOPE:
@@ -1474,7 +1477,7 @@ if memory and not SCOPE:
         if _ms['queued'] and not _ms['openPr'] and (_ms['queued']>=MEMORY_PR_MIN or _ms['age']>=MEMORY_PR_AGE_DAYS):
             add({'id':'memory:pr','ref':'memory','lane':'RUN','mins':2,'impact':'P2','age':_ms['age'],'waits':'nobody','pr':None,'task':None,'thread':None,'url':None,
                  'status':f"{_ms['queued']} queued for {', '.join(_ms['tenants'])}; oldest {_ms['oldest']}",'note':'','since':f"queue:{_ms['queued']}",
-                 'act':f"Open the orbot support-memory PR with the {_ms['queued']} facts you okayed ({', '.join(_ms['tenants'])}): python3 ~/orbit-scratch/desk/memory.py pr",
+                 'act':f"Open the orbot support-memory PR with the {_ms['queued']} facts you okayed ({', '.join(_ms['tenants'])}): python3 {deskconfig.show(DESK)}/memory.py pr",
                  'score':round((2+0+min(_ms['age']/3,2))/2*10,1)})
     except Exception as _e:
         failed_sources.append(('memory queue',str(_e)[:160]))

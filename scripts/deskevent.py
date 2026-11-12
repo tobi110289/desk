@@ -16,14 +16,14 @@ Event types:
   luna.reply_sent          rewrite the caption of the thread's cards
   triage.writeback_done    same
 
-DESK_DIR overrides ~/orbit-scratch/desk, so a test runs against a copy and never touches the live files.
+DESK_DIR (deskconfig.py) points it at a copy of the desk folder, so a test runs against a copy and never touches the live files.
 """
 import datetime, fcntl, json, os, re, sys, zoneinfo
 import deskconfig, deskhold
 
-DESK = os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk')
-LOOP = os.path.expanduser('~/orbit-scratch/agent-loop')
-JEV = f'{LOOP}/jev'   # home of plain.py, the one Plain reader
+DESK = deskconfig.DESK
+LOOP = deskconfig.LOOP
+JEV = deskconfig.JEV   # home of plain.py, the one Plain reader
 BERLIN = zoneinfo.ZoneInfo('Europe/Berlin')
 GATHER_LOCK_S = 3 * 60   # the pane's .gather marker counts this long (register.tsx GATHER_LOCK_MS)
 STALE_RUN = 75           # same exit as desk.py when a run must not write: the caller tries again
