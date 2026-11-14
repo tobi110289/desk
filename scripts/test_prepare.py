@@ -143,6 +143,25 @@ def test_the_pane_shows_lead_alternative_and_one_way_out():
     assert [o['label'] for o in b['options']] == ['Start it now', 'Hand it to agents', 'Drop', 'Defer'] and b['shown'] == 3
 
 
+def test_the_brief_fact_comes_from_the_ticket_record():
+    # 2026-11-14: OrBot's notes leave Plain; a marker note in the timeline no longer decides, the ticket record does
+    t = {'threadFields': [], 'customer': {'fullName': 'Dana', 'email': {'email': 'dana@example.com'}}}
+    rows = [{'at': '2026-11-14T09:00', 'kind': 'Note', 'who': 'bot', 'actor': 'MachineUserActor', 'text': '<!-- ORBOT_CANONICAL_TRIAGE_BRIEF -->'}]
+    keep = dp.orbot_pass_of
+    try:
+        dp.orbot_pass_of = lambda tid: {'source': 'record', 'pass': None}
+        m = dp.holder_block(t, rows, 'th_1')
+        assert 'Hermes brief: none on the ticket record\n' in m and not dp.facts_of(FAST, m)['hermes'], m
+        dp.orbot_pass_of = lambda tid: {'source': 'record', 'pass': {'at': '2026-11-14T10:15:00.000Z'}}
+        m = dp.holder_block(t, [], 'th_1')
+        assert 'Hermes brief: OrBot at 2026-11-14T10:15\n' in m and dp.facts_of(FAST, m)['hermes'], m
+        dp.orbot_pass_of = lambda tid: {'source': 'plain_fallback', 'pass': {'at': '2026-11-14T10:15:00.000Z'}}
+        m = dp.holder_block(t, [], 'th_1')
+        assert 'from the Plain notes' in m and dp.facts_of(FAST, m)['hermes'], m
+    finally:
+        dp.orbot_pass_of = keep
+
+
 if __name__ == '__main__':
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for t in tests:

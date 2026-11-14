@@ -23,7 +23,8 @@ never touched here, the session executes them and desk-close.py marks them done.
 "Validate and draft (unattended)" (FAST cards, 2026-11-09) is a model run of its own (run_unattended): this script claims
 the thread, one headless run (DESK_VALIDATE_MODEL, default opus, in the Orbit checkout so its production guard hook
 applies) checks the Hermes brief by the /triage rules, posts the note through plain-note.py and answers with the
-verdict and a drafted reply; this script releases the claim, writes the draft file, captions the card without closing
+verdict and a drafted reply (2026-11-14: the brief comes from the thread's ticket record, which this script writes to
+decisions/runs/<record>.pass.md through agent-loop jev/plain.py orbot_pass; no pass, no run); this script releases the claim, writes the draft file, captions the card without closing
 it, drops the brief and starts a prepare pass for the card, which comes back with "Send it" first.
 
 The state of a record goes queued → running → done | bounced | failed; every write is atomic. The mod starts a drain
@@ -509,7 +510,14 @@ def _prepare_mod():
     return mod
 
 
-def unattended_prompt(rec, brief, card, rehearse):
+def write_pass(thread, ref, path):
+    """The thread's OrBot pass (newest brief and the deltas after it) into `path`, through the one reader. → orbot_pass()."""
+    sys.path.append(os.path.expanduser('~/orbit-scratch/agent-loop/jev'))
+    import plain
+    return plain.write_pass_file(thread, path, title=ref)
+
+
+def unattended_prompt(rec, brief, card, rehearse, pass_file):
     ref, thread = card.get('ref') or '', rec.get('thread') or card.get('thread')
     timeline = _prepare_mod().plain_timeline(thread, n=40, width=8000)[:70000]
     ctx = _read(brief.get('context') or '', 60000)
@@ -520,7 +528,8 @@ def unattended_prompt(rec, brief, card, rehearse):
 no MCP servers, in the Orbit checkout ({ORBIT}). No one answers questions.
 
 The desk has already claimed the thread for you (triage_owner=local) and releases the claim after you answer. Your job:
-1. Read the thread below. Find the newest full Hermes pass (by its marker, see the rules) and extract its claim sheet.
+1. Read the Hermes pass in {pass_file} (the desk wrote it from the thread's ticket record: the newest brief, then each
+   delta after it, oldest first) and extract its claim sheet. Read the thread below for everything else.
 2. Validate the load-bearing claims by the /triage rules below, in about six minutes of work: CONFIRMED, REFUTED or
    UNVERIFIED, each with your own evidence. Sample the rest.
 3. Post ONE internal note with: python3 {HERE}/plain-note.py {thread} --file <your note file>
@@ -556,7 +565,7 @@ Hard rules (they override everything below):
   call it prints the one path it accepts after `pnpm -C`: re-run with that literal path. `--keys-only` debugs a key shape.
   An AWS login error means the session expired: say so in the note and in `result`; do not retry for minutes.
 - More of the thread: `python3 ~/orbit-scratch/agent-loop/jev/plain.py timeline {thread} 60` (read-only JSON).
-- When the thread shows a person's claim, a teammate's open question, or no Hermes brief at all: post no note, done=false,
+- When the thread shows a person's claim or a teammate's open question: post no note, done=false,
   and `result` says why in plain words. The session takes the card then.
 - `result` is read on a pane by someone who has not opened any file: plain words, no paths, ids, hashes or code words.
 """]
@@ -569,7 +578,8 @@ Hard rules (they override everything below):
     parts.append(memory.group(0).strip() if memory else '## Support memory block\nnone in the brief: the company is unmapped; never guess the tenant from the mail domain')
     parts.append('## The /triage rules (Orbit repo, .claude/commands/triage.md on origin/develop)\n'
                  'Where they name an MCP tool (get_thread, add_internal_note, upsert_thread_field, Sentry, PostHog) you have none: use the commands above '
-                 'and name what you could not read. `--env=<stage>` on dynamo:query in these rules is outdated: the stage goes in STAGE.\n\n' + triage_rules())
+                 'and name what you could not read. Where they say to read the Hermes pass from the Notion page, read ' + pass_file + ' (the same pass). '
+                 '`--env=<stage>` on dynamo:query in these rules is outdated: the stage goes in STAGE.\n\n' + triage_rules())
     parts.append('## The lane recipe and the customer-text rules (CARDS.md)\n' + (recipe('FAST', card['id']) or '(no recipe section)'))
     return '\n\n'.join(parts)
 
@@ -611,10 +621,15 @@ def run_unattended(path, rec, brief, card, dry, rehearse):
         pass
     claimed = False
     try:
+        # the brief to check, before any claim: a thread without an OrBot pass goes to the session
+        op = write_pass(thread, ref, f'{stem}.pass.md')
+        if not op['pass']:
+            raise RuntimeError('the thread has no OrBot brief to check; the session validates it')
+        rec['passSource'] = op['source']
         if not rehearse:
             deskplain.claim(thread)   # raises while a person or another local run holds the thread
             claimed = True
-        p = unattended_prompt(rec, brief, card, rehearse)
+        p = unattended_prompt(rec, brief, card, rehearse, f'{stem}.pass.md')
         with open(f'{stem}.prompt.md', 'w') as f:
             f.write(p)
         env = {k: v for k, v in os.environ.items() if k != 'CLAUDE_CODE_PLUGIN_DIRS'}

@@ -330,10 +330,25 @@ def plain_timeline(thread_id, n=14, width=2500):
         text = re.sub(r'\n{3,}', '\n\n', text or '').strip()
         rows.append({'at': n_['timestamp']['iso8601'][:16], 'kind': en.get('__typename', '').replace('Entry', ''), 'who': who, 'actor': a.get('__typename') or '', 'text': text})
         lines.append(f"\n--- {rows[-1]['at']} {rows[-1]['kind']} {who}\n{text[:width]}{'…' if len(text) > width else ''}")
-    return holder_block(t, rows) + '\n'.join(lines)
+    return holder_block(t, rows, thread_id) + '\n'.join(lines)
 
 
-def holder_block(t, rows):
+_index = {}
+_index_lock = threading.Lock()
+
+
+def orbot_pass_of(thread_id):
+    """The thread's OrBot pass from the one reader (agent-loop jev/plain.py orbot_pass), no bodies: one ticket index per
+    prepare pass answers every card. 2026-11-14: OrBot's notes move from Plain to the thread's ticket record."""
+    sys.path.append(f'{HOME}/orbit-scratch/agent-loop/jev')
+    import plain
+    with _index_lock:
+        if 'idx' not in _index:
+            _index['idx'] = plain.ticket_index()
+    return plain.orbot_pass(thread_id, bodies=False, index=_index['idx'])
+
+
+def holder_block(t, rows, thread_id=None):
     """Who holds the thread, on top of the material (2026-10-22: a brief recommended "Draft the reply" while the customer
     had tagged a teammate and the answer was that teammate's). The Plain assignee, the triage claim, the last internal
     note, and every teammate (config.json team) named in the newest customer message, quoted history cut, after our last reply."""
@@ -357,9 +372,11 @@ def holder_block(t, rows):
     # thread still had no validation note. So the material states it outright.
     validated = next((r for r in rows if r['kind'] == 'Note' and 'triage validation' in r['text'].lower()), None)
     out.append(f"local validation note: {validated['who']} at {validated['at']}" if validated else 'local validation note: none')
-    # 2026-11-09: the unattended validation needs a Hermes brief to check; the material says whether one is in view
-    hermes = next((r for r in rows if r['kind'] == 'Note' and any(m in r['text'] for m in HERMES_MARKERS)), None)
-    out.append(f"Hermes brief: {hermes['who']} at {hermes['at']}" if hermes else 'Hermes brief: none in the entries read')
+    # 2026-11-09: the unattended validation needs a Hermes brief to check; the material says whether one exists.
+    # 2026-11-14: the ticket record says so (orbot_pass_of), no longer a marker in the notes read.
+    op = orbot_pass_of(thread_id) if thread_id else None
+    fell_back = ' (read from the Plain notes: the ticket record did not answer)' if op and op['source'] == 'plain_fallback' else ''
+    out.append(f"Hermes brief: OrBot at {op['pass']['at'][:16]}{fell_back}" if op and op['pass'] else f'Hermes brief: none on the ticket record{fell_back}')
     visible = [r for r in rows if r['kind'] != 'Note' and r['kind'] != 'ThreadStatusTransitioned']
     newest_cust = next((r for r in visible if r['actor'] == 'CustomerActor'), None)
     ours_after = any(r['actor'] != 'CustomerActor' and r['at'] > newest_cust['at'] for r in visible) if newest_cust else False
@@ -379,9 +396,6 @@ def holder_block(t, rows):
     n = examples_named(body)
     out.append(f"examples named in the newest customer message: {n}" + ('' if ours_after or not n else ' and nobody has replied since'))
     return '## Who holds this thread\n' + '\n'.join(out) + '\n\n## Timeline\n'
-
-
-HERMES_MARKERS = ('<!-- ORBOT_CANONICAL_TRIAGE_BRIEF', '<!-- ORBOT_TRIAGE_DELTA', 'TRIAGE_CLAIMS_JSON', '## Triage note part', '## Agent Brief')   # jev/plain.py
 
 
 def unattended_failed(card):
