@@ -423,6 +423,7 @@ Hard rules:
             'This is a P0 hotfix: BRANCH HOTFIX/<slug>, BASE production. The pull request goes into production.'
             if 'hotfix' in label else
             'BRANCH fix/<ref in lower case>-<slug>, BASE develop. The pull request goes into develop, never into staging or production.')
+            + ' These are the defaults: a base the person named for this card wins.'
             + ' Say so in the brief file that travels with the prompt, and add: the fix carries a test that fails without it. '
               'A feature request is never spawned: done=false, result says it needs a board ticket.')
         parts.append('## How workers are spawned and reached (plain-agent-loop skill, Superset constants)\n' + '\n'.join(_read(LOOP_SKILL, 40000).splitlines()[28:62]))

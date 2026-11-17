@@ -1001,8 +1001,8 @@ async function pollPlain($: EngineInterface) {
   await refresh($, true);
 }
 
-// The live desk: desk.py again when cards.json is old, in the background, while the pane is open and no card is
-// mid-work (a card's draft must not lose its row to a new ranking). "now" skips the age check: a close just landed.
+// The live desk: desk.py again when cards.json is old, in the background, while the pane is open. "now" skips the
+// age check: a close just landed, or the person pressed r.
 // 2026-11-12: a press on r while a card was open did nothing and left no trace. The press is kept until a run starts.
 let isFreshWanted = false;
 
@@ -1031,14 +1031,8 @@ async function runGather($: EngineInterface, when: "due" | "now") {
   if (!(await isPaneOpen($))) {
     return;
   }
-  // The timed run waits while a card is open, so the list does not move under the reader. A press never waits:
-  // the person asked for the new cards (2026-11-12: a card stood open for hours and every press was dropped).
-  if (
-    when === "due" &&
-    ((await read($, working)) !== null || (await read($, brief)) !== null)
-  ) {
-    return;
-  }
+  // A gather runs with a card open too (2026-11-17: a card stood open for hours and two new P0s never showed).
+  // The open card keeps its place: the pane finds it by id (picked), and refresh() ranks around the live brief.
   const home = (await $.env.get("HOME")) ?? "";
   const dir = `${home}/orbit-scratch/desk`;
   const mtime = (path: string) =>

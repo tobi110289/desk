@@ -660,6 +660,9 @@ def screen_card(ref,t,x):
         if pf and pf.get('ci')=='red':
             line=f"CI is red on PR #{pr}: read the failing job, fix or rerun, then run the /babysit skill for it. Report back here when you stop."
             return {**base,'lane':'SEND','mins':1,'waits':'agent','status':f'idle; CI red on #{pr}','staged':line,'prefilled':True,'act':f'Worker of {ref} idles while #{pr} is red: send the fix line','score':40+iw}
+        if not pr and st=='idle_empty_prompt':   # 2026-11-13: an idle worker with no PR is done, stuck or waiting: a person decides (coverage found four)
+            return {**base,'lane':'RUN','mins':2,'waits':'person','status':'worker idle, no PR','since':'screen:idle_no_pr',
+                    'act':f'Worker of {ref} sits idle with no PR: read its last lines, then send it a next step, respawn it or retire the entry','score':30+iw}
         return 'hide'   # idle with the PR in HORST's queue or approved: nothing for a person to do
     return None
 for ref,t in state.items():
@@ -676,7 +679,7 @@ for ref,t in state.items():
             # coverage: a worker mid-turn, or idle while its open PR sits with HORST, is a reason; an idle worker with no
             # open PR is not (the first coverage run found nine such terminals hidden, a P0 hotfix among them)
             if _x.get('state')=='mid_turn_working': _cov.explain(ref,'worker mid-turn')
-            elif t.get('pr') in my_prs: _cov.explain(ref,f"worker idle, #{t['pr']} with HORST or approved")
+            elif t.get('pr'): _cov.explain(ref,f"worker idle, #{t['pr']} with HORST, approved or merged")
             continue
         if _c: add(_c); continue
     if ph=='pr-open' and t.get('pr') and not t.get('terminal'):

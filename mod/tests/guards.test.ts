@@ -440,9 +440,10 @@ const healthWorld = (
   decision?: Record<string, unknown>,
   auto = "",
   brief?: Record<string, unknown>,
+  generatedAt = "2026-10-02T10:04:51+00:00",
 ) => {
   const cards = JSON.stringify({
-    generatedAt: "2026-10-02T10:04:51+00:00",
+    generatedAt,
     cards: [
       {
         id: "loop:T-1",
@@ -663,6 +664,35 @@ test("r gathers while a card shows its question", async ($, on) => {
 
   const gathered = processes.find((argv) => argv[1]?.endsWith("/desk.py"));
   expect(gathered?.[2]).toBe("--fresh");
+});
+
+test("the timed gather runs while a card shows its question, and the card stays", async ($, on) => {
+  // 2026-11-17: a card stood open for hours, no timed gather ran and two new P0s never reached the pane
+  const processes = healthWorld(
+    on,
+    undefined,
+    "",
+    undefined,
+    "2026-10-02T09:30:00+00:00",
+  );
+  on("ui.panes", () => ({ value: [{ id: "desk" }] as never }));
+  const pane = await loadAndMount($);
+  await $.tool.call({
+    tool: "mcp__desk__desk_card",
+    card_id: "loop:T-1",
+    ...PLAIN_SHAPE,
+    fact: "customer asked twice",
+    options: [{ label: "Send it", verb: "do" }],
+  } as never);
+  processes.length = 0;
+
+  await $.command.run({ command: "desk-pane" } as never);
+  await settle();
+
+  const gathered = processes.find((argv) => argv[1]?.endsWith("/desk.py"));
+  expect(gathered).toBeDefined();
+  expect(gathered?.[2]).not.toBe("--fresh");
+  expect((await pane.find({ key: "opt-0" }))?.text).toContain("Send it");
 });
 
 test("a card's title drops the reopened stamp and the readiness tail", () => {
