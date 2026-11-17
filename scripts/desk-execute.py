@@ -22,8 +22,8 @@ never touched here, the session executes them and desk-close.py marks them done.
 
 "Validate and draft (unattended)" (FAST cards, 2026-11-09) is a model run of its own (run_unattended): this script claims
 the thread, one headless run (DESK_VALIDATE_MODEL, default opus, in the Orbit checkout so its production guard hook
-applies) checks the Hermes brief by the /triage rules, posts the note through plain-note.py and answers with the
-verdict and a drafted reply (2026-11-14: the brief comes from the thread's ticket record, which this script writes to
+applies) checks the Hermes brief by the /triage rules, records the validation on the thread's ticket record through
+validation-note.py (2026-11-15, orbot #984: never a Plain note) and answers with the verdict and a drafted reply (2026-11-14: the brief comes from the thread's ticket record, which this script writes to
 decisions/runs/<record>.pass.md through agent-loop jev/plain.py orbot_pass; no pass, no run); this script releases the claim, writes the draft file, captions the card without closing
 it, drops the brief and starts a prepare pass for the card, which comes back with "Send it" first.
 
@@ -478,8 +478,8 @@ UNATTENDED_VERDICT = {
     'type': 'object',
     'properties': {
         **VERDICT['properties'],
-        'done': {'type': 'boolean', 'description': 'true only when the validation note was posted (plain-note.py printed "posted:") and the reply below is drafted or deliberately empty'},
-        'verdict': {'type': 'string', 'enum': ['confirmed', 'partially-confirmed', 'refuted', 'stale', 'none'], 'description': "the note's verdict on the Hermes brief; none when no note was posted"},
+        'done': {'type': 'boolean', 'description': 'true only when the validation was recorded (validation-note.py printed "recorded:") and the reply below is drafted or deliberately empty'},
+        'verdict': {'type': 'string', 'enum': ['confirmed', 'partially-confirmed', 'refuted', 'stale', 'none'], 'description': "the validation's verdict on the Hermes brief, as given to validation-note.py; none when nothing was recorded"},
         'readiness': {'type': 'string', 'description': 'the readiness you judge the thread at (ready-for-agent, ready-for-human, needs-info, wontfix); the note says it, nothing writes it'},
         'draft': {'type': 'string', 'description': 'the customer reply to send as Luna, or empty when no reply is the move (a teammate holds the thread, nothing true to tell the customer yet)'},
         'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence that backs it (a note row, an entity read, a code line)'},
@@ -532,7 +532,9 @@ The desk has already claimed the thread for you (triage_owner=local) and release
    delta after it, oldest first) and extract its claim sheet. Read the thread below for everything else.
 2. Validate the load-bearing claims by the /triage rules below, in about six minutes of work: CONFIRMED, REFUTED or
    UNVERIFIED, each with your own evidence. Sample the rest.
-3. Post ONE internal note with: python3 {HERE}/plain-note.py {thread} --file <your note file>
+3. Record ONE validation on the thread's ticket record (its Notion page, next to the pass in {pass_file}) with:
+   python3 {HERE}/validation-note.py {thread} --file <your note file> --verdict <confirmed|partially-confirmed|refuted|stale> --readiness <ready-for-agent|ready-for-human|needs-info|wontfix>
+   (a fix that already shipped is --verdict stale, and the note's verdict line says already shipped and names the PR).
    Write the note file under {DECISIONS}/runs/ first. The note's first line is exactly:
    {deskplain.UNATTENDED_LINE}
    then an empty line, then the note in the "## Local triage validation (Claude)" format of step 10a, with these changes:
@@ -541,7 +543,8 @@ The desk has already claimed the thread for you (triage_owner=local) and release
    - a line "**Readiness (unattended view):** <ready-for-agent | ready-for-human | needs-info | wontfix>" with one reason.
    - keep the format's sections: the claim table, "### Corrections" when something was refuted or missing, and
      "### Hermes feedback" with its `<!-- hermes-feedback: <flaw-class>, … -->` comment (or the line "No feedback; brief was accurate.").
-   Keep it under 9000 characters. plain-note.py refuses a note without the first line; read its output: "posted:" means it landed.
+   One body, no part split. validation-note.py refuses a note without the first line; read its output: "recorded:" means it
+   landed. "not recorded (too_large)" names the size and the limit: shorten the note and run it again.
 4. Draft the customer reply from what you validated (rules in "Support memory" and "Sending as Luna" below): German "du"
    unless the customer wrote "Sie", warm and short, signed as Luna, no ids, no internal words, no memory quotes. Every claim
    in it backed by your evidence (`checks`); a claim you could not back stays out (`openChecks`). Leave `draft` empty when the
@@ -552,7 +555,7 @@ The desk has already claimed the thread for you (triage_owner=local) and release
 5. Answer with the JSON verdict. `caption`: under 50 characters, e.g. "validated unattended 21:40Z; reply drafted".
 
 Hard rules (they override everything below):
-- Your ONLY write outside {DECISIONS}/runs/ is that one note through plain-note.py (and, when the note carries Hermes
+- Your ONLY write outside {DECISIONS}/runs/ is that one validation through validation-note.py (and, when the note carries Hermes
   feedback, one entry appended to ~/orbit-scratch/hermes-feedback/LOG.md with "unattended desk run" in its heading).
   Never reply to the customer, never send as Luna, never write a Plain field, status, label or assignee, never write to any
   database, never change, commit or push code, never check out a branch in {ORBIT}, never run claude, desk-close.py,
@@ -570,7 +573,7 @@ Hard rules (they override everything below):
 - `result` is read on a pane by someone who has not opened any file: plain words, no paths, ids, hashes or code words.
 """]
     if rehearse:
-        parts.append('REHEARSAL: a test of the chain. Do the whole job, but plain-note.py runs dry here (it prints "dry, would post:" and writes '
+        parts.append('REHEARSAL: a test of the chain. Do the whole job, but validation-note.py runs dry here (it prints "dry, would record:" and writes '
                      'nothing): treat that line as the note landing. Append nothing to the feedback log. Answer as you would for real.\n')
     parts.append('## The card\n' + json.dumps({k: card.get(k) for k in ('id', 'ref', 'lane', 'impact', 'waits', 'status', 'note', 'act', 'pr', 'thread')}, ensure_ascii=False, indent=1))
     parts.append('## What the brief saw (prepared before the pick)\n' + json.dumps({k: brief.get(k) for k in ('why', 'fact', 'then', 'checks', 'openChecks')}, ensure_ascii=False, indent=1))
@@ -579,6 +582,7 @@ Hard rules (they override everything below):
     parts.append('## The /triage rules (Orbit repo, .claude/commands/triage.md on origin/develop)\n'
                  'Where they name an MCP tool (get_thread, add_internal_note, upsert_thread_field, Sentry, PostHog) you have none: use the commands above '
                  'and name what you could not read. Where they say to read the Hermes pass from the Notion page, read ' + pass_file + ' (the same pass). '
+                 'Where they say to record the validation with plain.py validate, use validation-note.py as above. '
                  '`--env=<stage>` on dynamo:query in these rules is outdated: the stage goes in STAGE.\n\n' + triage_rules())
     parts.append('## The lane recipe and the customer-text rules (CARDS.md)\n' + (recipe('FAST', card['id']) or '(no recipe section)'))
     return '\n\n'.join(parts)
@@ -614,7 +618,7 @@ def run_unattended(path, rec, brief, card, dry, rehearse):
     rec['rehearsal'] = bool(rehearse)
     stem = f"{DECISIONS}/runs/{os.path.basename(path)[:-5]}"
     os.makedirs(f'{DECISIONS}/runs', exist_ok=True)
-    receipt = f'{path}.note'   # plain-note.py writes it; never *.json, the pane reads those as picks
+    receipt = f'{path}.note'   # validation-note.py writes it; never *.json, the pane reads those as picks
     try:
         os.remove(receipt)
     except FileNotFoundError:
@@ -626,6 +630,8 @@ def run_unattended(path, rec, brief, card, dry, rehearse):
         if not op['pass']:
             raise RuntimeError('the thread has no OrBot brief to check; the session validates it')
         rec['passSource'] = op['source']
+        rec['passSection'] = op['pass'].get('section')   # the pass the run judges; validation-note.py sends it (orbot #984)
+        write_json(path, rec)
         if not rehearse:
             deskplain.claim(thread)   # raises while a person or another local run holds the thread
             claimed = True
@@ -658,9 +664,10 @@ def run_unattended(path, rec, brief, card, dry, rehearse):
         except Exception:
             note = None
         # the receipt, not the model's word, says whether a note landed
-        landed = bool(note) and note.get('firstLine') == deskplain.UNATTENDED_LINE and bool(note.get('dry')) == bool(rehearse)
+        landed = (bool(note) and note.get('firstLine') == deskplain.UNATTENDED_LINE and bool(note.get('dry')) == bool(rehearse)
+                  and note.get('verdict') == v.get('verdict'))
         if not v.get('done') or not landed:
-            why = v.get('result') if not v.get('done') else 'the run said done, but no note landed on the thread'
+            why = v.get('result') if not v.get('done') else 'the run said done, but no validation with that verdict landed on the ticket record'
             raise RuntimeError(f"not done: {why or 'no reason given'}")
     except Exception:
         if claimed:
@@ -682,7 +689,7 @@ def run_unattended(path, rec, brief, card, dry, rehearse):
     if rehearse:
         with open(f'{stem}.draft.json', 'w') as f:
             json.dump(side, f, ensure_ascii=False, indent=1)
-        finish(path, rec, 'failed', f"rehearsal: the note would be posted ({note.get('chars')} characters, verdict {v.get('verdict')}); "
+        finish(path, rec, 'failed', f"rehearsal: the validation would be recorded ({note.get('chars')} characters, verdict {v.get('verdict')}); "
                                     f"reply {'drafted' if draft else 'not drafted'}. {v.get('result') or ''}".strip())
         return
     os.makedirs(DRAFTS, exist_ok=True)

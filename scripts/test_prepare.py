@@ -147,8 +147,9 @@ def test_the_brief_fact_comes_from_the_ticket_record():
     # 2026-11-14: OrBot's notes leave Plain; a marker note in the timeline no longer decides, the ticket record does
     t = {'threadFields': [], 'customer': {'fullName': 'Dana', 'email': {'email': 'dana@example.com'}}}
     rows = [{'at': '2026-11-14T09:00', 'kind': 'Note', 'who': 'bot', 'actor': 'MachineUserActor', 'text': '<!-- ORBOT_CANONICAL_TRIAGE_BRIEF -->'}]
-    keep = dp.orbot_pass_of
+    keep, keep_v = dp.orbot_pass_of, dp.validation_of
     try:
+        dp.validation_of = lambda tid: None
         dp.orbot_pass_of = lambda tid: {'source': 'record', 'pass': None}
         m = dp.holder_block(t, rows, 'th_1')
         assert 'Hermes brief: none on the ticket record\n' in m and not dp.facts_of(FAST, m)['hermes'], m
@@ -159,7 +160,33 @@ def test_the_brief_fact_comes_from_the_ticket_record():
         m = dp.holder_block(t, [], 'th_1')
         assert 'from the Plain notes' in m and dp.facts_of(FAST, m)['hermes'], m
     finally:
-        dp.orbot_pass_of = keep
+        dp.orbot_pass_of, dp.validation_of = keep, keep_v
+
+
+def test_the_validation_fact_comes_from_the_ticket_record():
+    # 2026-11-15 (orbot #984): validations leave Plain; a Plain note that says "triage validation" no longer decides
+    t = {'threadFields': [], 'customer': {'fullName': 'Dana', 'email': {'email': 'dana@example.com'}}}
+    rows = [{'at': '2026-11-15T09:00', 'kind': 'Note', 'who': 'Sam', 'actor': 'UserActor', 'text': '## Local triage validation (Claude)'}]
+    keep, keep_v = dp.orbot_pass_of, dp.validation_of
+    try:
+        dp.orbot_pass_of = lambda tid: {'source': 'record', 'pass': {'at': '2026-11-15T08:00:00.000Z'}}
+        dp.validation_of = lambda tid: None
+        m = dp.holder_block(t, rows, 'th_1')
+        assert 'local validation note: none\n' in m and not dp.facts_of(FAST, m)['validated'], m
+        rec = {'source': 'record', 'author': 'loop', 'at': '2026-11-15T10:00:00.000Z', 'verdict': 'confirmed', 'pass_newer': False, 'unattended': False}
+        dp.validation_of = lambda tid: rec
+        m = dp.holder_block(t, [], 'th_1')
+        assert 'local validation note: loop at 2026-11-15T10:00, verdict confirmed\n' in m and dp.facts_of(FAST, m)['validated'], m
+        dp.validation_of = lambda tid: {**rec, 'pass_newer': True}
+        m = dp.holder_block(t, [], 'th_1')
+        assert 'a newer Hermes pass since' in m and dp.facts_of(FAST, m)['validated'], m
+        dp.validation_of = lambda tid: {**rec, 'source': 'plain_note', 'author': None, 'verdict': None}
+        m = dp.holder_block(t, [], 'th_1')
+        assert 'local validation note: a Plain note at 2026-11-15T10:00, verdict not stated' in m and dp.facts_of(FAST, m)['validated'], m
+        # a validated card offers no second validation
+        assert dp.UNATTENDED not in dp.menu_of(FAST, dp.facts_of(FAST, m)), dp.menu_of(FAST, dp.facts_of(FAST, m))
+    finally:
+        dp.orbot_pass_of, dp.validation_of = keep, keep_v
 
 
 if __name__ == '__main__':

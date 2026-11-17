@@ -348,6 +348,18 @@ def orbot_pass_of(thread_id):
     return plain.orbot_pass(thread_id, bodies=False, index=_index['idx'])
 
 
+def validation_of(thread_id):
+    """The thread's newest validation from the one reader (agent-loop jev/plain.py newest_validation), no bodies: the
+    record's validation section, or (temporarily) the thread's Plain validation note while the record has none.
+    2026-11-15 (orbot #984): validations move from Plain notes to the thread's ticket record."""
+    sys.path.append(f'{HOME}/orbit-scratch/agent-loop/jev')
+    import plain
+    with _index_lock:
+        if 'idx' not in _index:
+            _index['idx'] = plain.ticket_index()
+    return plain.newest_validation(thread_id, index=_index['idx'], bodies=False)
+
+
 def holder_block(t, rows, thread_id=None):
     """Who holds the thread, on top of the material (2026-10-22: a brief recommended "Draft the reply" while the customer
     had tagged a teammate and the answer was that teammate's). The Plain assignee, the triage claim, the last internal
@@ -370,8 +382,14 @@ def holder_block(t, rows, thread_id=None):
     # 2026-11-09, from the score ledger: "I sent it already" was recommended 19 times and right 3 times; in 10 of the
     # misses the person picked "Claim + validate now". The brief saw our reply and called the card done, while the
     # thread still had no validation note. So the material states it outright.
-    validated = next((r for r in rows if r['kind'] == 'Note' and 'triage validation' in r['text'].lower()), None)
-    out.append(f"local validation note: {validated['who']} at {validated['at']}" if validated else 'local validation note: none')
+    # 2026-11-15 (orbot #984): the validation lives on the ticket record (validation_of), no longer a Plain note.
+    v = validation_of(thread_id) if thread_id else None
+    if v:
+        who = v['author'] if v['source'] == 'record' else 'a Plain note'
+        out.append(f"local validation note: {who} at {(v['at'] or '')[:16]}, verdict {v['verdict'] or 'not stated'}"
+                   + (', a newer Hermes pass since' if v['pass_newer'] else ''))
+    else:
+        out.append('local validation note: none')
     # 2026-11-09: the unattended validation needs a Hermes brief to check; the material says whether one exists.
     # 2026-11-14: the ticket record says so (orbot_pass_of), no longer a marker in the notes read.
     op = orbot_pass_of(thread_id) if thread_id else None
