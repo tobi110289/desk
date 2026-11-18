@@ -1,0 +1,1 @@
+{ "name": "desk", "version": "0.1.0", "description": "Maxim's desk: live card pane, desk_card and desk_close tools, send guard", "types": "./types/index.d.ts" }
