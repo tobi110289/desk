@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """memory.py — the desk's window onto the orbot support memory (tenant + requester profiles, known issues).
 
-Reads come from the local checkout ~/orbot/support-memory (git pull at desk pre-flight); writes never touch the
+Reads come from support-memory in the local orbot clone (deskconfig.ORBOT_DIR; git pull at desk pre-flight); writes never touch the
 canonical files: they queue as proposals here and go up as one reviewed orbot PR (policy.md rule 3).
 
-  memory.py pull                          fast-forward ~/orbot to origin/main, print the head (desk.py does this)
+  memory.py pull                          fast-forward the orbot clone to origin/main, print the head (desk.py does this)
   memory.py show <T-ref|th_id> [--json]   resolve the thread's customer/company and print the memory block
   memory.py lookup --company co_… --customer c_… [--tenant-field x] [--domain d] [--email e]   JSON for scripts
   memory.py propose --ref T-… --tenant <id> [--person c_… --name "…" --role "…" --language de]
                     --section approved|observed|inferred --confidence low|medium|high --source "…" "<fact>"
   memory.py queue                         list queued proposals (state queued / pr:<n>)
   memory.py drop <id>                     drop a queued proposal
-  memory.py pr                            apply every queued proposal on a branch in ~/orbot, validate, push, open the PR
+  memory.py pr                            apply every queued proposal on a branch in the orbot clone, validate, push, open the PR
   memory.py sync                          mark pr:<n> proposals merged once the PR merged (desk.py does this)
 
 Identity: Plain company id → plain-company-tenant-map.json → tenant dir; else the thread's tenant_id field; else the
@@ -19,13 +19,13 @@ customer's domain against tenant aliases. No match means no memory, never a gues
 """
 import json, os, re, sys, subprocess, datetime, hashlib
 
-HOME = os.path.expanduser('~')
-ORBOT = f'{HOME}/orbot'
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskconfig  # noqa: E402
+ORBOT = deskconfig.ORBOT_DIR
 SM = f'{ORBOT}/support-memory'
-DESK = f'{HOME}/orbit-scratch/desk'
+DESK = deskconfig.DESK
 QUEUE = f'{DESK}/memory-proposals.jsonl'
 CACHE = f'{DESK}/memory-cache.json'          # thread id → customer/company identity (a thread's customer never changes)
-import deskconfig
 PLAIN_URL = deskconfig.PLAIN_THREAD
 today = datetime.date.today().isoformat()
 SECTIONS = {'approved': 'Approved facts', 'observed': 'Observed facts', 'inferred': 'Inferred facts'}
@@ -47,6 +47,7 @@ def head():
 def pull():
     """Fast-forward main. A dirty tree or a non-main branch is left alone (memory.py pr may have a branch checked out)."""
     try:
+        deskconfig.need(ORBOT, stop=False)
         branch = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])
         dirty = [l for l in sh(['git', 'status', '--porcelain']).splitlines() if not l.startswith('??')]
         if branch != 'main' or dirty:
@@ -142,7 +143,7 @@ def known_issues(title):
 # ---------------------------------------------------------------- Plain identity
 def plain_gql(q, variables):
     if not os.environ.get('PLAIN_API_KEY'): return None
-    sys.path.insert(0, os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import plain   # the one Plain reader
+    sys.path.insert(0, deskconfig.JEV); import plain   # the one Plain reader
     return plain.try_gql(q, variables)
 
 
@@ -436,6 +437,8 @@ if __name__ == '__main__':
     a = sys.argv[1:]
     if not a: print(__doc__); sys.exit(0)
     cmd, rest = a[0], a[1:]
+    if cmd in ('pull', 'pr'): deskconfig.need(ORBOT)   # both work in the clone; show and lookup read it when it is there
+    if cmd in ('pr', 'sync'): deskconfig.key('botRepo')
     if cmd == 'pull': r = pull(); print(json.dumps(r)); sys.exit(0 if r['ok'] else 1)
     if cmd == 'show': sys.exit(show(rest[0], '--json' in rest) if rest else 2)
     if cmd == 'lookup':

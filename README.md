@@ -20,6 +20,8 @@ This is my working setup, published as a worked example. It runs against my comp
 | `skill/SKILL.md`         | The `/desk` procedure                                                                                                                                                    |
 | `skill/CARDS.md`         | Sources, lanes and the recipe for each lane                                                                                                                              |
 | `scripts/desk.py`        | Gathers from every source, ranks, writes `cards.json`                                                                                                                    |
+| `scripts/deskconfig.py`  | The one resolver: every folder the scripts read or write, and the company ids from `config.json`                                                                         |
+| `scripts/check-linux.py` | Runs the gather and the prepare rules on Linux against a copied desk folder with stubbed sources                                                                         |
 | `scripts/desk-close.py`  | Records a verb (the mod calls it through `desk_close`)                                                                                                                   |
 | `scripts/desk-decide.py` | Records a pick taken on the pane; `desk-execute.py` runs the queue in the background; `deskanchor.py` and `deskclass.py` are their shared tables                         |
 | `scripts/deskhold.py`    | The one hold logic: a card's wait (`key`, `since`), closed / parked / live, the ranking tiers; used by the gather, the close script and the live feed                    |
@@ -80,6 +82,40 @@ With `"liveEvents": true` in `config.json`, the pane hears about a new Plain thr
 
 Data (`desk.json`, `cards.json`, caches, `config.json`) lives in `~/orbit-scratch/desk` and never enters the repo.
 
+## Point the desk at other folders
+
+The scripts find every file and folder through one resolver, `scripts/deskconfig.py`. Each folder has an environment variable. Without it the script uses the path in the right column, so a desk that runs there needs nothing.
+
+| Variable          | What it is                                                         | Default                           |
+| ----------------- | ------------------------------------------------------------------ | --------------------------------- |
+| `DESK_SCRATCH`    | The scratch root: local ticket folders (`<feature>/issues`), sweeps | `~/orbit-scratch`                 |
+| `DESK_DIR`        | The desk folder: `desk.json`, `cards.json`, briefs, caches          | `<scratch>/desk`                  |
+| `DESK_CONFIG`     | The company ids                                                    | `<desk>/config.json`              |
+| `DESK_LOOP_DIR`   | The agent loop: `state.json`, `sweep-cache.json`                   | `<scratch>/agent-loop`            |
+| `DESK_JEV_DIR`    | The loop helpers: the Plain reader, PR health, lane hints          | `<loop>/jev`                      |
+| `DESK_ORBIT_REPO` | The app clone                                                      | `~/orbit`                         |
+| `DESK_ORBOT_REPO` | The support bot clone (support memory)                             | `~/orbot`                         |
+| `DESK_SKILLS_DIR` | The Claude skills folder                                           | `~/.claude/skills`                |
+| `DESK_HERMES_LOG` | The Hermes feedback log                                            | `<scratch>/hermes-feedback/LOG.md` |
+| `DESK_SWEEPS_DIR` | The weekly error sweep                                             | `<scratch>/sentry-sweeps`         |
+| `DESK_A2A_ENV`    | The A2A hub token file                                             | `~/.orbit-a2a/config.env`         |
+| `DESK_AWS_DIR`    | The AWS login caches                                               | `~/.aws`                          |
+
+Set the variables where the scripts start: the shell, the `env` block of `~/.claude/settings.json` for the pane, or the unit of a timer. Then run `./install.sh` again, so it links the scripts and the skill into the new folders. `python3 scripts/deskconfig.py` prints every path and says whether it exists.
+
+A script that needs a folder, a file or a config key stops with one line that names it, for example `desk: loop helpers (jev) missing: /srv/desk/agent-loop/jev (set DESK_JEV_DIR)`. A script that does not need it still runs: without an AWS folder `sso-state.py` prints `no AWS`, and without the support bot clone the gather runs with no support memory.
+
+Not on the resolver yet: `desk-execute.py`, `luna-send.py` and `desk-events.py` (they move with the send path), and the mod, which reads the desk folder at `~/orbit-scratch/desk`.
+
+## Run on Linux
+
+```sh
+python3 scripts/check-linux.py            # here, on a Linux machine
+python3 scripts/check-linux.py --docker   # in a python:3.12 Linux container
+```
+
+The check builds a made-up desk in a temporary folder, points every variable there, and runs `desk.py`, `desk-prepare.py`, `test_prepare.py` and `sso-state.py`. Plain, GitHub, Jev, Superset, A2A and the model are stubs. `open`, `pbcopy`, `afplay`, `ssh` and the other Mac tools are traps: a call fails the check. It also checks that a missing folder or key stops a script with one line, and that no script outside the resolver names a home path. `--desk <folder>` uses a copy of that folder instead of the made-up desk.
+
 ## What you must replace
 
 The sources in `desk.py` are mine: an agent loop with a `state.json`, a terminal reader, a lane classifier, a support bot with its own memory repo and send path, a weekly error sweep. Each is one block in `desk.py` and one recipe in `CARDS.md`. Keep `add()`, the verbs, the deferral rules and the ranking; swap the sources for yours.
@@ -91,6 +127,8 @@ Names of customers and teammates and all ticket numbers in the comments are repl
 ```sh
 claude plugin validate mod
 claude plugin test mod
+python3 scripts/test_prepare.py
+python3 scripts/check-linux.py
 ```
 
 ## License

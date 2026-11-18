@@ -5,11 +5,12 @@ next to this file (dated copy on --snapshot). `--counts` prints one line for the
 import json,re,sys,html,os
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import deskconfig
 from deskconfig import PLAIN_THREAD
-LOOP=os.path.expanduser('~/orbit-scratch/agent-loop')
+LOOP=deskconfig.need(deskconfig.LOOP)
 # Data files live beside the symlink in the desk data dir, never beside the script in the repo (a run through the real
 # path once left human-call.json, with thread ids and titles, inside the public repo folder).
-HERE=os.path.expanduser('~/orbit-scratch/desk')
+HERE=deskconfig.need(deskconfig.DESK)
 c=json.load(open(f'{LOOP}/sweep-cache.json'))['threads']; s=json.load(open(f'{LOOP}/state.json'))['threads']
 try: s={**json.load(open(f'{LOOP}/state-archive.json'))['threads'],**s}   # done entries older than 7 days live there
 except Exception: pass
@@ -19,7 +20,7 @@ except Exception: pass
 def live_todo():
     key=os.environ.get('PLAIN_API_KEY')
     if not key: return None,'PLAIN_API_KEY missing'
-    sys.path.insert(0,os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import plain   # the one Plain reader
+    sys.path.insert(0,deskconfig.JEV); import plain   # the one Plain reader
     q='query($after:String){ threads(first:100, after:$after, filters:{statuses:[TODO]}) { pageInfo { hasNextPage endCursor } edges { node { id ref title status } } } }'
     out={}; after=None
     for _ in range(20):
@@ -115,7 +116,7 @@ if '--snapshot' in sys.argv: open(f'{HERE}/todo-gap-{now[:10]}.md','w').write('\
 esc=html.escape
 h=[f'<title>Plain TODO Gap</title><style>body{{font:15px/1.5 -apple-system,system-ui,sans-serif;background:#F3F5F8;color:#141A22;margin:0;padding:32px 20px}}main{{max-width:980px;margin:0 auto}}h1{{font-size:20px}}h2{{font-size:14px;letter-spacing:.06em;text-transform:uppercase;color:#5C6774;margin:28px 0 8px}}table{{border-collapse:collapse;width:100%;background:#fff;border:1px solid #D9DEE6;border-radius:6px}}td,th{{padding:6px 10px;border-top:1px solid #D9DEE6;text-align:left;vertical-align:top;font-size:14px}}th{{font-size:12px;color:#5C6774}}code{{font:12px ui-monospace,monospace;color:#5C6774}}a{{color:#1D5FCC;text-decoration:none}}.id{{font:500 13px ui-monospace,monospace;white-space:nowrap}}@media(prefers-color-scheme:dark){{body{{background:#0F1319;color:#E7ECF2}}table{{background:#171C24;border-color:#2A323D}}td,th{{border-color:#2A323D}}a{{color:#6EA1FF}}}}</style><main>',
    f'<h1>Plain TODO vs board <small style="color:#5C6774;font-weight:400">{now} Berlin</small></h1>',
-   f'<p>{len(c)} threads TODO in Plain · {len(rows["A"])} on the board · <b>{len(c)-len(rows["A"])} not shown</b>. Status: {esc(src)}. Source: <code>~/orbit-scratch/desk/todo-gap.py</code>; the loop board links here.</p>',
+   f'<p>{len(c)} threads TODO in Plain · {len(rows["A"])} on the board · <b>{len(c)-len(rows["A"])} not shown</b>. Status: {esc(src)}. Source: <code>{deskconfig.show(HERE)}/todo-gap.py</code>; the loop board links here.</p>',
    '<table><tr><th>bucket</th><th>count</th><th>why</th></tr>']
 for k,n,w in BUCKETS: h.append(f'<tr><td><a href="#{k}">{k}. {esc(n)}</a></td><td>{len(rows[k])}</td><td>{esc(w)}</td></tr>')
 h.append('</table>')

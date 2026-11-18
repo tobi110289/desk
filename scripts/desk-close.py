@@ -5,8 +5,8 @@
 string. The card's key and since come from cards.json, so this script holds no copy of the hold logic. It also writes
 the verb into the card in cards.json, so the pane shows it at once without a logic copy of its own."""
 import re, json, sys, os, datetime
-sys.path.insert(0, os.path.dirname(os.path.realpath(__file__))); import deskhold
-P=os.path.join(os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk'),'desk.json'); CARDS=os.path.join(os.path.dirname(P),'cards.json')
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__))); import deskhold, deskconfig
+P=os.path.join(deskconfig.need(deskconfig.DESK),'desk.json'); CARDS=os.path.join(os.path.dirname(P),'cards.json')
 import fcntl
 _lock=open(os.path.join(os.path.dirname(P),'.desk.lock'),'w'); fcntl.flock(_lock,fcntl.LOCK_EX)   # desk.py checks desk.json under the same lock before it writes
 d=json.load(open(P)); cid,verb=sys.argv[1],sys.argv[2]
@@ -51,9 +51,9 @@ else:
             import task; task.mark_done(cid,f"{verb}: "+' '.join(sys.argv[3:]))
         except Exception as e: print('task not marked done:',e)
 if new_caption is not None:
-    sp=os.path.expanduser('~/orbit-scratch/agent-loop/state.json')
+    sp=f'{deskconfig.LOOP}/state.json'
     try:
-        sys.path.insert(0,os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import loopstate; loopstate.revive(ref)   # an archived entry comes back
+        sys.path.insert(0,deskconfig.JEV); import loopstate; loopstate.revive(ref)   # an archived entry comes back
         st=json.load(open(sp)); thr=st['threads']
         if ref in thr:
             old=(thr[ref].get('status') or '').strip()

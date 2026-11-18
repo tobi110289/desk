@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""plain-stats.py: the Plain numbers the desk pane shows. Writes ~/orbit-scratch/desk/plain-stats.json.
+"""plain-stats.py: the Plain numbers the desk pane shows. Writes plain-stats.json in the desk folder.
 
 Read-only. One paginated Plain read (TODO + SNOOZED threads, newest 10 timeline entries each) plus the local
 loop state, sweep cache and cards cache, so the pane can say how Plain and the desk line up. `--print` also
 prints the JSON. Exit 2 when Plain is unreachable (the previous file stays)."""
 import datetime, json, os, re, sys, zoneinfo
 
-HOME = os.path.expanduser('~')
-DESK = f'{HOME}/orbit-scratch/desk'
-LOOP = f'{HOME}/orbit-scratch/agent-loop'
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskconfig  # noqa: E402
+DESK = deskconfig.need(deskconfig.DESK)
+LOOP = deskconfig.LOOP
 OUT = f'{DESK}/plain-stats.json'
 BERLIN = zoneinfo.ZoneInfo('Europe/Berlin')
-sys.path.insert(0, f'{LOOP}/jev')
+sys.path.insert(0, deskconfig.need(deskconfig.JEV))
 import plain  # noqa: E402
-import deskconfig  # noqa: E402
 
 Q = '''query($after:String,$st:[ThreadStatus!]){ threads(first:100, after:$after, filters:{statuses:$st}) {
   pageInfo{ hasNextPage endCursor }

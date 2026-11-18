@@ -19,7 +19,7 @@ marks the batch asked.
   desk-harvest.py done <id> stored|skipped   settle that one line
 
 A line is one plain fact with its source and confidence in words, e.g. "Dana is the dispatch lead (she says so in the
-thread; high)". File: ~/orbit-scratch/desk/harvest.json (DESK_DIR for tests).
+thread; high)". File: harvest.json in the desk folder (deskconfig.py; DESK_DIR for tests).
 """
 import datetime
 import hashlib
@@ -27,7 +27,9 @@ import json
 import os
 import sys
 
-DESK = os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk')
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskconfig  # noqa: E402
+DESK = deskconfig.DESK
 PATH = f'{DESK}/harvest.json'
 
 

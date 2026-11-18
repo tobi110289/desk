@@ -17,10 +17,9 @@ import re
 import subprocess
 import sys
 
-HOME = os.path.expanduser('~')
-DESK = f'{HOME}/orbit-scratch/desk'
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import deskconfig  # noqa: E402
+DESK = deskconfig.DESK
 
 Q_THREAD = '''query($id: ID!){ thread(threadId:$id){ status timelineEntries(first: 40){ edges{ node{ id timestamp{ iso8601 }
  actor{ __typename ... on UserActor{ user{ fullName } } ... on MachineUserActor{ machineUser{ fullName } } ... on CustomerActor{ customer{ fullName } } }

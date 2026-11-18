@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """tickets.py: the Notion follow-up tickets we created, linked to Plain threads and loop entries.
 
-The cache ~/orbit-scratch/desk/notion-tickets.json is written by the desk mod (~/.claude/mods/desk) through the
+The cache notion-tickets.json in the desk folder is written by the desk mod (~/.claude/mods/desk) through the
 Notion MCP, because no Notion API key exists locally. This module only reads it and sorts the tickets into the
 buckets the desk and the pane show. `python3 tickets.py` prints the buckets."""
 import datetime, json, os, re, sys
 
-HOME = os.path.expanduser('~')
-DESK = f'{HOME}/orbit-scratch/desk'
-LOOP = f'{HOME}/orbit-scratch/agent-loop'
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskconfig as _dc  # noqa: E402
+DESK = _dc.DESK
+LOOP = _dc.LOOP
 CACHE = f'{DESK}/notion-tickets.json'
 OPEN = ('Ready to Execute', 'Ready to Estimate', 'Triage', 'Not started', 'Blocked')
 RUNNING = ('In progress', 'In review')
 SHIPPED = ('Done', 'Staging Released', 'Production Released')
 IDLE_DAYS = 14
-try:
-    sys.path.insert(0, DESK); import deskconfig as _dc; _NOTION_ME = _dc.NOTION_ME
-except Exception:
-    _NOTION_ME = ''
+_NOTION_ME = _dc.NOTION_ME
 NOW = datetime.datetime.now(datetime.timezone.utc)
 
 
