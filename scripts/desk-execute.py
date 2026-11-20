@@ -11,7 +11,8 @@ Classes (deskclass.py): `script` runs here with no model; `model` is one headles
 Grep, no MCP, DESK_EXECUTE_MODEL, default sonnet) that gets the brief, its raw material, the lane recipe and the one
 option, acts, and answers with a JSON verdict (done, result, note, caption, learned) which this script records with
 desk-close.py; the model never closes a card itself and cannot send as Luna (the guard below). `session` records are
-never touched here, the session executes them and desk-close.py marks them done.
+never touched here, the session executes them and desk-close.py marks them done
+(2026-11-20: and sets the thread status by the same rule, deskthread.py).
 
   desk-execute.py              drain every queued script and model decision, up to 3 at a time
   desk-execute.py --one <file> run one record (any class but session), for a look by hand
@@ -50,6 +51,7 @@ sys.path.insert(0, HERE)
 import deskanchor  # noqa: E402
 import deskclass  # noqa: E402
 import deskplain  # noqa: E402
+import deskthread  # noqa: E402
 import importlib.util as _ilu
 _spec = _ilu.spec_from_file_location('desk_harvest', f'{HERE}/desk-harvest.py'); deskharvest = _ilu.module_from_spec(_spec); _spec.loader.exec_module(deskharvest)
 
@@ -144,82 +146,18 @@ add_note = deskplain.add_note
 mark_todo = deskplain.mark_todo
 snooze_waiting = deskplain.snooze_waiting
 
-# 2026-11-10: one press closes the card and moves the Plain thread (asked 11 times, 09-09 to 11-06; until now three
-# memories held the rule and the session set the status by hand). The rule, once:
-#   done     nothing is owed, or we only wait for the customer's feedback (Plain reopens the thread on their next message)
-#   waiting  the customer's answer feeds a change we still owe: snoozed as "Waiting for customer", so it stays open work
-#   leave    a teammate wrote the newest visible message after the brief was prepared, a person already set the status
-#            with his own reply, or we still owe work the reply only reports on: the status stays as it is
-THREAD_AFTER = ('done', 'waiting', 'leave')
-NAMES_DONE = {'Nobody to tell (mark done)', 'Close the loop (nothing owed)'}   # the option itself names the status
-SETTLES = deskclass.SEND | NAMES_DONE | {'I sent it already'}
-
-
-def thread_after(label, brief, live):
-    """(action, reason) for the thread after the pick. `live`: the thread anchor read right before the write
-    (deskanchor.thread_anchor), or {} when it could not be read."""
-    live = live or {}
-    prepared = (brief.get('preparedAt') or '')[:19]
-    if live.get('newestActor') == 'UserActor' and prepared and (live.get('newestAt') or '') > prepared:
-        return 'leave', f"{live.get('newestWho') or 'a teammate'} wrote the newest message after the brief; their status stands"
-    if label in NAMES_DONE:
-        return 'done', 'the option names it'
-    if not live.get('status'):
-        return 'leave', 'the thread could not be read, so a teammate reply cannot be ruled out'
-    if label == 'I sent it already' and live.get('status') in ('SNOOZED', 'DONE'):
-        return 'leave', f"the reply went out by hand and the thread is already {live['status'].lower()}"
-    said = (brief.get('threadAfter') or '').strip().lower()
-    if said in THREAD_AFTER:
-        return said, 'the brief says so'
-    # briefs from before the field: a status reply on a promise reports work we still owe; an awaited answer counts
-    # as one that feeds a change (the memory: when in doubt, waiting), since a done thread hides what we owe
-    if brief.get('lane') == 'PROMISE' and label != 'I sent it already':
-        return 'leave', 'a status reply on a promise; the work is still owed'
-    if (brief.get('deferTrigger') or '').strip().lower().startswith('customer replies'):
-        return 'waiting', 'an answer from the customer is awaited'
-    return 'done', 'nothing is awaited'
-
-
-def apply_thread_after(thread, action, live, dry=False):
-    """Write the status `thread_after` chose; return one plain line for the result."""
-    if not thread or action == 'leave':
-        return 'thread status left as it is'
-    tag = ' (dry)' if dry or deskplain.dry_env() else ''
-    if action == 'done':
-        if (live or {}).get('status') == 'DONE':
-            return 'thread already done'
-        mark_done(thread, dry)
-        return 'thread set to done' + tag
-    snooze_waiting(thread, dry)
-    return 'thread snoozed as waiting for the customer' + tag
-
-
-def live_thread(thread):
-    if not thread:
-        return {}
-    try:
-        return deskanchor.thread_anchor(thread)
-    except Exception as e:
-        return {'error': str(e)[:200]}
+# 2026-11-10: one press closes the card and moves the Plain thread. 2026-11-20: the rule moved to deskthread.py, so
+# desk-close.py applies the same rule to a pick the session carried out (four NOTIFY sends sat at TODO in W47).
+THREAD_AFTER = deskthread.THREAD_AFTER
+NAMES_DONE = deskthread.NAMES_DONE
+SETTLES = deskthread.SETTLES
+thread_after = deskthread.thread_after
+apply_thread_after = deskthread.apply_thread_after
+live_thread = deskthread.live_thread
 
 
 def settle_thread(rec, brief, thread, live=None, dry=False):
-    """The status rule for one pick, applied; returns the line for the result. A failed write is logged, never fatal:
-    the customer has the answer and the card is closed either way."""
-    if not thread:
-        return ''
-    live = live if live is not None else live_thread(thread)
-    if live.get('error'):
-        live = {}
-    action, why = thread_after(rec['option'], brief, live)
-    rec['threadAfter'] = {'action': action, 'reason': why}
-    try:
-        line = apply_thread_after(thread, action, live, dry)
-    except Exception as e:
-        log(f"{rec['cardId']}: thread status {action} failed: {e}")
-        return f'thread status {action} failed'
-    log(f"{rec['cardId']}: {line} ({why})")
-    return f'{line} ({why})'
+    return deskthread.settle_thread(rec, brief, thread, live, dry, log=log)
 
 
 def close(rec, verb, note, caption=None, trigger=None, act=None, env=None, sent=False):

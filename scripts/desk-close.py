@@ -5,7 +5,7 @@
 string. The card's key and since come from cards.json, so this script holds no copy of the hold logic. It also writes
 the verb into the card in cards.json, so the pane shows it at once without a logic copy of its own."""
 import re, json, sys, os, datetime
-sys.path.insert(0, os.path.dirname(os.path.realpath(__file__))); import deskhold
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__))); import deskhold, deskthread
 P=os.path.join(os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk'),'desk.json'); CARDS=os.path.join(os.path.dirname(P),'cards.json')
 import fcntl
 _lock=open(os.path.join(os.path.dirname(P),'.desk.lock'),'w'); fcntl.flock(_lock,fcntl.LOCK_EX)   # desk.py checks desk.json under the same lock before it writes
@@ -24,6 +24,7 @@ if card is None:
     # not on the desk this run: rebuild the wait from what desk.json remembers of the card (key, since, lane, ref)
     card={'id':cid,'ref':c.get('ref') or cid.split(':',1)[-1],'lane':c.get('lane') or '','status':c.get('status') or '','key':c.get('key'),'since':c.get('since')}
 ref=cid.split(':',1)[1] if ':' in cid else cid
+settle=None   # the decision file whose thread status the rule sets after the close
 new_caption=None
 if '--caption' in sys.argv:
     # 2026-09-23: --caption "<text>" writes the loop caption here and binds the closure to it. Closing first and rewriting
@@ -76,6 +77,10 @@ if verb!='caption':
         if rec.get('state') in ('queued','running') and not os.environ.get('DESK_DECISION'):
             rec['state']='done'; rec['finishedAt']=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
             rec['result']=(f"{verb} in the session: "+' '.join(sys.argv[3:]))[:300]
+            # 2026-11-20: the executor's thread status rule for a session pick too. Four NOTIFY "Send it" picks of W47
+            # went out as Luna from the session, the card closed, and the thread stayed TODO for days. The brief facts
+            # are copied now (the next prepare pass removes the brief); the rule runs once the record is written.
+            if deskthread.settles_in_session(rec,verb): rec['briefFacts']=deskthread.brief_facts(rec); settle=dp
             tmp=dp+'.tmp'; json.dump(rec,open(tmp,'w'),ensure_ascii=False,indent=1); os.replace(tmp,dp)
     except FileNotFoundError: pass
     except Exception as e: print('decision not marked:',e)
@@ -113,3 +118,9 @@ if verb!='caption':
                     'secs':_secs},ensure_ascii=False)+'\n')
     except FileNotFoundError: pass
     except Exception as e: print('not scored:',e)
+# 2026-11-20: detached, after the lock: a Plain read and write can outlast the 30 s the mod gives this script, and a
+# failed write must not fail the close. The result lands in the record and in decisions/execute.log.
+if settle:
+    try:
+        deskthread.start_settle(settle); print('thread status: the rule runs in the background (decisions/execute.log)')
+    except Exception as e: print('thread status not set:',e)
