@@ -35,7 +35,7 @@ def fetch(since, wait):
     cmd = (f"tok=$(sudo grep -m1 '^ORBOT_OPERATOR_API_TOKEN=' {deskconfig.SEND_ENV_FILE} | cut -d= -f2-); out=$(mktemp); "
            f"curl -s --max-time {wait + 10} -o \"$out\" -w '%{{http_code}}' -H \"Authorization: Bearer $tok\" {shlex.quote(url)}; "
            f"echo; cat \"$out\"; rm -f \"$out\"")
-    r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', deskconfig.SEND_HOST, cmd],
+    r = subprocess.run(deskconfig.box_argv(cmd),
                        capture_output=True, text=True, timeout=wait + 30)
     if r.returncode: raise RuntimeError(f'ssh failed: {r.stderr.strip()[:160] or r.returncode}')
     status, _, out = r.stdout.partition('\n')

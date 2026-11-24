@@ -36,7 +36,7 @@ def remote_curl(method, path, body=None, timeout=40):
     cmd = (f"tok=$(sudo grep -m1 '^ORBOT_OPERATOR_API_TOKEN=' {ENV} | cut -d= -f2-); "
            f"curl -s -o /tmp/luna-send.out -w '%{{http_code}}' -X {method} -H \"Authorization: Bearer $tok\" -H 'Content-Type: application/json' {data} {shlex.quote(BASE + path)}; "
            f"echo; cat /tmp/luna-send.out")
-    r = subprocess.run(['ssh', HOST, cmd], capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run(deskconfig.box_argv(cmd), capture_output=True, text=True, timeout=timeout)
     if r.returncode: raise RuntimeError(f'ssh failed: {r.stderr.strip()[:200]}')
     status, _, out = r.stdout.partition('\n')
     try: return int(status), json.loads(out) if out.strip() else {}

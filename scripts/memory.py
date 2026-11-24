@@ -67,7 +67,7 @@ def pull_repo():
 def box(cmd, stdin=None, timeout=60):
     """One ssh round trip to the box, the call luna-send.py and desk-events.py make. Returns (exit code, stdout, stderr)."""
     if not deskconfig.SEND_HOST: raise RuntimeError('config.json has no sendHost')
-    r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', deskconfig.SEND_HOST, cmd],
+    r = subprocess.run(deskconfig.box_argv(cmd),
                        input=stdin, capture_output=True, timeout=timeout)
     return r.returncode, r.stdout.decode('utf-8', 'replace'), r.stderr.decode('utf-8', 'replace')
 
