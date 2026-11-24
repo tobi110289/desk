@@ -646,7 +646,7 @@ def screen_card(ref,t,x):
     if st=='gone' and x.get('sentinel') and not pr:
         return {**base,'lane':'RUN','mins':2,'waits':'nobody','status':'finished without a PR','act':f'Worker of {ref} finished without a PR: read its summary, then respawn or retire the entry','score':30+iw}
     if st in ('quota_limit','onboarding_or_trust_prompt','shell_prompt_no_agent','gone'):
-        why={'quota_limit':'model limit reached','onboarding_or_trust_prompt':'onboarding prompt','shell_prompt_no_agent':'bare shell, no Claude UI','gone':'terminal unreadable'}[st]
+        why={'quota_limit':'model limit reached or account access refused','onboarding_or_trust_prompt':'onboarding prompt','shell_prompt_no_agent':'bare shell, no Claude UI','gone':'terminal unreadable'}[st]
         return {**base,'lane':'RUN','mins':2,'waits':'nobody','status':f'worker stalled: {why}','act':f'Worker of {ref} {f"#{pr}" if pr else ""} stalled ({why}): respawn it or retire the entry','score':30+iw}
     if st in ('idle_empty_prompt','finished_summary'):
         if pf and pf.get('merged'):
@@ -673,7 +673,10 @@ for ref,t in state.items():
         # 2026-09-29: an unreadable terminal is settled by the cache's box facts, not by a hand read (CARDS.md RUN)
         if _x.get('sentinel') or _x.get('tmuxAlive') is False: _x={**_x,'conf':1.0}
         elif _x.get('tmuxAlive') is True: _cov.explain(ref,'detached terminal, agent alive'); continue   # detached terminal, agent alive: the loop re-attaches
-    if _x and (_x.get('conf') or 0)>=0.85 and ph in ('handoff-running','pr-open','blocked'):
+    # 2026-11-18: an idle or finished screen with no PR is a card at any confidence the classifier gives it (0.6 for a
+    # summary it cannot tell from idle). Two such workers sat hidden: one waited on a helper that had stopped.
+    _idle_no_pr=bool(_x) and _x.get('state') in ('idle_empty_prompt','finished_summary') and not t.get('pr')
+    if _x and ((_x.get('conf') or 0)>=0.85 or _idle_no_pr) and ph in ('handoff-running','pr-open','blocked'):
         _c=screen_card(ref,t,_x)
         if _c=='hide':
             # coverage: a worker mid-turn, or idle while its open PR sits with HORST, is a reason; an idle worker with no
@@ -693,7 +696,8 @@ for ref,t in state.items():
                  'status':st,'note':note[:400],'since':f"pr-open:{t['pr']}:{why}",'act':f"#{t['pr']} has no agent and {why}: own it (fix CI / add auto-review) or spawn a babysit",'score':round((impact_of(ref)[1]+2)/2*10,1)})
         elif pi: _cov.explain(ref,'pr-open, CI green and queued for HORST')
         continue
-    if ph not in ('blocked','done'): continue
+    # 2026-11-18: a handoff-running worker whose screen is unsettled (conf < 0.85) fell out here with no reason; it now takes the caption/liveness rules below
+    if ph not in ('blocked','done','handoff-running'): continue
     if ph=='done' and not re.search(r'reply|open|pending|release|sync|rollout|deploy',st): continue
     if ph=='done' and re.search(r'(^|[;:] )done\s*$',st): continue   # 2026-09-16: a done entry whose caption ends in 'done' waits on nobody (T-111 came back daily as STALE)
     if re.search(r'reply sent',st) and not re.search(r'\+ ',st): _cov.explain(ref,'reply sent, waits on the customer'); continue
@@ -1395,6 +1399,7 @@ if not SCOPE:
                  'note':title[:200],'since':st,
                  'act':act+f" · {f.replace(HOME,'~')}",
                  'score':round((IMPACT.get(lvl,1)+1+min(age/14,3))/3*10,1)})
+            if tref: _cov.via(tref,f"{feat}/{nn}")   # 2026-11-18: the ticket card speaks for its Plain thread (a thread was a coverage gap while its brief card waited)
 
 # ---------------------------------------------------------------- source 9b: Notion follow-up tickets we created (Tobias, 2026-10-06)
 # tickets.py reads ~/orbit-scratch/desk/notion-tickets.json (the desk mod writes it through the Notion MCP) and links
@@ -1550,7 +1555,9 @@ def release_landed(sha):
     return dep if cmp in ('ahead','identical') else None
 _lo=(datetime.date.fromisoformat(AS_OF)-datetime.timedelta(days=RELEASE_NOTES_DAYS)).isoformat()
 _prod=sorted((r for r in RELEASES if r['env']=='production' and _lo<=r['date']<=AS_OF),key=lambda r:r['date'])
-if _prod and not SCOPE:
+# Retired 2026-11-18 (Tobias): the CTO writes the release notes. The desk never makes a release-notes card again.
+RELEASE_NOTES_CARD=False
+if RELEASE_NOTES_CARD and _prod and not SCOPE:
     with source('release-notes'):
         _r=_prod[-1]; _date=_r['date']
         _m=release_merge(_date); _dep=release_landed(_m['sha']) if _m else None
@@ -1770,7 +1777,7 @@ due=[f"{k} ({v['reason']})" for k,v in preflight.items() if v['due']]
 quiet=[f"{k} ({v['reason']})" for k,v in preflight.items() if not v['due']]
 print(f"PRE-FLIGHT: due → {'; '.join(due) if due else 'none'}" + (f" · quiet → {'; '.join(quiet)}" if quiet else '')
       + f" · memory {MEMORY.get('head')}" + ('' if MEMORY.get('ok') else f" (not pulled: {MEMORY.get('reason')})") + (f"; merged: PR {', '.join(MEMORY['synced'])}" if MEMORY.get('synced') else ''))
-if RELEASE_DAY: print(f"RELEASE DAY ({RELEASE_DAY}{', as of '+AS_OF if WHATIF else ''}): release notes first, then PRs that can still make staging, then P0/P1 threads")
+if RELEASE_DAY: print(f"RELEASE DAY ({RELEASE_DAY}{', as of '+AS_OF if WHATIF else ''}): PRs that can still make staging first, then P0/P1 threads")
 print()
 print("TOP SIX (work from the top; the desk ranks again on every run)")
 for i,c in enumerate(live[:6],1):

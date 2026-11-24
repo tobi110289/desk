@@ -36,7 +36,9 @@ dropped={tid:v for tid,v in c.items() if tid not in todo}
 unswept={tid:n for tid,n in todo.items() if tid not in c}
 c={tid:v for tid,v in c.items() if tid in todo}
 for tid,n in unswept.items(): c[tid]={'ref':n.get('ref'),'title':n.get('title'),'state':'NOT-SWEPT','fingerprint':{}}
-live={r for r,e in s.items() if e.get('phase')!='done'}; done={r for r,e in s.items() if e.get('phase')=='done'}
+# 2026-11-19: phase 'merged' (PR merged, worker gone) is finished work like 'done'; as 'live' it hid two threads from every card
+DONE_PHASES=('done','merged')
+live={r for r,e in s.items() if e.get('phase') not in DONE_PHASES}; done={r for r,e in s.items() if e.get('phase') in DONE_PHASES}
 def ref_of(v):
     r=v.get('ref')
     if r: return r

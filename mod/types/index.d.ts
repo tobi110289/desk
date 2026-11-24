@@ -36,6 +36,8 @@ export type DeskCard = {
   age: number;
   links: DeskLink[];
   members: string[];
+  /** The card ids of the members, so a verb can be recorded for one member of a batch or of the ageing sweep. */
+  memberIds: string[];
   /** The verb the card got today, or null while it is open. */
   verb: string | null;
   prepared: PreparedBrief | null;

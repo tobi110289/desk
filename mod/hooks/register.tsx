@@ -612,6 +612,9 @@ const toView = (
         age: typeof card.age === "number" ? card.age : 0,
         links: linksOf(card),
         members,
+        memberIds: ((card.members ?? []) as Raw[])
+          .map((member) => text(member.id))
+          .filter((memberId) => memberId !== ""),
         verb: verbOf(card),
       };
     });
@@ -1564,10 +1567,16 @@ async function closeCard($: EngineInterface, input: Raw): Promise<string> {
     return `Not closed: the verb must be one of ${VERBS.join(", ")}.`;
   }
   const desk = await read($, view);
-  const card = desk.cards.find((one) => one.id === id);
+  // A member of a batch or of the ageing sweep is no card of its own, but CARDS.md closes members one by one
+  // (2026-11-18: eight drops of sweep:ageing were refused here, and the Bash guard refused desk-close.py).
+  const card =
+    desk.cards.find((one) => one.id === id) ??
+    // A view stored before this field existed has cards without it.
+    desk.cards.find((one) => (one.memberIds ?? []).includes(id));
   if (!card) {
-    return `Not closed: no card ${id} is on the desk. The cards are: ${desk.cards.map((one) => one.id).join(", ") || "none"}.`;
+    return `Not closed: no card ${id} is on the desk, and no card there has it as a member. The cards are: ${desk.cards.map((one) => one.id).join(", ") || "none"}.`;
   }
+  const isMember = card.id !== id;
   const ref = id.split(":")[1] ?? "";
   const caption = text(input.caption).trim();
   const trigger = text(input.trigger).trim();
@@ -1597,7 +1606,7 @@ async function closeCard($: EngineInterface, input: Raw): Promise<string> {
           id,
           "defer",
           trigger,
-          text(input.act).trim() || card.act,
+          text(input.act).trim() || (isMember ? "" : card.act),
           ...pickArgs,
         ]
       : [

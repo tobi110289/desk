@@ -67,9 +67,12 @@ def main(argv):
     out = {'dry': dry, 'write': 'validation', 'chars': len(text), 'firstLine': text.splitlines()[0] if text else '',
            'verdict': plain.api_verdict(verdict), 'agentReady': agent_ready, 'pass': judged}
     if not dry:
+        # orbot #1003 (2026-11-18): a validation no person read carries its own author, so the loop reads that from
+        # the record and no longer from the note's first line. The key keeps 'desk': a retry of an old run stores nothing twice.
+        unattended = (text.splitlines() or [''])[0].strip() == deskplain.UNATTENDED_LINE
         key = plain.validation_key('desk', run or hashlib.sha256(text.encode()).hexdigest()[:16], thread, judged)
         try:
-            r = plain.record_validation(thread, verdict, agent_ready, judged, text, 'desk', key)
+            r = plain.record_validation(thread, verdict, agent_ready, judged, text, 'desk-unattended' if unattended else 'desk', key)
         except ValueError as e:
             print(f'refused: {e}', file=sys.stderr); return 2
         out.update({'result': r['result'], 'section': r['section'], 'status': r['status']})
