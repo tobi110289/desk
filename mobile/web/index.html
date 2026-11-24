@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#f6f5f1" />
+    <title>Desk</title>
+    <style>
+      :root {
+        --bg: #f6f5f1;
+        --card: #ffffff;
+        --ink: #1c1b18;
+        --soft: #6b6860;
+        --line: #e2dfd6;
+        --go: #1f6f4a;
+        --go-ink: #ffffff;
+        --warn: #a5521a;
+        --stop: #a3262d;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #15140f;
+          --card: #1f1e18;
+          --ink: #ece9df;
+          --soft: #9a968a;
+          --line: #33312a;
+          --go: #3f9b6e;
+          --go-ink: #0d130f;
+          --warn: #d98b4c;
+          --stop: #e0666c;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          16px/1.45 -apple-system,
+          system-ui,
+          sans-serif;
+        padding: env(safe-area-inset-top) 16px
+          calc(env(safe-area-inset-bottom) + 24px);
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        padding: 14px 0 6px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0;
+        flex: 1;
+      }
+      #meta {
+        color: var(--soft);
+        font-size: 13px;
+        padding-bottom: 10px;
+        min-height: 30px;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--card);
+        padding: 10px 14px;
+      }
+      button:disabled {
+        opacity: 0.5;
+      }
+      .row {
+        display: block;
+        width: 100%;
+        text-align: left;
+        margin: 0 0 8px;
+        padding: 12px 14px;
+      }
+      .row .top {
+        display: flex;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--soft);
+      }
+      .row .act {
+        font-weight: 600;
+        margin-top: 2px;
+        overflow-wrap: anywhere;
+      }
+      .row .line {
+        font-size: 13px;
+        color: var(--soft);
+        margin-top: 4px;
+        overflow-wrap: anywhere;
+      }
+      .p0 {
+        color: var(--stop);
+        font-weight: 700;
+      }
+      .closed {
+        opacity: 0.55;
+      }
+      .warn {
+        color: var(--warn);
+      }
+      section.brief {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px;
+        margin-bottom: 12px;
+      }
+      .label {
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--soft);
+        margin: 12px 0 2px;
+      }
+      .label:first-child {
+        margin-top: 0;
+      }
+      .text {
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+      .draft {
+        border-left: 3px solid var(--line);
+        padding-left: 10px;
+      }
+      .option {
+        display: block;
+        width: 100%;
+        margin-top: 8px;
+        padding: 14px;
+        font-weight: 600;
+      }
+      .option.lead {
+        background: var(--go);
+        color: var(--go-ink);
+        border-color: var(--go);
+      }
+      .option.armed {
+        outline: 3px solid var(--warn);
+      }
+      #error {
+        color: var(--stop);
+        min-height: 22px;
+        margin: 8px 0;
+        overflow-wrap: anywhere;
+      }
+      a {
+        color: inherit;
+      }
+      .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 10px;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1 id="title">Desk</h1>
+      <button id="back" hidden>Back</button>
+      <button id="gather">Gather</button>
+    </header>
+    <div id="meta"></div>
+    <div id="error" role="alert"></div>
+    <main id="main"></main>
+    <script>
+      "use strict";
+      const POLL_MS = 4000;
+      const ARM_MS = 4000;
+      const main = document.getElementById("main");
+      const meta = document.getElementById("meta");
+      const errorBox = document.getElementById("error");
+      const back = document.getElementById("back");
+      const gatherButton = document.getElementById("gather");
+      let state = null;
+      // The open card is in the address (#<card id>), so the back gesture of the phone closes it and a link opens it.
+      let openId = decodeURIComponent(location.hash.slice(1));
+      let armed = "";
+      let armTimer = 0;
+      let isBusy = false;
+      let drawn = "";
+
+      const el = (tag, className, text) => {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+      };
+      const ago = (iso) => {
+        const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
+        if (Number.isNaN(mins)) return "never";
+        return mins < 1
+          ? "just now"
+          : mins < 60
+            ? `${mins} min ago`
+            : `${Math.round(mins / 60)} h ago`;
+      };
+      const decisionOf = (id) =>
+        (state.decisions || []).find((one) => one.cardId === id);
+      const pickText = (card) => {
+        const recording = (state.recording || {})[card.id];
+        if (recording) return `Recording: ${recording}`;
+        const one = decisionOf(card.id);
+        if (!one) return "";
+        if (one.state === "queued" && one.kind === "session")
+          return `Picked "${one.option}". It waits for a session on the laptop.`;
+        if (one.state === "queued" || one.state === "running")
+          return `Picked "${one.option}". It runs in the background.`;
+        if (one.state === "done")
+          return `Done: ${one.option}. ${one.result || ""}`;
+        return `${one.state}: ${one.option}. ${one.result || ""}`;
+      };
+
+      async function load() {
+        try {
+          const res = await fetch("/api/state", { cache: "no-store" });
+          if (!res.ok)
+            throw new Error(
+              res.status === 403
+                ? "This login is not allowed on the desk."
+                : `The desk answered ${res.status}.`,
+            );
+          state = await res.json();
+          if (errorBox.dataset.kind === "load") setError("");
+          draw();
+        } catch (error) {
+          setError(error.message || "The desk does not answer.", "load");
+        }
+      }
+
+      function setError(text, kind = "act") {
+        errorBox.textContent = text;
+        errorBox.dataset.kind = text ? kind : "";
+      }
+
+      async function send(body) {
+        isBusy = true;
+        draw(true);
+        try {
+          const res = await fetch("/api/act", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-desk": "1" },
+            body: JSON.stringify(body),
+          });
+          const result = await res.json();
+          setError(result.ok ? "" : result.error || "The desk refused this.");
+          return result;
+        } catch {
+          setError("The desk does not answer. Nothing was recorded.");
+          return { ok: false };
+        } finally {
+          isBusy = false;
+          await load();
+          draw(true);
+        }
+      }
+
+      function drawList() {
+        const open = state.cards.filter((card) => card.verb === null);
+        const closed = state.cards.filter((card) => card.verb !== null);
+        for (const card of [...open, ...closed]) {
+          const row = el("button", card.verb === null ? "row" : "row closed");
+          const top = el("div", "top");
+          top.append(
+            el("span", card.impact === "P0" ? "p0" : "", card.impact || ""),
+            el("span", "", card.lane),
+            el("span", "", card.ref),
+          );
+          top.append(
+            el("span", "", card.verb === null ? `${card.mins} min` : card.verb),
+          );
+          row.append(top, el("div", "act", card.act));
+          const line = pickText(card) || card.health;
+          if (line)
+            row.append(
+              el(
+                "div",
+                card.health && !pickText(card) ? "line warn" : "line",
+                line,
+              ),
+            );
+          row.addEventListener("click", () => {
+            location.hash = encodeURIComponent(card.id);
+            openId = card.id;
+            armed = "";
+            setError("");
+            draw(true);
+          });
+          main.append(row);
+        }
+        if (state.cards.length === 0)
+          main.append(el("p", "", "The desk is empty."));
+      }
+
+      function drawCard(card) {
+        const box = el("section", "brief");
+        const add = (label, text, className = "text") => {
+          if (!text) return;
+          box.append(el("div", "label", label), el("div", className, text));
+        };
+        add(
+          "Card",
+          `${card.lane} ${card.ref}${card.impact ? ` · ${card.impact}` : ""}\n${card.act}`,
+        );
+        const brief = card.prepared;
+        if (brief) {
+          add("Why", brief.why);
+          add("Decide", brief.decide);
+          add("Then", brief.then);
+          add("Fact", brief.fact);
+          add("Draft", brief.draft, "text draft");
+          if (brief.openChecks.length > 0)
+            add("Open checks", brief.openChecks.join("\n"));
+        } else {
+          add("State", card.health || "No brief yet.");
+          add("Status", card.status);
+        }
+        const links = el("div", "links");
+        for (const link of card.links || []) {
+          if (!/^https:\/\//.test(link.href)) continue;
+          const a = el("a", "", link.label);
+          a.href = link.href;
+          a.rel = "noopener";
+          a.target = "_blank";
+          links.append(a);
+        }
+        if (links.children.length > 0) box.append(links);
+        main.append(box);
+
+        const picked = pickText(card);
+        if (picked) {
+          main.append(el("p", "", picked));
+          return;
+        }
+        if (card.verb !== null) {
+          main.append(el("p", "", `Closed today: ${card.verb}.`));
+          return;
+        }
+        if (!brief) return;
+        brief.options.forEach((option, index) => {
+          const key = `${card.id}|${option.label}`;
+          const button = el(
+            "button",
+            index === 0 ? "option lead" : "option",
+            armed === key ? `Tap again: ${option.label}` : option.label,
+          );
+          if (armed === key) button.classList.add("armed");
+          button.disabled = isBusy;
+          button.addEventListener("click", async () => {
+            // Two taps for every pick: the first arms the button, the second records it.
+            if (armed !== key) {
+              armed = key;
+              clearTimeout(armTimer);
+              armTimer = setTimeout(() => {
+                armed = "";
+                draw(true);
+              }, ARM_MS);
+              draw(true);
+              return;
+            }
+            armed = "";
+            clearTimeout(armTimer);
+            await send({
+              action: "pick",
+              cardId: card.id,
+              option: option.label,
+            });
+          });
+          main.append(button);
+        });
+      }
+
+      function draw(isForced = false) {
+        if (state === null) return;
+        const open = state.cards.filter((card) => card.verb === null).length;
+        const card = state.cards.find((one) => one.id === openId);
+        if (openId && !card) openId = "";
+        // A poll that changed nothing does not rebuild the page: a button keeps its armed state and its focus.
+        const key = `${state.version}|${openId}|${state.isGathering}`;
+        if (!isForced && key === drawn) {
+          return;
+        }
+        drawn = key;
+        document.getElementById("title").textContent = card
+          ? card.ref
+          : `Desk · ${open}`;
+        back.hidden = !card;
+        gatherButton.hidden = Boolean(card);
+        gatherButton.disabled = state.isGathering || isBusy;
+        gatherButton.textContent = state.isGathering ? "Gathering" : "Gather";
+        const parts = [
+          `gathered ${ago(state.generatedAt)}`,
+          `${state.closedToday} closed today`,
+        ];
+        if (state.parked) parts.push(`${state.parked} parked`);
+        if (state.plain) parts.push(`${state.plain.waitingOnUs} wait on us`);
+        if (state.scope) parts.push(state.scope);
+        meta.textContent = parts.join(" · ");
+        main.replaceChildren();
+        if (card) drawCard(card);
+        else drawList();
+      }
+
+      back.addEventListener("click", () => {
+        history.replaceState(null, "", location.pathname);
+        openId = "";
+        armed = "";
+        setError("");
+        draw(true);
+      });
+      window.addEventListener("hashchange", () => {
+        openId = decodeURIComponent(location.hash.slice(1));
+        armed = "";
+        draw(true);
+      });
+      gatherButton.addEventListener("click", () => send({ action: "gather" }));
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) load();
+      });
+      setInterval(() => {
+        if (!document.hidden && !isBusy) load();
+      }, POLL_MS);
+      load();
+    </script>
+  </body>
+</html>

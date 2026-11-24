@@ -5,3 +5,4 @@ __pycache__/
 scripts/*.json
 scripts/*.log
 /.local/
+mobile/config.json

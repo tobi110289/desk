@@ -1,0 +1,5 @@
+{
+  "port": 47600,
+  "allow": ["your Tailscale login"],
+  "local": false
+}

@@ -53,13 +53,13 @@ With `"autoValidate": true` in `config.json`, a new support thread whose triage 
 
 ## The mod's layout: one core, the pane on top
 
-The desk's behaviour lives in a core that draws nothing, so a second surface (a phone page) can run the same desk.
+The desk's behaviour lives in a core that draws nothing, so a second surface (the phone desk, below) runs the same desk.
 
-| File | What it holds |
-| --- | --- |
-| `mod/hooks/core/pure.ts` | Constants, the two tool contracts, and the rules that turn the gather's files into the view. No engine. |
+| File                     | What it holds                                                                                                     |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `mod/hooks/core/pure.ts` | Constants, the two tool contracts, and the rules that turn the gather's files into the view. No engine.           |
 | `mod/hooks/core/desk.ts` | Every action with state: refresh, gather, prepare, pick, close, the live feed. It takes the engine interface `$`. |
-| `mod/hooks/register.tsx` | The terminal pane: hooks, keys, the theme and the drawing. It calls the core. |
+| `mod/hooks/register.tsx` | The terminal pane: hooks, keys, the theme and the drawing. It calls the core.                                     |
 
 Rules for a change:
 
@@ -103,26 +103,43 @@ Data (`desk.json`, `cards.json`, caches, `config.json`) lives in `~/orbit-scratc
 
 The scripts find every file and folder through one resolver, `scripts/deskconfig.py`. Each folder has an environment variable. Without it the script uses the path in the right column, so a desk that runs there needs nothing.
 
-| Variable          | What it is                                                         | Default                           |
-| ----------------- | ------------------------------------------------------------------ | --------------------------------- |
-| `DESK_SCRATCH`    | The scratch root: local ticket folders (`<feature>/issues`), sweeps | `~/orbit-scratch`                 |
-| `DESK_DIR`        | The desk folder: `desk.json`, `cards.json`, briefs, caches          | `<scratch>/desk`                  |
-| `DESK_CONFIG`     | The company ids                                                    | `<desk>/config.json`              |
-| `DESK_LOOP_DIR`   | The agent loop: `state.json`, `sweep-cache.json`                   | `<scratch>/agent-loop`            |
-| `DESK_JEV_DIR`    | The loop helpers: the Plain reader, PR health, lane hints          | `<loop>/jev`                      |
-| `DESK_ORBIT_REPO` | The app clone                                                      | `~/orbit`                         |
-| `DESK_ORBOT_REPO` | The support bot clone (support memory)                             | `~/orbot`                         |
-| `DESK_SKILLS_DIR` | The Claude skills folder                                           | `~/.claude/skills`                |
-| `DESK_HERMES_LOG` | The Hermes feedback log                                            | `<scratch>/hermes-feedback/LOG.md` |
-| `DESK_SWEEPS_DIR` | The weekly error sweep                                             | `<scratch>/sentry-sweeps`         |
-| `DESK_A2A_ENV`    | The A2A hub token file                                             | `~/.orbit-a2a/config.env`         |
-| `DESK_AWS_DIR`    | The AWS login caches                                               | `~/.aws`                          |
+| Variable          | What it is                                                          | Default                            |
+| ----------------- | ------------------------------------------------------------------- | ---------------------------------- |
+| `DESK_SCRATCH`    | The scratch root: local ticket folders (`<feature>/issues`), sweeps | `~/orbit-scratch`                  |
+| `DESK_DIR`        | The desk folder: `desk.json`, `cards.json`, briefs, caches          | `<scratch>/desk`                   |
+| `DESK_CONFIG`     | The company ids                                                     | `<desk>/config.json`               |
+| `DESK_LOOP_DIR`   | The agent loop: `state.json`, `sweep-cache.json`                    | `<scratch>/agent-loop`             |
+| `DESK_JEV_DIR`    | The loop helpers: the Plain reader, PR health, lane hints           | `<loop>/jev`                       |
+| `DESK_ORBIT_REPO` | The app clone                                                       | `~/orbit`                          |
+| `DESK_ORBOT_REPO` | The support bot clone (support memory)                              | `~/orbot`                          |
+| `DESK_SKILLS_DIR` | The Claude skills folder                                            | `~/.claude/skills`                 |
+| `DESK_HERMES_LOG` | The Hermes feedback log                                             | `<scratch>/hermes-feedback/LOG.md` |
+| `DESK_SWEEPS_DIR` | The weekly error sweep                                              | `<scratch>/sentry-sweeps`          |
+| `DESK_A2A_ENV`    | The A2A hub token file                                              | `~/.orbit-a2a/config.env`          |
+| `DESK_AWS_DIR`    | The AWS login caches                                                | `~/.aws`                           |
 
 Set the variables where the scripts start: the shell, the `env` block of `~/.claude/settings.json` for the pane, or the unit of a timer. Then run `./install.sh` again, so it links the scripts and the skill into the new folders. `python3 scripts/deskconfig.py` prints every path and says whether it exists.
 
 A script that needs a folder, a file or a config key stops with one line that names it, for example `desk: loop helpers (jev) missing: /srv/desk/agent-loop/jev (set DESK_JEV_DIR)`. A script that does not need it still runs: without an AWS folder `sso-state.py` prints `no AWS`, and without the support bot clone the gather runs with no support memory.
 
 Not on the resolver yet: `desk-execute.py`, `luna-send.py` and `desk-events.py` (they move with the send path), and the mod, which reads the desk folder at `~/orbit-scratch/desk`.
+
+## The phone desk
+
+`mobile/server.mjs` is a small Node server that runs the same core on its own `$` and serves one page (`mobile/web/index.html`). The page shows the open cards and their prepared briefs. A pick takes two taps and goes through `decide()` in the core, the same call the pane makes.
+
+```sh
+cp mobile/config.example.json mobile/config.json   # put your Tailscale login into "allow"
+node mobile/server.mjs                              # listens on 127.0.0.1:47600
+tailscale serve --bg 47600                          # puts it on your tailnet over HTTPS
+```
+
+- It needs Node 23.6 or newer. `mobile/loader.mjs` lets Node load the core's TypeScript as it is, and maps `claude-code` to `mobile/engine.mjs` (the state library for a Node process).
+- Access: Tailscale Serve names the caller in a header, and the server admits only a login in `allow`. A request with no such header comes from the machine itself and is refused unless the config says `"local": true`.
+- What the phone does: read the desk, start a gather, pick an option. A pick the scripts run by themselves starts at once. A pick that needs a Claude session stays recorded and waits for the pane.
+- What it does not do: start a session, close a card by hand, edit a draft.
+- The server gathers only while a phone had the page open in the last two minutes, and only when the desk is due. The marker file of the gather keeps the pane and the server from running one at the same time.
+- A new button is one entry in `ACTIONS` that makes one core call. Behaviour never goes into the server or the page.
 
 ## Run on Linux
 
@@ -145,7 +162,9 @@ Names of customers and teammates and all ticket numbers in the comments are repl
 claude plugin validate mod
 claude plugin test mod
 python3 scripts/test_prepare.py
+python3 scripts/test_thread.py
 python3 scripts/check-linux.py
+node --test mobile/test/server.test.mjs
 ```
 
 ## License
