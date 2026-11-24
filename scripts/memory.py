@@ -3,10 +3,10 @@
 
 Since orbot #1013 (2026-11-23) tenant and requester profiles live in Notion. OrBot reads a checked copy of them on the
 box (the mirror), and the desk reads that same copy over the operator API: one `ssh <sendHost> curl`, cached in
-memory-mirror.json. Known issues and the company map stay in the ~/orbot checkout. Writes queue as proposals here and
+memory-mirror.json. Known issues and the company map stay in the orbot checkout. Writes queue as proposals here and
 go to Notion through the box's add tool (create only: it never changes or deletes a row).
 
-  memory.py pull                          fetch the mirror from the box, fast-forward ~/orbot (desk.py does this)
+  memory.py pull                          fetch the mirror from the box, fast-forward the orbot checkout (desk.py does this)
   memory.py show <T-ref|th_id> [--json]   resolve the thread's customer/company and print the memory block
   memory.py lookup --company co_… --customer c_… [--tenant-field x] [--domain d] [--email e]   JSON for scripts
   memory.py propose --ref T-… --tenant <id> [--person c_… --name "…" --role "…" --language de]
@@ -21,15 +21,15 @@ customer's domain against tenant aliases. No match means no memory, never a gues
 """
 import json, os, re, sys, subprocess, datetime, hashlib
 
-HOME = os.path.expanduser('~')
-ORBOT = f'{HOME}/orbot'
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskconfig  # noqa: E402
+ORBOT = deskconfig.ORBOT_DIR
 SM = f'{ORBOT}/support-memory'
-DESK = f'{HOME}/orbit-scratch/desk'
+DESK = deskconfig.DESK
 QUEUE = f'{DESK}/memory-proposals.jsonl'
 CACHE = f'{DESK}/memory-cache.json'          # thread id → customer/company identity (a thread's customer never changes)
 MIRROR = f'{DESK}/memory-mirror.json'        # the box's support-memory mirror: {revision, fetchedAt, files: {path: text}}
 MIRROR_MAX_AGE_H = 24                        # an older copy is not read: the desk says "memory unavailable", never a stale fact
-import deskconfig
 BOX_ADAPTER = os.path.dirname(deskconfig.SEND_ENV_FILE)   # the adapter's folder on the box (config.json sendEnvFile)
 PLAIN_URL = deskconfig.PLAIN_THREAD
 today = datetime.date.today().isoformat()
@@ -52,6 +52,7 @@ def head():
 def pull_repo():
     """Fast-forward main (known issues and the company map live there). A dirty tree or a non-main branch is left alone."""
     try:
+        deskconfig.need(ORBOT, stop=False)
         branch = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])
         dirty = [l for l in sh(['git', 'status', '--porcelain']).splitlines() if not l.startswith('??')]
         if branch != 'main' or dirty:
@@ -127,7 +128,7 @@ def pull():
 
 # ---------------------------------------------------------------- profile files
 def parse_profile(path):
-    """A profile file in the ~/orbot checkout (known issues)."""
+    """A profile file in the orbot checkout (known issues)."""
     try: text = open(path, encoding='utf-8').read()
     except Exception: return None
     return parse_text(text, os.path.relpath(path, ORBOT))
@@ -221,7 +222,7 @@ def known_issues(title):
 # ---------------------------------------------------------------- Plain identity
 def plain_gql(q, variables):
     if not os.environ.get('PLAIN_API_KEY'): return None
-    sys.path.insert(0, os.path.expanduser('~/orbit-scratch/agent-loop/jev')); import plain   # the one Plain reader
+    sys.path.insert(0, deskconfig.JEV); import plain   # the one Plain reader
     return plain.try_gql(q, variables)
 
 
@@ -520,6 +521,8 @@ if __name__ == '__main__':
     a = sys.argv[1:]
     if not a: print(__doc__); sys.exit(0)
     cmd, rest = a[0], a[1:]
+    if cmd in ('pull', 'pr'): deskconfig.need(ORBOT)   # both work in the clone; show and lookup read it when it is there
+    if cmd in ('pr', 'sync'): deskconfig.key('botRepo')
     if cmd == 'pull': r = pull(); print(json.dumps(r)); sys.exit(0 if r['ok'] else 1)
     if cmd == 'show': sys.exit(show(rest[0], '--json' in rest) if rest else 2)
     if cmd == 'lookup':

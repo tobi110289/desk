@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """scan.py — keeps private data out of this public repo. pre-commit runs it on the staged lines, pre-push on every
-commit about to leave (added lines, messages, author and committer mail).
+commit about to leave (added lines, messages, author and committer mail). Any branch may go up, so work can wait in a
+pull request; every branch gets the same check.
 
 The words to refuse (customer names, teammates, company ids) are private themselves, so they live outside the repo:
 ~/orbit-scratch/desk/public-denylist.txt, one regex per line, `#` for comments. No file, no push: the check fails closed.
@@ -52,9 +53,9 @@ def main():
         for line in sys.stdin:   # pre-push: <local ref> <local sha> <remote ref> <remote sha>
             ref, sha, _, remote = line.split()
             if set(sha) == {'0'}: continue
-            if not ref.endswith('/main'): found.append(f'{ref}: only main goes to the public repo')
-            span = sha if set(remote) == {'0'} else f'{remote}..{sha}'
-            for c in git('rev-list', span).split():
+            # a new branch: only the commits that no remote branch has yet
+            span = [sha, '--not', '--remotes'] if set(remote) == {'0'} else [f'{remote}..{sha}']
+            for c in git('rev-list', *span).split():
                 who = git('show', '-s', '--format=%ae%n%ce', c).split()
                 found += [f'{c[:7]}: commit mail {m}: use the GitHub noreply address' for m in who if not OK_MAIL.search(m)]
                 check(git('show', '-s', '--format=%B', c), f'{c[:7]} message', found, compiled)

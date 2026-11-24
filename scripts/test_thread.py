@@ -12,6 +12,9 @@ import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
+# the resolver reads the folders once, at import: point it away from the real desk before any desk module loads
+os.environ['DESK_DIR'] = tempfile.mkdtemp(prefix='desk-test-')
+import deskconfig  # noqa: E402
 import deskanchor  # noqa: E402
 import deskplain  # noqa: E402
 import deskthread  # noqa: E402
@@ -48,6 +51,7 @@ def close_in_session(newest, verb='do'):
     with tempfile.TemporaryDirectory() as folder:
         rec_path = desk_with_session_pick(folder)
         os.environ['DESK_DIR'] = folder
+        deskconfig.DESK = folder   # desk-close.py reads the folder from the resolver
         os.environ.pop('DESK_DECISION', None)
         argv = sys.argv
         sys.argv = ['desk-close.py', CID, verb, 'replied as Luna 22:51Z', '--pick', 'Send it']

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """desk-score.py — how well the prepared briefs guess what the user does.
 
-desk-close.py appends one line per closed card that had a brief to ~/orbit-scratch/desk/score.jsonl: the brief's
+desk-close.py appends one line per closed card that had a brief to score.jsonl in the desk folder: the brief's
 recommended option and draft (the guess), the option the user pressed and the verb recorded (the outcome). This script
 reads the ledger and prints the hit rate, overall, per lane and per day, plus the misses.
 
@@ -24,7 +24,9 @@ import json
 import os
 import sys
 
-DESK = os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk')
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskconfig  # noqa: E402
+DESK = deskconfig.DESK
 LEDGER = f'{DESK}/score.jsonl'
 DECISIONS = f'{DESK}/decisions'
 SENT = {'Send it', 'I sent it already'}

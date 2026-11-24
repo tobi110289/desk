@@ -11,7 +11,9 @@ import os
 import re
 import sys
 
-DESK = os.environ.get('DESK_DIR') or os.path.expanduser('~/orbit-scratch/desk')
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskconfig  # noqa: E402
+DESK = deskconfig.DESK
 CURSORS = f'{DESK}/cache/session-cost'
 
 

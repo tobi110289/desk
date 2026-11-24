@@ -50,11 +50,13 @@ LEARNED_RULE = "Queue a line only when it is ONE lasting fact about the tenant o
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import deskanchor  # noqa: E402
+import deskconfig  # noqa: E402
 
-HOME = os.path.expanduser('~')
-DESK = f'{HOME}/orbit-scratch/desk'
+DESK = deskconfig.DESK
 BRIEFS = f'{DESK}/briefs'
-SKILL = os.path.expanduser('~/.claude/skills/desk')
+SKILL = f'{deskconfig.SKILLS}/desk'
+# a scratch file named in a card's act or note (as ~/… or as the full path) goes into the material
+SCRATCH_FILE = re.compile('(' + re.escape(deskconfig.show(deskconfig.SCRATCH)) + '|' + re.escape(deskconfig.SCRATCH) + r')(/[^\s"`]+\.md)')
 LOCK_S = 5 * 60
 MODEL = os.environ.get('DESK_PREPARE_MODEL', 'sonnet')
 # lanes whose recipe has a prepare step that scripts can feed; SEND/STALE/TICKET are batches, SWEEP runs and sweep tickets take the session over
@@ -456,7 +458,7 @@ _index_lock = threading.Lock()
 def orbot_pass_of(thread_id):
     """The thread's OrBot pass from the one reader (agent-loop jev/plain.py orbot_pass), no bodies: one ticket index per
     prepare pass answers every card. 2026-11-14: OrBot's notes move from Plain to the thread's ticket record."""
-    sys.path.append(f'{HOME}/orbit-scratch/agent-loop/jev')
+    sys.path.append(deskconfig.JEV)
     import plain
     with _index_lock:
         if 'idx' not in _index:
@@ -468,7 +470,7 @@ def validation_of(thread_id):
     """The thread's newest validation from the one reader (agent-loop jev/plain.py newest_validation), no bodies: the
     record's validation section, or (temporarily) the thread's Plain validation note while the record has none.
     2026-11-15 (orbot #984): validations move from Plain notes to the thread's ticket record."""
-    sys.path.append(f'{HOME}/orbit-scratch/agent-loop/jev')
+    sys.path.append(deskconfig.JEV)
     import plain
     with _index_lock:
         if 'idx' not in _index:
@@ -641,16 +643,14 @@ def material(card):
     pr = card.get('pr')
     if pr:
         # repo names live in config.json (deskconfig.py), never here
-        sys.path.insert(0, DESK)
-        import deskconfig
         repo = deskconfig.BOT_REPO if ref.startswith('orbot#') else deskconfig.REPO
         if repo:
             parts.append(f'## PR #{pr} ({repo})\n' + sh(['gh', 'pr', 'view', str(pr), '--repo', repo, '--json',
                                                      'title,state,url,isDraft,reviewDecision,mergeable,labels,statusCheckRollup,updatedAt,headRefName,baseRefName,body'], 40)[:6000])
             parts.append('## PR: newest comments\n' + sh(['gh', 'pr', 'view', str(pr), '--repo', repo, '--json', 'comments', '--jq',
                                                         '.comments[-6:][] | "\\(.createdAt[0:16]) \\(.author.login): \\(.body[0:900])\\n"'], 40)[:7000])
-    for m in re.finditer(r'(~|/Users/[^/\s]+)(/orbit-scratch/[^\s"`]+\.md)', (card.get('act') or '') + ' ' + (card.get('note') or '')):
-        p = HOME + m.group(2)
+    for m in SCRATCH_FILE.finditer((card.get('act') or '') + ' ' + (card.get('note') or '')):
+        p = deskconfig.SCRATCH + m.group(2)
         try:
             parts.append(f'## File {m.group(1)}{m.group(2)}\n' + open(p).read()[:6000])
         except Exception:
@@ -940,6 +940,9 @@ def main():
         top = int(sys.argv[sys.argv.index('--top') + 1]); args = [a for a in args if a != str(top)]
     force = '--force' in sys.argv
     dry = '--dry' in sys.argv
+    # what a pass needs: the cards of the last gather and the lane recipes
+    deskconfig.need(f'{DESK}/cards.json', 'cards of the last gather')
+    deskconfig.need(f'{SKILL}/CARDS.md', 'desk skill')
     os.makedirs(BRIEFS, exist_ok=True)
     lock = f'{BRIEFS}/.prepare.lock'
     try:

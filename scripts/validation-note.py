@@ -23,9 +23,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import deskconfig  # noqa: E402
 import deskplain  # noqa: E402
 
-sys.path.append(os.path.expanduser('~/orbit-scratch/agent-loop/jev'))
+sys.path.append(deskconfig.JEV)
 READINESS = ('ready-for-agent', 'ready-for-human', 'needs-info', 'wontfix')
 
 
