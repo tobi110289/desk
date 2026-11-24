@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """memory.py — the desk's window onto the orbot support memory (tenant + requester profiles, known issues).
 
-Reads come from the local checkout ~/orbot/support-memory (git pull at desk pre-flight); writes never touch the
-canonical files: they queue as proposals here and go up as one reviewed orbot PR (policy.md rule 3).
+Since orbot #1013 (2026-11-23) tenant and requester profiles live in Notion. OrBot reads a checked copy of them on the
+box (the mirror), and the desk reads that same copy over the operator API: one `ssh <sendHost> curl`, cached in
+memory-mirror.json. Known issues and the company map stay in the ~/orbot checkout. Writes queue as proposals here and
+go to Notion through the box's add tool (create only: it never changes or deletes a row).
 
-  memory.py pull                          fast-forward ~/orbot to origin/main, print the head (desk.py does this)
+  memory.py pull                          fetch the mirror from the box, fast-forward ~/orbot (desk.py does this)
   memory.py show <T-ref|th_id> [--json]   resolve the thread's customer/company and print the memory block
   memory.py lookup --company co_… --customer c_… [--tenant-field x] [--domain d] [--email e]   JSON for scripts
   memory.py propose --ref T-… --tenant <id> [--person c_… --name "…" --role "…" --language de]
                     --section approved|observed|inferred --confidence low|medium|high --source "…" "<fact>"
-  memory.py queue                         list queued proposals (state queued / pr:<n>)
+  memory.py queue                         list queued proposals (state queued / added)
   memory.py drop <id>                     drop a queued proposal
-  memory.py pr                            apply every queued proposal on a branch in ~/orbot, validate, push, open the PR
-  memory.py sync                          mark pr:<n> proposals merged once the PR merged (desk.py does this)
+  memory.py add [--dry-run]               add every queued proposal to Notion as reviewed facts (`pr` is the old name)
+  memory.py sync                          mark old pr:<n> proposals merged once the PR merged (desk.py does this)
 
-Identity: Plain company id → plain-company-tenant-map.json → tenant dir; else the thread's tenant_id field; else the
+Identity: Plain company id → plain-company-tenant-map.json → tenant; else the thread's tenant_id field; else the
 customer's domain against tenant aliases. No match means no memory, never a guess (policy: ambiguous → absent).
 """
 import json, os, re, sys, subprocess, datetime, hashlib
@@ -25,7 +27,10 @@ SM = f'{ORBOT}/support-memory'
 DESK = f'{HOME}/orbit-scratch/desk'
 QUEUE = f'{DESK}/memory-proposals.jsonl'
 CACHE = f'{DESK}/memory-cache.json'          # thread id → customer/company identity (a thread's customer never changes)
+MIRROR = f'{DESK}/memory-mirror.json'        # the box's support-memory mirror: {revision, fetchedAt, files: {path: text}}
+MIRROR_MAX_AGE_H = 24                        # an older copy is not read: the desk says "memory unavailable", never a stale fact
 import deskconfig
+BOX_ADAPTER = os.path.dirname(deskconfig.SEND_ENV_FILE)   # the adapter's folder on the box (config.json sendEnvFile)
 PLAIN_URL = deskconfig.PLAIN_THREAD
 today = datetime.date.today().isoformat()
 SECTIONS = {'approved': 'Approved facts', 'observed': 'Observed facts', 'inferred': 'Inferred facts'}
@@ -44,24 +49,98 @@ def head():
     except Exception: return '?'
 
 
-def pull():
-    """Fast-forward main. A dirty tree or a non-main branch is left alone (memory.py pr may have a branch checked out)."""
+def pull_repo():
+    """Fast-forward main (known issues and the company map live there). A dirty tree or a non-main branch is left alone."""
     try:
         branch = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])
         dirty = [l for l in sh(['git', 'status', '--porcelain']).splitlines() if not l.startswith('??')]
         if branch != 'main' or dirty:
-            return {'ok': False, 'head': head(), 'reason': f'branch {branch}' if branch != 'main' else 'dirty tree'}
+            return {'ok': False, 'reason': f'branch {branch}' if branch != 'main' else 'dirty tree'}
         sh(['git', 'pull', '-q', '--ff-only', 'origin', 'main'], timeout=40, check=True)
-        return {'ok': True, 'head': head()}
+        return {'ok': True}
     except Exception as e:
-        return {'ok': False, 'head': head(), 'reason': str(e)[:120]}
+        return {'ok': False, 'reason': str(e)[:120]}
+
+
+# ---------------------------------------------------------------- the mirror (orbot #1013)
+def box(cmd, stdin=None, timeout=60):
+    """One ssh round trip to the box, the call luna-send.py and desk-events.py make. Returns (exit code, stdout, stderr)."""
+    if not deskconfig.SEND_HOST: raise RuntimeError('config.json has no sendHost')
+    r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', deskconfig.SEND_HOST, cmd],
+                       input=stdin, capture_output=True, timeout=timeout)
+    return r.returncode, r.stdout.decode('utf-8', 'replace'), r.stderr.decode('utf-8', 'replace')
+
+
+def fetch_mirror():
+    """Read the mirror over the operator API and cache it. The token is read on the box and never leaves it.
+    No fallback to the repo files: on a failure the old cache stays as it is and the caller gets the reason."""
+    try:
+        cmd = (f"tok=$(sudo grep -m1 '^ORBOT_OPERATOR_API_TOKEN=' {deskconfig.SEND_ENV_FILE} | cut -d= -f2-); "
+               "curl -s -m 40 -w '\\n%{http_code}' -H \"Authorization: Bearer $tok\" http://127.0.0.1:8787/api/operator/support-memory-mirror")
+        rc, out, err = box(cmd, timeout=70)
+        if rc: return {'ok': False, 'reason': f'ssh failed: {err.strip()[:100] or rc}'}
+        body, _, code = out.rpartition('\n')
+        try: d = json.loads(body)
+        except Exception: return {'ok': False, 'reason': f'mirror route answered {code.strip() or "?"} with no JSON'}
+        if code.strip() != '200' or not d.get('ok') or not isinstance(d.get('files'), list):
+            return {'ok': False, 'reason': f"mirror route {code.strip()}: {d.get('reason') or 'no files'}"}
+        files = {f['path']: f['text'] for f in d['files'] if isinstance(f, dict) and isinstance(f.get('path'), str) and isinstance(f.get('text'), str)}
+        if not any(re.match(r'^tenants/[^/]+/profile\.md$', k) for k in files): return {'ok': False, 'reason': 'mirror holds no tenant profile'}
+        tmp = MIRROR + '.tmp'
+        json.dump({'revision': d.get('revision'), 'fetchedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'files': files}, open(tmp, 'w'), ensure_ascii=False)
+        os.replace(tmp, MIRROR)                      # a reader sees the old copy or the new one, never half a file
+        global _MIRROR; _MIRROR = None
+        return {'ok': True, 'revision': d.get('revision'), 'files': len(files)}
+    except Exception as e:
+        return {'ok': False, 'reason': str(e)[:120]}
+
+
+_MIRROR = None
+def mirror():
+    """{revision, fetchedAt, files, problem}. `files` is empty and `problem` says why when there is no copy or it is too old."""
+    global _MIRROR
+    if _MIRROR is not None: return _MIRROR
+    try:
+        m = json.load(open(MIRROR))
+        age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(m['fetchedAt'])).total_seconds() / 3600
+        if age > MIRROR_MAX_AGE_H: m = {'revision': m.get('revision'), 'fetchedAt': m.get('fetchedAt'), 'files': {}, 'problem': f'mirror copy is {int(age)} h old (memory.py pull)'}
+        else: m['problem'] = None
+    except Exception:
+        m = {'revision': None, 'fetchedAt': None, 'files': {}, 'problem': 'no mirror copy yet (memory.py pull)'}
+    _MIRROR = m
+    return m
+
+
+def revision():
+    return mirror().get('revision') or '?'
+
+
+def pull():
+    """Desk pre-flight: fetch the mirror (profiles) and fast-forward the checkout (known issues, company map).
+    `ok` is about the mirror: without it no card gets a memory block."""
+    repo = pull_repo(); mir = fetch_mirror()
+    out = {'ok': bool(mir.get('ok')), 'head': f"{revision()}" if mir.get('ok') else head(), 'revision': mir.get('revision'), 'repo': repo}
+    if not mir.get('ok'): out['reason'] = f"mirror: {mir.get('reason')}"
+    elif not repo.get('ok'): out['repoReason'] = repo.get('reason')
+    return out
 
 
 # ---------------------------------------------------------------- profile files
 def parse_profile(path):
-    """Frontmatter (the YAML subset the orbot parser accepts: scalars and '- item' lists) + body sections."""
+    """A profile file in the ~/orbot checkout (known issues)."""
     try: text = open(path, encoding='utf-8').read()
     except Exception: return None
+    return parse_text(text, os.path.relpath(path, ORBOT))
+
+
+def mirror_profile(rel):
+    """A tenant or requester profile from the mirror, by its path inside the revision."""
+    text = mirror()['files'].get(rel)
+    return parse_text(text, f'notion-mirror/{rel}') if text is not None else None
+
+
+def parse_text(text, shown_path):
+    """Frontmatter (the YAML subset the orbot parser accepts: scalars and '- item' lists) + body sections."""
     m = re.match(r'^---\n(.*?)\n---\n(.*)$', text, re.S)
     if not m: return None
     fm, body = {}, m.group(2)
@@ -80,7 +159,7 @@ def parse_profile(path):
         bullets = re.findall(r'^- (.+?)(?=^- |\Z)', sm.group(1), re.S | re.M) if sm else []
         sections[name] = [re.sub(r'\s+', ' ', b).strip() for b in bullets if b.strip() and b.strip() != 'None.']
     title = re.search(r'^# (.+)$', body, re.M)
-    return {'path': os.path.relpath(path, ORBOT), 'fm': fm, 'sections': sections, 'title': title.group(1).strip() if title else '', 'raw': text}
+    return {'path': shown_path, 'fm': fm, 'sections': sections, 'title': title.group(1).strip() if title else '', 'raw': text}
 
 
 def company_map():
@@ -89,12 +168,11 @@ def company_map():
 
 
 def tenants():
-    try: return sorted(d for d in os.listdir(f'{SM}/tenants') if os.path.isfile(f'{SM}/tenants/{d}/profile.md'))
-    except Exception: return []
+    return sorted(m.group(1) for k in mirror()['files'] for m in [re.match(r'^tenants/([^/]+)/profile\.md$', k)] if m)
 
 
 def tenant_profile(t):
-    return parse_profile(f'{SM}/tenants/{t}/profile.md')
+    return mirror_profile(f'tenants/{t}/profile.md')
 
 
 def _norm(s): return re.sub(r'[^a-z0-9]', '', (s or '').lower())
@@ -102,9 +180,10 @@ def _norm(s): return re.sub(r'[^a-z0-9]', '', (s or '').lower())
 
 def resolve(company=None, customer=None, tenant_field=None, domain=None, email=None):
     """Tenant id or None, with the rule that decided it."""
-    cm = company_map()
-    if company and company in cm: return cm[company], f'company {company}'
-    ts = tenants()
+    if mirror()['problem']: return None, f"memory unavailable: {mirror()['problem']}"
+    cm = company_map(); ts = tenants()
+    if company and company in cm and cm[company] in ts: return cm[company], f'company {company}'
+
     if tenant_field and tenant_field in ts: return tenant_field, f'tenant_id field'
     doms = [d for d in (domain, (email or '').rsplit('@', 1)[-1] if email and '@' in email else None) if d]
     try: extra = json.load(open(f'{DESK}/tenants.json'))
@@ -121,8 +200,8 @@ def person_profile(tenant, customer):
     if not (tenant and customer): return None, None
     p = tenant_profile(tenant)
     for t in [tenant] + ([p['fm']['shared_people_from']] if p and isinstance(p['fm'].get('shared_people_from'), str) else []):
-        path = f'{SM}/tenants/{t}/people/plain-{customer}.md'
-        if os.path.isfile(path): return parse_profile(path), t
+        prof = mirror_profile(f'tenants/{t}/people/plain-{customer}.md')
+        if prof: return prof, t
     return None, None
 
 
@@ -199,7 +278,7 @@ def lookup(company=None, customer=None, tenant_field=None, domain=None, email=No
         summary = 'memory: ' + ' · '.join(b for b in bits if b)
     else:
         summary = f'memory: none ({rule})'
-    return {'tenant': tenant, 'rule': rule, 'tenantProfile': tp and {'path': tp['path'], 'fm': tp['fm'], 'sections': tp['sections'], 'title': tp['title']},
+    return {'tenant': tenant, 'rule': rule, 'revision': revision(), 'tenantProfile': tp and {'path': tp['path'], 'fm': tp['fm'], 'sections': tp['sections'], 'title': tp['title']},
             'person': person and {'path': person['path'], 'fm': person['fm'], 'sections': person['sections'], 'title': person['title'], 'tenantDir': ptenant},
             'knownIssues': known_issues(title) if tenant else [], 'files': files, 'summary': summary, 'head': head(), 'customer': customer}
 
@@ -208,8 +287,11 @@ def render(mem, ident=None):
     L = []
     if ident: L.append(f"## Support memory for {ident.get('ref')} · {ident.get('name') or '?'} <{ident.get('email') or '?'}> · company {ident.get('companyName') or ident.get('company') or '?'}")
     else: L.append('## Support memory')
-    L.append(f"orbot {mem['head']} · " + (', '.join(mem['files']) if mem['files'] else 'no files') + f" · resolved by {mem['rule']}")
+    L.append(f"notion mirror {mem.get('revision') or '?'} · " + (', '.join(mem['files']) if mem['files'] else 'no files') + f" · resolved by {mem['rule']}")
     if not mem['tenantProfile']:
+        if str(mem['rule']).startswith('memory unavailable'):
+            L.append('\nThe support memory could not be read (' + mem['rule'] + '). Draft from the thread alone and say `memory: unavailable` in the checks; do not read the old repo files.')
+            return '\n'.join(L)
         L.append('\nNo tenant memory: draft from the thread alone and say so in the checks. If the company is a real tenant, propose the mapping (memory.py propose --tenant … ).')
         return '\n'.join(L)
     tp = mem['tenantProfile']; fm = tp['fm']
@@ -265,7 +347,7 @@ def propose(args):
     if not (tenant and text and section in SECTIONS and conf in ('low', 'medium', 'high')):
         print('usage: memory.py propose --ref T-… --tenant <id> [--person c_… --name "…" --role "…"] --section approved|observed|inferred --confidence low|medium|high --source "…" "<fact>"'); return 2
     if tenant not in tenants() and not person:
-        print(f'tenant {tenant} has no profile; create it in the orbot repo first (schemas/tenant-profile.schema.json)'); return 2
+        print(f'tenant {tenant} has no profile in the mirror; create the tenant row in Notion first (Tenants database), or run memory.py pull'); return 2
     if person and not re.match(r'^c_[A-Za-z0-9_]+$', person): print('--person must be a Plain customer id (c_…)'); return 2
     if person and not person_profile(tenant, person)[0] and not role:
         print(f'no requester file for {person} yet: --role "<support-relevant role>" is required to create one'); return 2
@@ -292,7 +374,7 @@ def list_queue():
     for r in rows:
         if r['state'] == 'dropped': continue
         print(f"{r['id']} · {r['state']} · {r['at']} · {r['target']} {r['tenant']}{'/' + r['customer'] if r.get('customer') else ''} · {r['section']} ({r['confidence']}) · {r['text'][:90]}")
-    s = queue_status(); print(f"{s['queued']} queued" + (f", oldest {s['oldest']}" if s['oldest'] else '') + (f", open PR #{s['openPr']}" if s['openPr'] else ''))
+    s = queue_status(); print(f"{s['queued']} queued" + (f", oldest {s['oldest']}" if s['oldest'] else '') + (f", old open PR #{s['openPr']} (orbot CI refuses it now: close it, memory.py sync)" if s['openPr'] else ''))
 
 
 def drop(pid):
@@ -319,7 +401,7 @@ def sync():
     return changed
 
 
-# ---------------------------------------------------------------- PR
+# ---------------------------------------------------------------- add to Notion
 PERSON_TEMPLATE = """---
 profile_type: person
 plain_customer_id: {cid}
@@ -358,77 +440,79 @@ def _append_bullet(text, section, bullet):
     return text[:start] + body + '\n- ' + bullet + '\n\n' + text[j:].lstrip('\n')
 
 
-def _bump_reviewed(text):
-    return re.sub(r'^last_reviewed_at: .*$', f'last_reviewed_at: {today}', text, count=1, flags=re.M)
+def build_add_files(q):
+    """{mirror path: new text} for the queued rows: the mirror text plus the picked bullets at the end of their section.
+    Frontmatter is left alone: the add tool writes facts and new rows only, a changed property is a person's edit in Notion."""
+    files = {}
+    base = mirror()['files']
+    for r in q:
+        if r['target'] == 'person':
+            _, pdir = person_profile(r['tenant'], r['customer'])
+            tp = tenant_profile(r['tenant'])
+            pdir = pdir or (tp['fm']['shared_people_from'] if tp and isinstance(tp['fm'].get('shared_people_from'), str) else r['tenant'])
+            rel = f"tenants/{pdir}/people/plain-{r['customer']}.md"
+            if rel not in files and rel not in base:
+                who = ', '.join(x for x in (r.get('name'), r.get('role')) if x) or r['customer']
+                files[rel] = PERSON_TEMPLATE.format(cid=r['customer'], tenant=pdir, role=r['role'], lang=r.get('language') or 'de', conf=r['confidence'], today=today, who=who)
+        else:
+            rel = f"tenants/{r['tenant']}/profile.md"
+            if rel not in base: raise RuntimeError(f"tenant {r['tenant']} has no profile in the mirror")
+        text = files.get(rel, base.get(rel))
+        bullet = f"{r['text'].rstrip('.')}. (Source: {r['source']}; confidence: {r['confidence']}; reviewed: {today} by Tobias via desk)"
+        files[rel] = _append_bullet(text, SECTIONS[r['section']], bullet)
+    return files
 
 
-def make_pr():
+def run_add_tool(files, write):
+    """Ship the files to the box and run orbot's add tool there (it has the Notion key and the deployed code).
+    Returns (exit code, output). The tool prints counts and classes, never fact text."""
+    import io, tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+        for rel, text in sorted(files.items()):
+            data = text.encode('utf-8'); info = tarfile.TarInfo(rel); info.size = len(data); info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+    if not BOX_ADAPTER: raise RuntimeError('config.json has no sendEnvFile')
+    flag = ' --write' if write else ''
+    cmd = ("d=$(mktemp -d) && tar xzf - -C \"$d\" && "
+           # the box's own .env names its support-memory folder (known issues and the route map for the tool's budget check)
+           f"sudo bash -c 'cd {BOX_ADAPTER} && set -a && . ./.env && set +a && "
+           f"node dist/cli/support-memory-notion-add.js --from '\"$d\"' --status reviewed --root \"$ORBOT_SUPPORT_MEMORY_DIR\"{flag}'; "
+           "rc=$?; rm -rf \"$d\"; exit $rc")
+    rc, out, err = box(cmd, stdin=buf.getvalue(), timeout=300)
+    return rc, (out + ('\n' + err if err.strip() and rc else '')).strip()
+
+
+def add_to_notion(dry_run=False):
     rows = load_queue(); q = [r for r in rows if r['state'] == 'queued']
     if not q: print('nothing queued'); return 0
-    s = queue_status()
-    if s['openPr']: print(f"PR #{s['openPr']} is still open: merge or close it first (memory.py sync)"); return 2
-    p = pull()
-    if not p['ok']: print(f"cannot start from a clean main: {p['reason']}"); return 2
-    branch = f"support-memory/desk-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}"
-    sh(['git', 'checkout', '-q', '-b', branch, 'origin/main'], check=True)
-    touched = set()
+    mir = fetch_mirror()                              # start from what OrBot reads now, never from an old copy
+    if not mir.get('ok'): print(f"cannot read the mirror: {mir.get('reason')}. Nothing was written."); return 2
     try:
-        for r in q:
-            if r['target'] == 'person':
-                _, pdir = person_profile(r['tenant'], r['customer'])
-                tp = tenant_profile(r['tenant'])
-                pdir = pdir or (tp['fm']['shared_people_from'] if tp and isinstance(tp['fm'].get('shared_people_from'), str) else r['tenant'])
-                path = f"{SM}/tenants/{pdir}/people/plain-{r['customer']}.md"
-                if not os.path.isfile(path):
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    who = ', '.join(x for x in (r.get('name'), r.get('role')) if x) or r['customer']
-                    open(path, 'w').write(PERSON_TEMPLATE.format(cid=r['customer'], tenant=pdir, role=r['role'], lang=r.get('language') or 'de', conf=r['confidence'], today=today, who=who))
-            else:
-                path = f"{SM}/tenants/{r['tenant']}/profile.md"
-            text = open(path, encoding='utf-8').read()
-            bullet = f"{r['text'].rstrip('.')}. (Source: {r['source']}; confidence: {r['confidence']}; reviewed: {today} by Tobias via desk)"
-            text = _bump_reviewed(_append_bullet(text, SECTIONS[r['section']], bullet))
-            open(path, 'w', encoding='utf-8').write(text); touched.add(os.path.relpath(path, ORBOT))
-        # the orbot parser is the gate: every touched profile must parse and validate before the PR exists
-        check = subprocess.run(['node', '--input-type=module', '-e', VALIDATE_JS, '--', *sorted(touched)], cwd=ORBOT, capture_output=True, text=True, timeout=120)
-        if check.returncode: raise RuntimeError('validation failed:\n' + (check.stdout + check.stderr).strip())
-        test = subprocess.run(['pnpm', 'exec', 'vitest', 'run', 'packages/shared/src/supportMemoryProfiles.test.ts'], cwd=ORBOT, capture_output=True, text=True, timeout=300)
-        if test.returncode: raise RuntimeError('supportMemoryProfiles.test.ts failed:\n' + test.stdout[-1500:])
-        refs = sorted({r['ref'] for r in q if r.get('ref')}); tns = sorted({r['tenant'] for r in q})
-        title = f"support-memory: {len(q)} fact{'s' if len(q) != 1 else ''} from desk sittings ({', '.join(tns)})"
-        body = ['Facts Tobias approved one by one in desk sittings (memory.py queue → this PR). Every bullet carries its source and confidence; requester files created here are `review_status: draft`.', '']
-        for r in q: body.append(f"- **{r['tenant']}{'/' + r['customer'] if r.get('customer') else ''}** · {r['section']} ({r['confidence']}) · {r['text']} · _{r['source']}_")
-        body += ['', 'Threads: ' + ', '.join(f'[{x}]({PLAIN_URL}{x})' if x.startswith('th_') else x for x in refs) if refs else '', '', 'Validation: node parse+validate on every touched profile, `pnpm exec vitest run packages/shared/src/supportMemoryProfiles.test.ts`.', '', '🤖 Generated with [Claude Code](https://claude.com/claude-code)']
-        sh(['git', 'add', *sorted(touched)], check=True)
-        sh(['git', 'commit', '-q', '-m', title + '\n\n' + '\n'.join(body[2:2 + len(q)]) + '\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>'], check=True)
-        sh(['git', 'push', '-q', '-u', 'origin', branch], timeout=90, check=True)
-        url = sh(['gh', 'pr', 'create', '--repo', deskconfig.BOT_REPO, '--base', 'main', '--head', branch, '--title', title, '--body', '\n'.join(body)], timeout=90, check=True)
-        n = url.rstrip('/').rsplit('/', 1)[-1]
+        files = build_add_files(q)
+    except Exception as e:
+        print(f'aborted before any write: {e}'); return 2
+    try:
+        rc, out = run_add_tool(files, write=False)
+        print(f"dry run on mirror {mir.get('revision')} ({len(q)} facts, {len(files)} files):\n{out}")
+        if rc:
+            print('\nThe add tool refused the batch: nothing was written. Fix or drop the named row (memory.py drop <id>), or edit in Notion.'); return 2
+        if dry_run: return 0
+        rc, out = run_add_tool(files, write=True)
+        print(f'\nwrite:\n{out}')
+        landed = 'written:' in out
+        if rc and not landed:
+            print('\nNothing was written. The queue is unchanged.'); return 2
+        if rc:
+            print('\nRows landed, and the read after the write found a problem (the line above names the class). Stop here: a person repairs it in Notion '
+                  '(orbot docs/operations/support-memory-notion-import.md, section 5). The queue is unchanged; a second run adds only what is missing.'); return 2
         for r in rows:
-            if r['state'] == 'queued': r['state'] = f'pr:{n}'; r['pr'] = url
+            if r['state'] == 'queued': r['state'] = 'added'; r['addedAt'] = today; r['revision'] = mir.get('revision')
         save_queue(rows)
-        print(f"PR opened: {url} ({len(q)} facts, {len(touched)} files). Merge it yourself on orbot; the deploy pulls it onto the VPS.")
+        print(f"\n{len(q)} facts are in Notion as reviewed. OrBot reads them at the next sync, within 5 minutes. No PR to merge.")
         return 0
     except Exception as e:
-        print(f'aborted: {e}')
-        return 2
-    finally:
-        sh(['git', 'checkout', '-q', '-f', 'main'])
-        sh(['git', 'branch', '-D', branch]) if sh(['git', 'rev-parse', '--verify', '-q', f'refs/remotes/origin/{branch}']) == '' else None
-
-
-VALIDATE_JS = r"""
-import fs from "node:fs";
-import { parseSupportMemoryMarkdown, validateSupportMemoryProfile } from "./packages/shared/src/supportMemoryProfiles.ts";
-let bad = 0;
-for (const p of process.argv.slice(2)) {
-  try {
-    const errs = validateSupportMemoryProfile(parseSupportMemoryMarkdown(fs.readFileSync(p, "utf8")));
-    if (errs.length) { bad++; console.log(p + ": " + errs.join("; ")); }
-  } catch (e) { bad++; console.log(p + ": " + (e && e.message ? e.message : e)); }
-}
-process.exit(bad ? 1 : 0);
-"""
+        print(f'aborted: {e}'); return 2
 
 
 # ---------------------------------------------------------------- cli
@@ -445,5 +529,5 @@ if __name__ == '__main__':
     if cmd == 'queue': list_queue(); sys.exit(0)
     if cmd == 'drop': drop(rest[0]); sys.exit(0)
     if cmd == 'sync': print(json.dumps({'changed': sync(), **queue_status()})); sys.exit(0)
-    if cmd == 'pr': sys.exit(make_pr())
+    if cmd in ('add', 'pr'): sys.exit(add_to_notion('--dry-run' in rest))
     print(__doc__); sys.exit(2)

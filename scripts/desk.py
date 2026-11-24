@@ -204,10 +204,11 @@ def _ref(v):
     m=re.search(r'\[(T-\d+)\]',v.get('row') or ''); return m.group(1) if m else None
 byref={_ref(v):dict(v,id=k) for k,v in cache.items() if _ref(v)}
 
-# ---------------------------------------------------------------- support memory (orbot, read locally)
+# ---------------------------------------------------------------- support memory (orbot, read from the box's Notion mirror)
 # Tobias 2026-09-24: every customer draft must be informed by the orbot support memory (tenant profile + requester file),
-# and what a sitting learns must flow back. Reads come from the local ~/orbot checkout (memory.py pulls main here, so
-# a sitting is at most one pull stale); writes queue in memory-proposals.jsonl and go up as one orbot PR (memory:pr card).
+# and what a sitting learns must flow back. Since orbot #1013 (2026-11-23) the profiles live in Notion: memory.py reads
+# the box's checked copy over the operator API at each start, and writes queue in memory-proposals.jsonl and go to
+# Notion through the box's add tool (the memory:pr card; the id is kept, there is no PR any more).
 sys.path.insert(0,DESK)
 try:
     import memory
@@ -1478,16 +1479,16 @@ if not SCOPE:
 
 # ---------------------------------------------------------------- source 10: queued support-memory proposals (memory.py queue)
 # Facts Tobias okayed in sittings wait in memory-proposals.jsonl. Three or more, or one three days old, is one RUN card:
-# `memory.py pr` applies them on a branch in ~/orbot, validates with the orbot parser, opens the PR. One open memory PR at a
-# time (the next batch waits for the merge, so the files never conflict). Tobias merges orbot PRs himself; no HORST there.
+# `memory.py add` sends them to the box's add tool: a dry run first, then the write. They land in Notion as reviewed
+# facts (the pick in the sitting is the review) and OrBot reads them at the next sync. Nothing to merge.
 MEMORY_PR_MIN=3; MEMORY_PR_AGE_DAYS=3
 if memory and not SCOPE:
     try:
         _ms=memory.queue_status()
-        if _ms['queued'] and not _ms['openPr'] and (_ms['queued']>=MEMORY_PR_MIN or _ms['age']>=MEMORY_PR_AGE_DAYS):
+        if _ms['queued'] and (_ms['queued']>=MEMORY_PR_MIN or _ms['age']>=MEMORY_PR_AGE_DAYS):
             add({'id':'memory:pr','ref':'memory','lane':'RUN','mins':2,'impact':'P2','age':_ms['age'],'waits':'nobody','pr':None,'task':None,'thread':None,'url':None,
                  'status':f"{_ms['queued']} queued for {', '.join(_ms['tenants'])}; oldest {_ms['oldest']}",'note':'','since':f"queue:{_ms['queued']}",
-                 'act':f"Open the orbot support-memory PR with the {_ms['queued']} facts you okayed ({', '.join(_ms['tenants'])}): python3 ~/orbit-scratch/desk/memory.py pr",
+                 'act':f"Add the {_ms['queued']} facts you okayed to Notion ({', '.join(_ms['tenants'])}): python3 ~/orbit-scratch/desk/memory.py add",
                  'score':round((2+0+min(_ms['age']/3,2))/2*10,1)})
     except Exception as _e:
         failed_sources.append(('memory queue',str(_e)[:160]))
@@ -1776,7 +1777,7 @@ if HELD:   # 2026-11-10: threads a teammate holds stay off the desk; one line sa
 due=[f"{k} ({v['reason']})" for k,v in preflight.items() if v['due']]
 quiet=[f"{k} ({v['reason']})" for k,v in preflight.items() if not v['due']]
 print(f"PRE-FLIGHT: due → {'; '.join(due) if due else 'none'}" + (f" · quiet → {'; '.join(quiet)}" if quiet else '')
-      + f" · memory {MEMORY.get('head')}" + ('' if MEMORY.get('ok') else f" (not pulled: {MEMORY.get('reason')})") + (f"; merged: PR {', '.join(MEMORY['synced'])}" if MEMORY.get('synced') else ''))
+      + f" · memory {MEMORY.get('head')}" + ('' if MEMORY.get('ok') else f" (not read: {MEMORY.get('reason')})") + (f"; merged: PR {', '.join(MEMORY['synced'])}" if MEMORY.get('synced') else ''))
 if RELEASE_DAY: print(f"RELEASE DAY ({RELEASE_DAY}{', as of '+AS_OF if WHATIF else ''}): PRs that can still make staging first, then P0/P1 threads")
 print()
 print("TOP SIX (work from the top; the desk ranks again on every run)")
