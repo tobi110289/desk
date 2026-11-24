@@ -1,262 +1,69 @@
 import { atom, read, update } from "claude-code";
+import type { Raw } from "./core/pure";
 import type { EngineInterface, Register } from "claude-code";
 
-import type {
-  DeskBrief,
-  DeskCard,
-  DeskDecision,
-  DeskFeed,
-  DeskLink,
-  DeskOption,
-  DeskView,
-  PlainStats,
-  PreparedBrief,
-} from "../types";
 import { berlinTime, dueName, reopenedOf, titleOf, waitOf } from "./cardText";
-import { healthOf, pickLine, rankWorkable, takesSession } from "./health";
 import { hintOf } from "./optionHints";
-import { BRIEF_FIELDS, plainWordsProblems } from "./plainWords";
-
-const PANE = "desk";
-const PANE_SIZE = { id: PANE, title: "Desk", columns: 72, rows: 40 };
-const POLL_MS = 15_000;
-// The desk is live: the pane reruns desk.py when cards.json is older than this (Tobias, 2026-10-09: no sittings).
-const GATHER_MS = 10 * 60_000;
-const GATHER_CHECK_MS = 60_000;
-// desk.py takes about 45 s; a marker younger than this means another session is running it.
-const GATHER_LOCK_MS = 3 * 60_000;
-// desk.py's exit code when a close landed while it gathered: nothing was written, run it again.
-const STALE_RUN = 75;
-const SKILL = "~/.claude/skills/desk";
-// The live feed (config.json "liveEvents": true): one long-poll round takes up to this many seconds.
-const EVENTS_WAIT_S = 20;
-// After a failed round (desk-events.py exit 4) the loop waits this long before the next.
-const EVENTS_BACKOFF_MS = 60_000;
-// The .events marker holds the time of the newest round and its owner; younger than this means another session runs it.
-const EVENTS_LOCK_MS = 90_000;
-// While a full gather runs, the loop checks again after this long.
-const EVENTS_GATHER_WAIT_MS = 5_000;
-const PLAIN_MS = 5 * 60_000;
-// The SSO login check: the token cache only, no network (2026-11-10).
-const SSO_MS = 2 * 60_000;
-const TICKETS_MS = 30 * 60_000;
-const NOTION_TOOL = "mcp__notion__notion-query-data-sources";
-// The ids that belong to one company live in ~/orbit-scratch/desk/config.json, outside the repo
-// (config.example.json lists the keys). Empty until loadConfig() has read the file.
-const config = {
-  plainWorkspace: "",
-  repo: "",
-  notionTasks: "",
-  notionUser: "",
-};
-let isConfigLoaded = false;
-// Directory prefixes (config.json `projects`, `~` allowed) where the desk belongs; empty means "any checkout of `repo`".
-let projectRoots: string[] = [];
-// null until the first hook asked; then whether this session sits inside a desk project. Outside, every hook steps aside.
-const isHome = atom(
-  { plugin: "desk", key: "isHome" } as const,
-  null as boolean | null,
-);
-
-/** Once per session: the root sits under a configured project prefix, or its origin remote is the configured repo. */
-async function atHome($: EngineInterface): Promise<boolean> {
-  const known = await read($, isHome);
-  if (known !== null) {
-    return known;
-  }
-  await loadConfig($);
-  const is = await findHome($);
-  await update($, isHome, () => is);
-  return is;
-}
-
-async function findHome($: EngineInterface) {
-  const home = (await $.env.get("HOME")) ?? "";
-  const root = await $.session.root().catch(() => "");
-  if (root === "") {
-    return false;
-  }
-  for (const prefix of projectRoots) {
-    const dir = prefix.replace(/^~/, home).replace(/\/$/, "");
-    if (root === dir || root.startsWith(`${dir}/`)) {
-      return true;
-    }
-  }
-  if (config.repo === "") {
-    return false;
-  }
-  const ran = await $.process
-    .run(["git", "-C", root, "remote", "get-url", "origin"], {
-      timeoutMs: 5_000,
-    })
-    .catch(() => null);
-  return ran !== null && ran.exitCode === 0 && ran.stdout.includes(config.repo);
-}
-// Tickets we file: the Notion user in config only. An integration bot that files for the team stays out
-// (Tobias, 2026-10-06).
-const ticketsSql = () =>
-  'SELECT "Task ID" AS id, "Task name" AS title, "Status" AS status, "Impact Level" AS impact, "Priority" AS priority, ' +
-  '"Assignee" AS assignee, "Created time" AS createdAt, "date:Completed time:start" AS completedAt, ' +
-  '"GitHub Pull Requests" AS prs, "Sprint" AS sprint, "Created by" AS createdBy, url ' +
-  `FROM "${config.notionTasks}" WHERE "Created by" LIKE ? ` +
-  'AND datetime("Created time") >= datetime(\'2026-07-01\') ORDER BY "Created time" DESC LIMIT 100';
-const plainThread = (id: string) =>
-  `https://app.plain.com/workspace/${config.plainWorkspace}/thread/${id}`;
-const REPLY_TOOLS = [
-  "mcp__plain__reply_to_thread",
-  "mcp__mcp-plain__reply_to_thread",
-];
-// Tools that put a message in front of a person; a reply that claims "sent" needs one of them, or luna-send.py.
-const SEND_TOOLS = [
-  ...REPLY_TOOLS,
-  "mcp__plugin_slack_slack__slack_send_message",
-];
-
-// The two tools the mod registers: Claude hands a card's brief to the pane, and records the verb through it.
-const CARD_TOOL = /^mcp__desk__desk_card$/;
-const CLOSE_TOOL = /^mcp__desk__desk_close$/;
-const VERBS = ["do", "decide", "delegate", "defer", "drop"];
-// Hotkeys for the options on a card; 1-9, p and w are taken.
-const OPTION_KEYS = "abcdefghij";
-/** A pick's state on the pane: waiting, running, done, bounced (the world moved, nothing ran), failed. */
-const STATE_GLYPH: Record<DeskDecision["state"], string> = {
-  queued: "◌",
-  running: "◍",
-  done: "✓",
-  bounced: "↩",
-  failed: "✗",
-};
-const SUMMARY_MODEL = "sonnet";
-// Lanes whose draft is customer text: the plain-words ban holds, the cap on numbered items does not.
-const REPLY_LANES = ["REPLY", "NOTIFY", "PROMISE", "FAST"];
-
-const CARD_DESCRIPTION =
-  "Put a desk card's brief on the desk pane in its fixed shape: WHY the card is on the desk, what to DECIDE, what THEN " +
-  "happens, the one fact that decides it, the drafted consequence, and the lane's options (recommended first). " +
-  "Every text field is plain words for a reader who has not opened the file: no paths, code names, ids, hashes, " +
-  "status values or backticks; the tool refuses them and names each one. " +
-  "Call it once per card, after pushing right, instead of AskUserQuestion. " +
-  "Then end the turn: the user's pick arrives as their next message, 'Re desk card <id>: <option>'.";
-const CARD_SCHEMA = {
-  type: "object",
-  properties: {
-    card_id: {
-      type: "string",
-      description:
-        "The card's id as desk.py prints it, such as loop:T-120 or batch:SEND:all.",
-    },
-    why: {
-      type: "string",
-      description:
-        "One plain sentence: what put the card on the desk, since when, and who waits, such as " +
-        "'Dana wrote at 09:11 today and has had no answer' or 'this file has sat untriaged since 26 Aug, nobody waits'.",
-    },
-    decide: {
-      type: "string",
-      description:
-        "The one question, in one sentence, such as 'Send Dana this answer as Luna?' or " +
-        "'Hand the two Hub bugs to agents and close the third file?'.",
-    },
-    then: {
-      type: "string",
-      description:
-        "One or two sentences: what the recommended pick sets in motion and what is at stake if nothing happens, such as " +
-        "'Luna sends it now; the thread stays open until she confirms on staging' or 'two agents start today; left alone the bugs stay live on Hub'.",
-    },
-    fact: {
-      type: "string",
-      description:
-        "The single fact that decides the card: one plain sentence under 140 characters, what the case is and what changed, " +
-        "such as 'customer asked twice, fix is on staging since 06.10'. No paths, code names, ids, hashes, status values or backticks.",
-    },
-    draft: {
-      type: "string",
-      description:
-        "The drafted consequence the recommended option executes: the reply text, the caption, the message. Omit when there is none. " +
-        "A batch or task card: at most three numbered lines, each naming the thing in product words, whether it is still true, and the verb. " +
-        "No paths, code names, ids, hashes, status values or backticks: the tool refuses them.",
-    },
-    options: {
-      type: "array",
-      description:
-        "The lane's fixed option set from CARDS.md, recommended first, at most 10.",
-      items: {
-        type: "object",
-        properties: {
-          label: {
-            type: "string",
-            description:
-              "The option as CARDS.md words it, under 50 characters.",
-          },
-          verb: {
-            type: "string",
-            enum: VERBS,
-            description: "The desk verb this option records.",
-          },
-        },
-        required: ["label", "verb"],
-      },
-    },
-  },
-  required: ["card_id", "why", "decide", "then", "fact", "options"],
-};
-
-const CLOSE_DESCRIPTION =
-  "Record a desk card's verb (do, decide, delegate, defer, drop). It runs desk-close.py, so never run that over Bash. " +
-  "A loop: or gap: card needs its new caption in the same call. A defer needs a trigger and an act; 'later' is never a trigger.";
-const CLOSE_SCHEMA = {
-  type: "object",
-  properties: {
-    card_id: {
-      type: "string",
-      description: "The card's id, such as loop:T-120.",
-    },
-    verb: { type: "string", enum: VERBS },
-    note: {
-      type: "string",
-      description: "What happened, under 120 characters; goes to the done log.",
-    },
-    caption: {
-      type: "string",
-      description:
-        "The loop entry's new status caption, under 50 characters, written in the same command as the close. Required for loop: and gap: cards (unless desk-caption.py already ran this turn).",
-    },
-    trigger: {
-      type: "string",
-      description:
-        "defer only: the machine-checkable trigger, such as deployed:production:3180, a date, or 'customer replies'.",
-    },
-    act: {
-      type: "string",
-      description: "defer only: what to do when the trigger fires.",
-    },
-  },
-  required: ["card_id", "verb"],
-};
-
-// `python3 ~/orbit-scratch/desk/desk.py [refs | --tenant x | --today]` ranks the desk again; the report modes do not.
-const GATHER = /(^|[\s/])desk\.py(\s|$)(?!.*--(wins|preflight|all)\b)/;
-const CLOSE_BASH =
-  /desk-close\.py\s+["']?([^\s"']+)["']?\s+(do|decide|delegate|defer|drop)\b/;
-const CAPTION = /desk-caption\.py\s+["']?([^\s"']+)/;
-const DESK_WRITE = /desk-(close|caption)\.py/;
-const LUNA_SEND = /luna-send\.py/;
-// A reply that says a message reached a person.
-const SENT_CLAIM =
-  /\b(reply|antwort|message|note|nachricht|mail)\b[^.\n]{0,60}\b(sent|went out|is out|ist raus|gesendet|abgeschickt)\b|\bsent (it|the reply|the message|the note|the mail)\b|\b(gesendet|abgeschickt|rausgeschickt)\b/i;
-
-const EMPTY: DeskView = {
-  cards: [],
-  parked: 0,
-  closedToday: 0,
-  generatedAt: "",
-  scope: "",
-  scopeArgs: [],
-  due: [],
-  decisions: [],
-  harvestPending: 0,
-  sso: { state: "none", minutes: 0 },
-};
+import {
+  NO_FEED,
+  atHome,
+  autoNext,
+  choose,
+  closeCard,
+  decide,
+  gather,
+  handToSession,
+  isPaneOpen,
+  live,
+  look,
+  moveSelection,
+  pollPlain,
+  pollSso,
+  prepare,
+  refresh,
+  setAuto,
+  showCard,
+  showStatus,
+  startTicker,
+  stopTicker,
+  summarize,
+  surface,
+  syncTickets,
+  turn,
+  wave,
+} from "./core/desk";
+import {
+  CAPTION,
+  CARD_DESCRIPTION,
+  CARD_SCHEMA,
+  CARD_TOOL,
+  CLOSE_BASH,
+  CLOSE_DESCRIPTION,
+  CLOSE_SCHEMA,
+  CLOSE_TOOL,
+  DESK_WRITE,
+  GATHER,
+  GATHER_CHECK_MS,
+  LUNA_SEND,
+  OPTION_KEYS,
+  PANE,
+  PLAIN_MS,
+  POLL_MS,
+  REPLY_TOOLS,
+  SEND_TOOLS,
+  SENT_CLAIM,
+  SKILL,
+  SSO_MS,
+  STATE_GLYPH,
+  TICKETS_MS,
+  config,
+  feedLine,
+  pendingOf,
+  rowOf,
+  text,
+  EMPTY,
+  PANE_SIZE,
+} from "./core/pure";
 
 /**
  * A theme: a palette over the colour names the pane is written in, plus its glyphs and borders.
@@ -375,1296 +182,60 @@ const prColor = (state: string) => C(PR_COLORS[state.toLowerCase()] ?? "white");
 
 const laneColor = (lane: string) => C(LANE_COLORS[lane] ?? "white");
 
-const view = atom({ plugin: "desk", key: "view" } as const, EMPTY);
-const working = atom({ plugin: "desk", key: "working" } as const, null);
-const picked = atom({ plugin: "desk", key: "picked" } as const, "");
-const isGathering = atom(
-  { plugin: "desk", key: "isGathering" } as const,
-  false,
-);
-const NO_FEED: DeskFeed = { state: "", reason: "", lastEventAt: "" };
-const feed = atom({ plugin: "desk", key: "feed" } as const, NO_FEED);
-// True from turn.start to the main loop's turn.complete: the pane shows it and hides the "Work this card" button,
-// so the next card is not started while Claude still works the current one (asked for 2026-10-13).
-const isBusy = atom({ plugin: "desk", key: "isBusy" } as const, false);
-// Counts up every theme.waveMs while Claude works; the pane and the band draw one wave frame per count.
-const tick = atom({ plugin: "desk", key: "tick" } as const, 0);
-let ticker: ReturnType<EngineInterface["clock"]["every"]> | null = null;
-// True once the person opened the pane in this session (/desk-pane, ctrl+k). Only such a session gets it back by itself.
-let askedForPane = false;
-
-/** The wave frame for a count, dimmed on every second cycle so the eye also sees a slow 1.6 s beat. */
-function wave(count: number) {
-  return {
-    frame: theme.wave[count % theme.wave.length],
-    isDim: count % (theme.wave.length * 2) >= theme.wave.length,
-  };
-}
-const hasReplyPass = atom(
-  { plugin: "desk", key: "hasReplyPass" } as const,
-  false,
-);
-const plain = atom({ plugin: "desk", key: "plain" } as const, null);
-const isPlainOpen = atom({ plugin: "desk", key: "isPlainOpen" } as const, true);
-/** The open-cards list folds to its header line with `l`, like the Plain drawer with `p`. */
-const isListOpen = atom({ plugin: "desk", key: "isListOpen" } as const, true);
-/** The pull-request list folds with `o`, apart from the Plain drawer (`p`). */
-const isPrsOpen = atom({ plugin: "desk", key: "isPrsOpen" } as const, true);
-/** True from the pane's close (`h`, ctrl+x x) to its next open: the band offers it back on ctrl+k. */
-const isPaneHidden = atom(
-  { plugin: "desk", key: "isPaneHidden" } as const,
-  false,
-);
-/** The raw lines of a card (status, memory, the gather's note) fold out with `s`; a brief tells the story without them. */
-const isDetailsOpen = atom(
-  { plugin: "desk", key: "isDetailsOpen" } as const,
-  false,
-);
-/** The card whose whole option list is folded out with `v`; a brief shows three by default. */
-const moreFor = atom({ plugin: "desk", key: "moreFor" } as const, "");
+// The desk's values this file reads and writes. The core declares the same ones: the engine lists a file's values from
+// the atoms written in that file, so each file names its own, with the same plugin and key.
+const brief = atom({ plugin: "desk", key: "brief" } as const, null);
 const captioned = atom({ plugin: "desk", key: "captioned" } as const, []);
-/**
- * 2026-10-23: auto mode. Off: a session-class pick waits under NEEDS YOU for `w`. On: when the session is idle, it takes
- * the oldest queued pick by itself, and the next one as soon as a card closes, until the queue is empty. The switch is
- * the file desk/.auto ("on …" / "off …"), so every session and the pane in each of them see the same state.
- */
 const isAuto = atom({ plugin: "desk", key: "isAuto" } as const, false);
-// 2026-11-11: the switch file names the one session that owns auto mode. Before, every session read "on" and sent
-// itself the next queued pick at the end of its own turn, so picks landed in sessions that had nothing to do with the desk.
 const isAutoElsewhere = atom(
   { plugin: "desk", key: "isAutoElsewhere" } as const,
   false,
 );
-let ownId: string | null = null;
-async function sessionId($: EngineInterface) {
-  ownId ??= await $.session.id().catch(() => null);
-  return ownId;
-}
-/** The option label the user pressed per card, until its close: desk-close.py scores it against the prepared brief. */
+const isDetailsOpen = atom(
+  { plugin: "desk", key: "isDetailsOpen" } as const,
+  false,
+);
+const isHome = atom(
+  { plugin: "desk", key: "isHome" } as const,
+  null as boolean | null,
+);
+const isListOpen = atom({ plugin: "desk", key: "isListOpen" } as const, true);
+const isPaneHidden = atom(
+  { plugin: "desk", key: "isPaneHidden" } as const,
+  false,
+);
+const isPrsOpen = atom({ plugin: "desk", key: "isPrsOpen" } as const, true);
+const moreFor = atom({ plugin: "desk", key: "moreFor" } as const, "");
 const picks = atom({ plugin: "desk", key: "picks" } as const, {});
-// 2026-11-11: a pressed option shows as picked at once, while desk-decide.py still records it (up to 20 s).
 const recording = atom({ plugin: "desk", key: "recording" } as const, {});
-const brief = atom({ plugin: "desk", key: "brief" } as const, null);
 const summaries = atom({ plugin: "desk", key: "summaries" } as const, {});
 
-type Raw = Record<string, unknown>;
+const feed = atom({ plugin: "desk", key: "feed" } as const, NO_FEED);
+const hasReplyPass = atom(
+  { plugin: "desk", key: "hasReplyPass" } as const,
+  false,
+);
+const isBusy = atom({ plugin: "desk", key: "isBusy" } as const, false);
+const isGathering = atom(
+  { plugin: "desk", key: "isGathering" } as const,
+  false,
+);
+const isPlainOpen = atom({ plugin: "desk", key: "isPlainOpen" } as const, true);
+const picked = atom({ plugin: "desk", key: "picked" } as const, "");
+const plain = atom({ plugin: "desk", key: "plain" } as const, null);
+const tick = atom({ plugin: "desk", key: "tick" } as const, 0);
+const view = atom({ plugin: "desk", key: "view" } as const, EMPTY);
+const working = atom({ plugin: "desk", key: "working" } as const, null);
 
-const text = (value: unknown) => (typeof value === "string" ? value : "");
+// True once the person opened the pane in this session (/desk-pane, ctrl+k). Only such a session gets it back by itself.
+let askedForPane = false;
 
-// desk-close.py stamps the machine's local date; the desk runs in Berlin.
-const berlinDate = (ms: number) =>
-  new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Berlin" }).format(
-    new Date(ms),
-  );
-
-const linksOf = (card: Raw): DeskLink[] => {
-  const links: DeskLink[] = [];
-
-  if (text(card.thread)) {
-    links.push({ label: "Plain", href: plainThread(text(card.thread)) });
-  }
-
-  if (typeof card.pr === "number") {
-    const repo = text(card.repo) || config.repo;
-    links.push({
-      label: `#${card.pr}`,
-      href: `https://github.com/${repo}/pull/${card.pr}`,
-    });
-  }
-
-  if (text(card.url)) {
-    links.push({ label: "Link", href: text(card.url) });
-  }
-
-  return links;
+// The pane's part in the core: its theme from the config file, and the wave the status line draws.
+surface.onConfig = (file) => {
+  theme = THEMES[text(file.theme)] ?? DEFAULT_THEME;
+  look.wave = theme.wave;
+  look.waveMs = theme.waveMs;
 };
-
-// 2026-10-22: the pane holds no copy of the hold logic. desk-close.py writes the verb into the card in cards.json, and
-// the next gather removes the card; until then the card shows its verb. (Before this the pane recomputed the closure
-// from desk.json and drifted from the gather: 2026-10-19 a reopened card still showed ✓ do.)
-const verbOf = (card: Raw): string | null => {
-  const verb = text(card.verb);
-  return verb === "" ? null : verb;
-};
-
-// 2026-11-12: desk-prepare.py marks a card whose question is gone (a REVIEW card whose PR merged or closed after the
-// gather read it). Such a card leaves the pane at once; the next gather drops it from cards.json.
-const isGone = (card: Raw, briefs: Record<string, Raw>): boolean => {
-  const b = briefs[text(card.id)];
-  return (
-    b !== undefined &&
-    text(b.gone) !== "" &&
-    text(b.key) === text(card.key) &&
-    text(b.since) === text(card.since)
-  );
-};
-
-// A prepared brief counts only while the card's wait (key + since) is the one it was written for; a brief from before
-// the wait keys binds to the caption (status + act) as it did then.
-const preparedOf = (
-  card: Raw,
-  briefs: Record<string, Raw>,
-): PreparedBrief | null => {
-  const b = briefs[text(card.id)];
-  if (b === undefined || b.error !== undefined || isGone(card, briefs)) {
-    return null;
-  }
-  // 2026-10-23: a card with a wait key binds only a brief written for that key; a brief from before the keys
-  // (status + act) is stale on such a card, and a pick on it would bounce as soon as a pass rewrote it.
-  const bound =
-    text(card.key) !== ""
-      ? text(b.key) === text(card.key) && text(b.since) === text(card.since)
-      : text(b.status) === text(card.status) && text(b.act) === text(card.act);
-  if (!bound) {
-    return null;
-  }
-
-  return {
-    file: text(b.file),
-    at: text(b.preparedAt),
-    why: text(b.why),
-    decide: text(b.decide),
-    then: text(b.then),
-    fact: text(b.fact),
-    draft: text(b.draft),
-    options: ((b.options ?? []) as Raw[]).map((o) => ({
-      label: text(o.label),
-      verb: text(o.verb),
-    })),
-    deferTrigger: text(b.deferTrigger),
-    // A brief from before 2026-11-10 has no count: it shows its whole list, as it always did.
-    shown: typeof b.shown === "number" && b.shown > 0 ? b.shown : 99,
-    openChecks: ((b.openChecks ?? []) as unknown[]).map(text),
-    resolved: b.resolved === true,
-    causeOpen: b.causeOpen === true,
-  };
-};
-
-const decisionOf = (d: Raw): DeskDecision => ({
-  cardId: text(d.cardId),
-  ref: text(d.ref),
-  lane: text(d.lane),
-  option: text(d.option),
-  verb: text(d.verb),
-  kind: (["script", "model", "session"].includes(text(d.class))
-    ? text(d.class)
-    : "session") as DeskDecision["kind"],
-  state: (["queued", "running", "done", "bounced", "failed"].includes(
-    text(d.state),
-  )
-    ? text(d.state)
-    : "failed") as DeskDecision["state"],
-  pickedAt: text(d.pickedAt),
-  startedAt: text(d.startedAt),
-  finishedAt: text(d.finishedAt),
-  result: text(d.result),
-});
-
-const toView = (
-  cardsJson: string,
-  deskJson: string,
-  today: string,
-  briefs: Record<string, Raw> = {},
-  decisions: Raw[] = [],
-  harvestPending = 0,
-  sso: DeskView["sso"] = { state: "none", minutes: 0 },
-): DeskView => {
-  const cache = JSON.parse(cardsJson) as Raw;
-  const desk = JSON.parse(deskJson) as Raw;
-  const log = (desk.log ?? []) as Raw[];
-  const picks = decisions
-    .map(decisionOf)
-    .sort((a, b) => (a.pickedAt < b.pickedAt ? 1 : -1));
-
-  const cards = ((cache.cards ?? []) as Raw[])
-    .filter((card) => !isGone(card, briefs))
-    .map((card): DeskCard => {
-      const id = text(card.id);
-      const prepared = preparedOf(card, briefs);
-      const failed = briefs[id]?.error;
-      const members = ((card.members ?? []) as Raw[]).map(
-        (member) =>
-          `${text(member.ref)} ${text(member.task)}: ${text(member.status)}`,
-      );
-
-      return {
-        prepared,
-        health: healthOf(
-          { id, lane: text(card.lane) },
-          prepared,
-          failed === undefined ? null : text(failed) || String(failed),
-        ),
-        pickLine: pickLine(picks.find((d) => d.cardId === id) ?? null),
-        id,
-        ref: text(card.ref),
-        lane: text(card.lane),
-        mins: typeof card.mins === "number" ? card.mins : 0,
-        impact: text(card.impact),
-        act: text(card.act),
-        status: text(card.status),
-        memory: text((card.memory as Raw | undefined)?.summary).replace(
-          /^memory: /,
-          "",
-        ),
-        note: text(card.note),
-        since: text(card.since),
-        waits: text(card.waits),
-        age: typeof card.age === "number" ? card.age : 0,
-        links: linksOf(card),
-        members,
-        memberIds: ((card.members ?? []) as Raw[])
-          .map((member) => text(member.id))
-          .filter((memberId) => memberId !== ""),
-        verb: verbOf(card),
-      };
-    });
-
-  const preflight = (cache.preflight ?? {}) as Record<string, Raw>;
-
-  return {
-    cards,
-    parked: ((cache.parked ?? []) as unknown[]).length,
-    // The same count desk.py prints: every log row of today.
-    closedToday: log.filter((row) => row.date === today).length,
-    generatedAt: text(cache.generatedAt),
-    scope: text(cache.scope),
-    scopeArgs: ((cache.scopeArgs ?? []) as unknown[]).map(text),
-    due: Object.entries(preflight)
-      .filter(([, one]) => one.due === true)
-      .map(([name, one]) => `${name} (${text(one.reason)})`),
-    decisions: picks,
-    harvestPending,
-    sso,
-  };
-};
-
-/** The open pick of a card: queued or running, whatever its class. */
-const pendingOf = (desk: DeskView, id: string) =>
-  desk.decisions.find(
-    (d) => d.cardId === id && (d.state === "queued" || d.state === "running"),
-  ) ?? null;
-
-/** Move the selection one row up or down the list (wrapping); ctrl+↑/↓ from the prompt press these (2026-10-23). */
-async function moveSelection($: EngineInterface, step: 1 | -1) {
-  const desk = await read($, view);
-  if (desk.cards.length === 0) {
-    return;
-  }
-  const row = rowOf(desk, await read($, picked));
-  const next = desk.cards[(row + step + desk.cards.length) % desk.cards.length];
-  if (next !== undefined) {
-    await update($, picked, () => next.id);
-  }
-}
-
-// The card the pane shows: the picked one while it is on the desk, else the top open card.
-const rowOf = (desk: DeskView, id: string) => {
-  const row = desk.cards.findIndex((card) => card.id === id);
-  if (row >= 0) {
-    return row;
-  }
-
-  return Math.max(
-    0,
-    desk.cards.findIndex((card) => card.verb === null),
-  );
-};
-
-// The files' mtimes at the last load; a reload starts over.
-let stamp = "";
-// Per turn: what the Stop hook judges a reply against. A press sets pendingAnswer; the turn it starts owns it.
-let pendingAnswer: string | null = null;
-let answeredCard: string | null = null;
-let isSentThisTurn = false;
-let isClosedThisTurn = false;
-// The desk.py run in flight, so two timers never start two.
-let gatherRun: Promise<void> | null = null;
-// The desk-prepare.py pass in flight.
-let prepareRun: Promise<void> | null = null;
-let prepareFull = false;
-let prepareIsPartial = false;
-// The desk-execute.py drain in flight, and whether a pick landed while it ran.
-let executeRun: Promise<void> | null = null;
-let executeAgain = false;
-// The live event loop in flight, and its desk.py --event step: the gather waits for the step, the step for the gather.
-let liveRun: Promise<void> | null = null;
-let applyRun: Promise<void> | null = null;
-// Who owns the .events marker: this module instance (a reload or another session gets its own).
-const LIVE_OWNER = Math.random().toString(36).slice(2, 10);
-
-async function isPaneOpen($: EngineInterface) {
-  try {
-    return (await $.ui.panes()).some((pane) => pane.id === PANE);
-  } catch {
-    return false;
-  }
-}
-
-// The status line: the open count, and "working" while a turn runs.
-/** The status line under the prompt: the open count and, while Claude works, the wave. */
-async function showStatus($: EngineInterface) {
-  if (!(await atHome($))) {
-    $.ui.status(undefined);
-    return;
-  }
-  const desk = await read($, view);
-  const open = desk.cards.filter((card) => card.verb === null).length;
-  const parts: string[] = [];
-  if (desk.sso.state === "expired") {
-    parts.push("⚠ SSO EXPIRED · pnpm sso");
-  } else if (desk.sso.state === "expiring") {
-    parts.push(`sso ↻ ${desk.sso.minutes}m`);
-  }
-  if (open > 0) {
-    parts.push(`${open} open`);
-  }
-  if (await read($, isBusy)) {
-    startTicker($);
-    parts.push(`${wave(await read($, tick)).frame} working`);
-  }
-  $.ui.status(parts.length === 0 ? undefined : parts.join(" · "));
-}
-
-/** The wave clock, started once per busy stretch; a hot reload drops the old timer, so a later call restarts it. */
-function startTicker($: EngineInterface) {
-  ticker ??= $.clock.every(
-    theme.waveMs,
-    () => void update($, tick, (count) => count + 1).then(() => showStatus($)),
-  );
-}
-
-async function loadConfig($: EngineInterface) {
-  if (isConfigLoaded) {
-    return;
-  }
-  const home = (await $.env.get("HOME")) ?? "";
-  const json = await $.fs
-    .read(`${home}/orbit-scratch/desk/config.json`)
-    .catch(() => "");
-  try {
-    const file = JSON.parse(json) as Raw;
-    for (const key of Object.keys(config) as (keyof typeof config)[]) {
-      config[key] = text(file[key]);
-    }
-    theme = THEMES[text(file.theme)] ?? DEFAULT_THEME;
-    projectRoots = Array.isArray(file.projects)
-      ? file.projects.map((one) => text(one)).filter((one) => one !== "")
-      : [];
-    isConfigLoaded = true;
-  } catch {
-    // No config yet: links carry no workspace and the ticket sync stays off.
-  }
-}
-
-async function refresh($: EngineInterface, isForced = false) {
-  await loadConfig($);
-  const home = (await $.env.get("HOME")) ?? "";
-  const cardsPath = `${home}/orbit-scratch/desk/cards.json`;
-  const deskPath = `${home}/orbit-scratch/desk/desk.json`;
-  const time = await $.clock.now();
-
-  try {
-    const [cardsStat, deskStat] = await Promise.all([
-      $.fs.stat(cardsPath),
-      $.fs.stat(deskPath),
-    ]);
-    const statsPath = `${home}/orbit-scratch/desk/plain-stats.json`;
-    const statsAt = await $.fs.stat(statsPath).then(
-      (stat) => stat.mtimeMs,
-      () => 0,
-    );
-    // briefs/<id>.json, written by desk-prepare.py; the newest file's mtime is part of the stamp
-    const briefsDir = `${home}/orbit-scratch/desk/briefs`;
-    const briefFiles = (await $.fs.list(briefsDir).catch(() => [])).filter(
-      (entry) => entry.kind === "file" && entry.name.endsWith(".json"),
-    );
-    const briefsAt = Math.max(0, ...briefFiles.map((entry) => entry.mtimeMs));
-    // decisions/<id>.json, written by desk-decide.py and desk-execute.py
-    const decisionsDir = `${home}/orbit-scratch/desk/decisions`;
-    const decisionFiles = (
-      await $.fs.list(decisionsDir).catch(() => [])
-    ).filter((entry) => entry.kind === "file" && entry.name.endsWith(".json"));
-    const decisionsAt = Math.max(
-      0,
-      ...decisionFiles.map((entry) => entry.mtimeMs),
-    );
-    // the auto switch follows the file, so a toggle in another session shows here within a poll
-    // "on <time> <session id>": auto runs only in the session the file names; a file without an id counts as off
-    const [autoState, , autoOwner = ""] = (
-      await $.fs.read(`${home}/orbit-scratch/desk/.auto`).catch(() => "")
-    )
-      .trim()
-      .split(/\s+/);
-    const me = await sessionId($);
-    const autoHere = autoState === "on" && me !== null && autoOwner === me;
-    await update($, isAuto, () => autoHere);
-    await update(
-      $,
-      isAutoElsewhere,
-      () => autoState === "on" && autoOwner !== "" && !autoHere,
-    );
-    const harvestPath = `${home}/orbit-scratch/desk/harvest.json`;
-    const harvestAt = await $.fs.stat(harvestPath).then(
-      (stat) => stat.mtimeMs,
-      () => 0,
-    );
-    // 2026-11-10: the SSO login state, so an expired login shows on the pane and the status line, not in a failed run.
-    const ssoPath = `${home}/orbit-scratch/desk/cache/sso-state.json`;
-    const ssoAt = await $.fs.stat(ssoPath).then(
-      (stat) => stat.mtimeMs,
-      () => 0,
-    );
-    const next = `${cardsStat.mtimeMs}:${deskStat.mtimeMs}:${statsAt}:${briefsAt}:${decisionsAt}:${decisionFiles.length}:${harvestAt}:${ssoAt}:${berlinDate(time)}`;
-
-    if (next === stamp && !isForced) {
-      return;
-    }
-
-    const [cardsJson, deskJson] = await Promise.all([
-      $.fs.read(cardsPath),
-      $.fs.read(deskPath),
-    ]);
-    let sso = { state: "none", minutes: 0 };
-    try {
-      const raw = JSON.parse(await $.fs.read(ssoPath)) as Raw;
-      sso = {
-        state: text(raw.state) || "none",
-        minutes: typeof raw.minutes === "number" ? raw.minutes : 0,
-      };
-    } catch {
-      // no state file yet: the next poll writes it
-    }
-    const briefs: Record<string, Raw> = {};
-    for (const entry of briefFiles) {
-      const file = `${briefsDir}/${entry.name}`;
-      try {
-        const b = JSON.parse(await $.fs.read(file)) as Raw;
-        briefs[text(b.cardId)] = { ...b, file };
-      } catch {
-        // a half-written brief: the next refresh reads it
-      }
-    }
-    const decisions: Raw[] = [];
-    for (const entry of decisionFiles) {
-      try {
-        decisions.push(
-          JSON.parse(await $.fs.read(`${decisionsDir}/${entry.name}`)) as Raw,
-        );
-      } catch {
-        // a half-written record: the next refresh reads it
-      }
-    }
-    let harvestPending = 0;
-    try {
-      const items = (JSON.parse(await $.fs.read(harvestPath)) as Raw).items;
-      harvestPending = ((items ?? []) as Raw[]).filter(
-        (one) => one.asked !== true,
-      ).length;
-    } catch {
-      // no harvest file yet
-    }
-    const fresh = toView(
-      cardsJson,
-      deskJson,
-      berlinDate(time),
-      briefs,
-      decisions,
-      harvestPending,
-      sso,
-    );
-    stamp = next;
-    // The health check: a card the pane cannot work never leads, and the gather's own top card, when it is such a
-    // card and a prepare pass can fix it, gets one at once.
-    const live = (await read($, brief))?.cardId ?? null;
-    const top = fresh.cards.find((card) => card.verb === null);
-    fresh.cards = rankWorkable(fresh.cards, live);
-    await update($, view, () => fresh);
-    if (
-      top !== undefined &&
-      top.health !== "" &&
-      top.id !== live &&
-      !takesSession(top)
-    ) {
-      askPrepare($, top.id, time);
-    }
-    // A card that left the desk, or got its verb elsewhere, is no longer worked and keeps no brief.
-    const isOpen = (id: string | null | undefined) =>
-      fresh.cards.some((card) => card.id === id && card.verb === null);
-    await update($, working, (id) => (isOpen(id) ? id : null));
-    await update($, brief, (b) => (isOpen(b?.cardId) ? b : null));
-
-    await showStatus($);
-
-    const statsJson = await $.fs.read(statsPath).catch(() => "");
-    if (statsJson !== "") {
-      const stats = JSON.parse(statsJson) as PlainStats;
-      await update($, plain, () => stats);
-    }
-  } catch {
-    // A half-written file parses on the next poll.
-  }
-}
-
-// The Notion follow-up tickets we filed, through the Notion MCP (no API key exists locally). At most one read per
-// half hour across sessions: the cache's age gates it. tickets.py and desk.py read the file.
-async function syncTickets($: EngineInterface, isForced = false) {
-  const home = (await $.env.get("HOME")) ?? "";
-  const path = `${home}/orbit-scratch/desk/notion-tickets.json`;
-  const at = await $.fs.stat(path).then(
-    (stat) => stat.mtimeMs,
-    () => 0,
-  );
-  if (!isForced && (await $.clock.now()) - at < TICKETS_MS) {
-    return "fresh";
-  }
-  await loadConfig($);
-  if (config.notionTasks === "" || config.notionUser === "") {
-    return "no config";
-  }
-  const tools = await $.tool.list();
-  if (!tools.some((tool) => tool.name === NOTION_TOOL)) {
-    return "no notion";
-  }
-  const ran = await $.tool.call({
-    tool: NOTION_TOOL,
-    data: {
-      data_source_urls: [config.notionTasks],
-      query: ticketsSql(),
-      params: [`%${config.notionUser}%`],
-    },
-  } as never);
-  if (ran.deny !== undefined || ran.isError === true) {
-    $.ui.log(
-      `tickets sync refused: ${ran.deny ?? ran.text ?? "error"}`.slice(0, 200),
-      { to: "debug" },
-    );
-
-    return "refused";
-  }
-  const text = ran.text ?? JSON.stringify(ran.result);
-  const start = text.indexOf("{");
-  const parsed = JSON.parse(text.slice(start)) as {
-    results?: Record<string, unknown>[];
-  };
-  const tickets = (parsed.results ?? []).map((row) => ({
-    id: row.id,
-    title: row.title ?? "",
-    status: row.status ?? "",
-    impact: row.impact ?? "",
-    priority: row.priority ?? "",
-    assignee:
-      typeof row.assignee === "string" && row.assignee !== "[]"
-        ? row.assignee
-        : "",
-    createdAt: row.createdAt ?? "",
-    completedAt: row.completedAt ?? "",
-    prs:
-      typeof row.prs === "string"
-        ? (JSON.parse(row.prs) as unknown[]).length
-        : 0,
-    sprint:
-      typeof row.sprint === "string" &&
-      row.sprint !== "[]" &&
-      row.sprint !== "",
-    createdBy: row.createdBy ?? "",
-    url: row.url ?? "",
-  }));
-  const generatedAt = new Date(await $.clock.now()).toISOString();
-  await $.fs.write(path, JSON.stringify({ generatedAt, tickets }, null, 1));
-  await pollPlain($);
-
-  return `${tickets.length} tickets`;
-}
-
-// One Plain read every five minutes; the file it writes is what refresh() shows.
-/** Writes cache/sso-state.json from the AWS SSO token cache, then refreshes so the pane and the status line show it. */
-async function pollSso($: EngineInterface) {
-  const home = (await $.env.get("HOME")) ?? "";
-  try {
-    await $.process.run(
-      ["python3", `${home}/orbit-scratch/desk/sso-state.py`],
-      { timeoutMs: 10_000 },
-    );
-  } catch {
-    // a missing python or cache: the state file keeps its last value
-  }
-  await refresh($, true);
-}
-
-async function pollPlain($: EngineInterface) {
-  const home = (await $.env.get("HOME")) ?? "";
-  const key = await $.env.get("PLAIN_API_KEY");
-  await $.process.run(
-    ["python3", `${home}/orbit-scratch/desk/plain-stats.py`],
-    {
-      env: key ? { PLAIN_API_KEY: key } : undefined,
-      timeoutMs: 60_000,
-    },
-  );
-  await refresh($, true);
-}
-
-// The live desk: desk.py again when cards.json is old, in the background, while the pane is open. "now" skips the
-// age check: a close just landed, or the person pressed r.
-// 2026-11-12: a press on r while a card was open did nothing and left no trace. The press is kept until a run starts.
-let isFreshWanted = false;
-
-function gather($: EngineInterface, when: "due" | "now" = "due") {
-  if (when === "now") {
-    isFreshWanted = true;
-  }
-  gatherRun ??= runGather($, isFreshWanted ? "now" : when)
-    .catch((error: unknown) => {
-      try {
-        $.ui.log(`gather failed: ${String(error)}`.slice(0, 200), {
-          to: "debug",
-        });
-      } catch {
-        // Nothing to tell: the next check runs it again.
-      }
-    })
-    .finally(() => {
-      gatherRun = null;
-    });
-
-  return gatherRun;
-}
-
-async function runGather($: EngineInterface, when: "due" | "now") {
-  if (!(await isPaneOpen($))) {
-    return;
-  }
-  // A gather runs with a card open too (2026-11-17: a card stood open for hours and two new P0s never showed).
-  // The open card keeps its place: the pane finds it by id (picked), and refresh() ranks around the live brief.
-  const home = (await $.env.get("HOME")) ?? "";
-  const dir = `${home}/orbit-scratch/desk`;
-  const mtime = (path: string) =>
-    $.fs.stat(path).then(
-      (stat) => stat.mtimeMs,
-      () => 0,
-    );
-  const time = await $.clock.now();
-  // The gather's own clock: an event write (desk.py --event) touches cards.json but keeps generatedAt.
-  const generatedAt = Date.parse((await read($, view)).generatedAt);
-  const gatheredAt = Number.isNaN(generatedAt)
-    ? await mtime(`${dir}/cards.json`)
-    : generatedAt;
-  if (when === "due" && time - gatheredAt < GATHER_MS) {
-    return;
-  }
-  // An event step writes cards.json in well under a second; the gather starts after it.
-  if (applyRun !== null) {
-    await applyRun;
-  }
-  // The marker holds the start time of a run in flight and is empty between runs.
-  const marker = `${dir}/.gather`;
-  const startedAt = Date.parse(await $.fs.read(marker).catch(() => ""));
-  if (time - startedAt < GATHER_LOCK_MS) {
-    return;
-  }
-  await $.fs.write(marker, new Date(time).toISOString());
-  isFreshWanted = false;
-  await update($, isGathering, () => true);
-  try {
-    const key = await $.env.get("PLAIN_API_KEY");
-    const { scopeArgs } = await read($, view);
-    // a forced gather reads every source afresh; a due one may reuse the per-source caches (desk.py --fresh)
-    const argv = [
-      "python3",
-      `${dir}/desk.py`,
-      ...(when === "now" ? ["--fresh"] : []),
-      ...scopeArgs,
-    ];
-    const init = {
-      env: key ? { PLAIN_API_KEY: key } : undefined,
-      timeoutMs: 4 * 60_000,
-    };
-    const ran = await $.process.run(argv, init);
-    if (ran.exitCode === STALE_RUN) {
-      await $.process.run(argv, init);
-    }
-  } finally {
-    await $.fs.write(marker, "").catch(() => undefined);
-    await update($, isGathering, () => false);
-    await refresh($, true);
-    prepare($);
-  }
-}
-
-// After every gather: desk-prepare.py drafts the top cards in the background (one headless sonnet run per card,
-// scripts collect the raw material), so `w` shows the options at once. Fire and forget; the briefs land in
-// briefs/<id>.json and refresh() picks them up. A child never starts children (DESK_PREPARE=1 is set inside).
-function prepare($: EngineInterface, ids: string[] = []) {
-  if (prepareRun !== null) {
-    // a full pass asked while a one-card pass runs follows it, so the top five are not skipped
-    prepareFull ||= ids.length === 0 && prepareIsPartial;
-    return;
-  }
-  prepareIsPartial = ids.length > 0;
-  prepareRun = (async () => {
-    const home = (await $.env.get("HOME")) ?? "";
-    const key = await $.env.get("PLAIN_API_KEY");
-    await $.process.run(
-      ["python3", `${home}/orbit-scratch/desk/desk-prepare.py`, ...ids],
-      { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 6 * 60_000 },
-    );
-    await refresh($, true);
-  })()
-    .catch((error: unknown) => {
-      try {
-        $.ui.log(`prepare failed: ${String(error)}`.slice(0, 200), {
-          to: "debug",
-        });
-      } catch {
-        // the next gather runs it again
-      }
-    })
-    .finally(() => {
-      prepareRun = null;
-      if (prepareFull) {
-        prepareFull = false;
-        prepare($);
-      }
-    });
-}
-
-// The gather's top card has no workable brief: one prepare pass for that card alone, at most every two minutes per
-// card. desk-prepare.py keeps its own back-off after a failed brief, so a card that keeps failing is not hammered.
-const PREPARE_ASK_MS = 2 * 60_000;
-let lastAsk = { id: "", at: 0 };
-function askPrepare($: EngineInterface, id: string, now: number) {
-  if (prepareRun !== null) {
-    return;
-  }
-  if (lastAsk.id === id && now - lastAsk.at < PREPARE_ASK_MS) {
-    return;
-  }
-  lastAsk = { id, at: now };
-  prepare($, [id]);
-}
-
-// 2026-10-23: a pick on a prepared card is a decision record, not a prompt. desk-execute.py drains the script-class
-// records in the background; a bounced one loses its brief, so the prepare pass that follows writes a new one.
-function execute($: EngineInterface) {
-  if (executeRun !== null) {
-    executeAgain = true;
-    return;
-  }
-  executeRun = (async () => {
-    const home = (await $.env.get("HOME")) ?? "";
-    const key = await $.env.get("PLAIN_API_KEY");
-    await $.process.run(
-      ["python3", `${home}/orbit-scratch/desk/desk-execute.py`],
-      // $.process.run allows ten minutes at most; a larger value is refused and the drain never starts (2026-10-23).
-      { env: key ? { PLAIN_API_KEY: key } : undefined, timeoutMs: 10 * 60_000 },
-    );
-    await refresh($, true);
-    prepare($);
-  })()
-    .catch((error: unknown) => {
-      try {
-        $.ui.log(`execute failed: ${String(error)}`.slice(0, 200), {
-          to: "debug",
-        });
-      } catch {
-        // the next pick runs it again
-      }
-    })
-    .finally(() => {
-      executeRun = null;
-      if (executeAgain) {
-        executeAgain = false;
-        execute($);
-      }
-    });
-}
-
-/** The prompt that hands one card with a chosen option to the session (today's path, and the session-class queue). */
-async function handToSession(
-  $: EngineInterface,
-  cardId: string,
-  option: DeskOption,
-) {
-  pendingAnswer = cardId;
-  await update($, picked, () => cardId);
-  await update($, working, () => cardId);
-  await update($, picks, (p) => ({ ...p, [cardId]: option.label }));
-  await $.prompt.submit({
-    text:
-      `Re desk card ${cardId}: ${option.label} (${option.verb}). ` +
-      "Execute it now per the lane recipe, then record it with desk_close.",
-    asUser: true,
-  });
-}
-
-/** Auto mode: hand the oldest queued session-class pick to the session when it is idle. */
-async function autoNext($: EngineInterface) {
-  if (!(await read($, isAuto))) {
-    return;
-  }
-  // isAuto is true only in the session the switch file names, and that session takes the queue only with its pane
-  if (!(await isPaneOpen($))) {
-    return;
-  }
-  if (
-    (await read($, isBusy)) ||
-    (await read($, working)) !== null ||
-    pendingAnswer !== null
-  ) {
-    return;
-  }
-  const desk = await read($, view);
-  const next = [...desk.decisions]
-    .reverse() // oldest pick first
-    .find(
-      (d) =>
-        d.kind === "session" &&
-        d.state === "queued" &&
-        desk.cards.some((card) => card.id === d.cardId && card.verb === null),
-    );
-  if (next === undefined) {
-    return;
-  }
-  await handToSession($, next.cardId, { label: next.option, verb: next.verb });
-}
-
-async function setAuto($: EngineInterface, on: boolean) {
-  const home = (await $.env.get("HOME")) ?? "";
-  const path = `${home}/orbit-scratch/desk/.auto`;
-  // the file holds "on <time> <session id>" or "off <time>": "on" names this session as the only one that runs auto
-  const me = await sessionId($);
-  if (on && me === null) {
-    return;
-  }
-  await $.fs
-    .write(
-      path,
-      on
-        ? `on ${new Date().toISOString()} ${me}`
-        : `off ${new Date().toISOString()}`,
-    )
-    .catch(() => undefined);
-  await update($, isAuto, () => on);
-  await update($, isAutoElsewhere, () => false);
-  if (on) {
-    await autoNext($);
-  }
-}
-
-/**
- * A pick on a prepared card, from the pane: desk-decide.py records it and names its class. A script-class pick
- * starts the background drain; a session-class pick waits under "needs you" for `w`; a pick the script refuses
- * (no fresh brief, exit 3) goes to the session at once like a `w` would.
- */
-async function decide($: EngineInterface, card: DeskCard, option: DeskOption) {
-  const home = (await $.env.get("HOME")) ?? "";
-  const settle = () =>
-    update(
-      $,
-      recording,
-      ({ [card.id]: _gone, ...rest }: Record<string, string>) => rest,
-    );
-  await update($, recording, (r) => ({ ...r, [card.id]: option.label }));
-  const ran = await $.process
-    .run(
-      [
-        "python3",
-        `${home}/orbit-scratch/desk/desk-decide.py`,
-        card.id,
-        option.label,
-      ],
-      { timeoutMs: 20_000 },
-    )
-    .catch(() => ({
-      exitCode: 1,
-      stdout: "",
-      stderr: "desk-decide did not run",
-    }));
-  const kind = ran.stdout.trim();
-  if (ran.exitCode === 0) {
-    await refresh($, true);
-    await settle();
-    if (kind === "script" || kind === "model") {
-      execute($);
-    } else {
-      await autoNext($);
-    }
-    return;
-  }
-  await settle();
-  if (ran.exitCode === 3) {
-    await handToSession($, card.id, option);
-    return;
-  }
-  try {
-    $.ui.log(`decide: ${(ran.stdout + ran.stderr).trim()}`.slice(0, 200), {
-      to: "debug",
-    });
-  } catch {
-    // nothing recorded; the pane still shows the options
-  }
-}
-
-async function isLiveOn($: EngineInterface) {
-  const home = (await $.env.get("HOME")) ?? "";
-  const json = await $.fs
-    .read(`${home}/orbit-scratch/desk/config.json`)
-    .catch(() => "");
-  try {
-    return (JSON.parse(json) as Raw).liveEvents === true;
-  } catch {
-    return false;
-  }
-}
-
-/** A full gather runs here (gatherRun) or in another session (a .gather marker younger than GATHER_LOCK_MS). */
-async function isGatherBusy($: EngineInterface, dir: string) {
-  if (gatherRun !== null) {
-    return true;
-  }
-  const startedAt = Date.parse(
-    await $.fs.read(`${dir}/.gather`).catch(() => ""),
-  );
-
-  return (await $.clock.now()) - startedAt < GATHER_LOCK_MS;
-}
-
-const setFeed = ($: EngineInterface, state: DeskFeed["state"], reason = "") =>
-  update($, feed, (kept) => ({ ...kept, state, reason }));
-
-// The live desk between two gathers: desk-events.py long-polls the adapter's feed (one round returns within ~20 s),
-// desk.py --event applies the events to cards.json, refresh() redraws the pane. Opt-in through config.json
-// "liveEvents": true. It runs while the pane is open, one loop per machine (the .events marker), never in parallel
-// with a full gather, and the 10-minute gather stays the truth.
-function live($: EngineInterface) {
-  liveRun ??= runLive($)
-    .catch(async (error: unknown) => {
-      await setFeed($, "off", String(error).slice(0, 80)).catch(
-        () => undefined,
-      );
-    })
-    .finally(() => {
-      liveRun = null;
-    });
-
-  return liveRun;
-}
-
-async function runLive($: EngineInterface) {
-  const home = (await $.env.get("HOME")) ?? "";
-  const dir = `${home}/orbit-scratch/desk`;
-  const marker = `${dir}/.events`;
-  const key = await $.env.get("PLAIN_API_KEY");
-  const env = key ? { PLAIN_API_KEY: key } : undefined;
-  try {
-    for (;;) {
-      if (!(await isLiveOn($))) {
-        await update($, feed, () => NO_FEED);
-        return;
-      }
-      if (!(await isPaneOpen($))) {
-        return;
-      }
-      const time = await $.clock.now();
-      const [heldAt = "", owner = ""] = (
-        await $.fs.read(marker).catch(() => "")
-      ).split(" ");
-      if (owner !== LIVE_OWNER && time - Date.parse(heldAt) < EVENTS_LOCK_MS) {
-        await setFeed($, "off", "another session holds the feed");
-        return;
-      }
-      await $.fs.write(marker, `${new Date(time).toISOString()} ${LIVE_OWNER}`);
-      // A gather in flight first: the events wait in the feed (the cursor stays) until it has written cards.json.
-      if (await isGatherBusy($, dir)) {
-        await $.clock.sleep(EVENTS_GATHER_WAIT_MS);
-        continue;
-      }
-      const ran = await $.process
-        .run(
-          [
-            "python3",
-            `${dir}/desk-events.py`,
-            "poll",
-            "--wait",
-            String(EVENTS_WAIT_S),
-          ],
-          { env, timeoutMs: (EVENTS_WAIT_S + 45) * 1000 },
-        )
-        .catch((error: unknown) => ({
-          exitCode: 4,
-          stdout: "",
-          stderr: String(error),
-        }));
-      if (ran.exitCode !== 0) {
-        const why = ran.stderr.trim().split("\n")[0] ?? "";
-        await setFeed(
-          $,
-          "off",
-          why.replace(/^desk-events: /, "").slice(0, 60) ||
-            `exit ${ran.exitCode}`,
-        );
-        await $.clock.sleep(EVENTS_BACKOFF_MS);
-        continue;
-      }
-      let events: Raw[] = [];
-      try {
-        const parsed = JSON.parse(ran.stdout) as unknown;
-        events = Array.isArray(parsed) ? (parsed as Raw[]) : [];
-      } catch {
-        // an unreadable answer counts as a quiet round; the events are in events.jsonl
-      }
-      await setFeed($, "live");
-      if (events.length > 0) {
-        applyRun = applyEvents($, dir, events, env).finally(() => {
-          applyRun = null;
-        });
-        await applyRun;
-        const newest = events
-          .map((one) => text(one.at))
-          .filter((at) => at !== "")
-          .sort()
-          .at(-1);
-        const at = newest ?? new Date(await $.clock.now()).toISOString();
-        await update($, feed, (kept) => ({ ...kept, lastEventAt: at }));
-        await refresh($, true);
-      }
-    }
-  } finally {
-    // Hand the marker back so the next open (here or in another session) starts at once.
-    const [, owner = ""] = (await $.fs.read(marker).catch(() => "")).split(" ");
-    if (owner === LIVE_OWNER) {
-      await $.fs.write(marker, "").catch(() => undefined);
-    }
-  }
-}
-
-/** One desk.py --event call for the round's events; exit 75 means a gather started meanwhile, so wait and try again. */
-async function applyEvents(
-  $: EngineInterface,
-  dir: string,
-  events: Raw[],
-  env: Record<string, string> | undefined,
-) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    while (await isGatherBusy($, dir)) {
-      await $.clock.sleep(EVENTS_GATHER_WAIT_MS);
-    }
-    const ran = await $.process.run(
-      ["python3", `${dir}/desk.py`, "--event", JSON.stringify(events)],
-      { env, timeoutMs: 30_000 },
-    );
-    if (ran.exitCode !== STALE_RUN) {
-      return;
-    }
-    await $.clock.sleep(EVENTS_GATHER_WAIT_MS);
-  }
-}
-
-/** The pane's feed line: `live · last event 12:34`, `live · quiet`, `feed off: <reason>`. */
-const feedLine = (one: DeskFeed) =>
-  one.state === "off"
-    ? `feed off: ${one.reason || "no answer"}`
-    : one.lastEventAt === ""
-      ? "live · quiet"
-      : `live · last event ${berlinTime(one.lastEventAt)}`;
-
-// desk_card: the brief goes on the pane, the card becomes the one being worked, and the reply tells Claude to wait.
-async function showCard($: EngineInterface, input: Raw): Promise<string> {
-  const id = text(input.card_id).trim();
-  const desk = await read($, view);
-  const row = desk.cards.findIndex((card) => card.id === id);
-  if (row < 0) {
-    return `Not shown: no card ${id} is on the desk. The cards are: ${desk.cards.map((card) => card.id).join(", ") || "none"}.`;
-  }
-  const options: DeskOption[] = (
-    (Array.isArray(input.options) ? input.options : []) as Raw[]
-  )
-    .map((option) => ({
-      label: text(option.label).trim().slice(0, 60),
-      verb: VERBS.includes(text(option.verb)) ? text(option.verb) : "do",
-    }))
-    .filter((option) => option.label !== "")
-    .slice(0, OPTION_KEYS.length);
-  if (options.length === 0) {
-    return "Not shown: give at least one option with a label and a verb.";
-  }
-  const [why, decide, then, fact, draft] = BRIEF_FIELDS.map((field) =>
-    text(input[field]).trim(),
-  ) as [string, string, string, string, string];
-  // The fixed shape: WHY the card is on the desk, what to DECIDE, what THEN happens. Each is required.
-  const missing = (["why", "decide", "then", "fact"] as const).filter(
-    (field) => text(input[field]).trim() === "",
-  );
-  if (missing.length > 0) {
-    return (
-      `Not shown: the brief has no ${missing.join(", ")}. Every card carries why (what put it on the desk, since when, who waits), ` +
-      "decide (the one question), then (what the recommended pick sets in motion and what is at stake if nothing happens) " +
-      "and fact (the deciding fact), each in plain words. Then call desk_card again."
-    );
-  }
-  const problems = plainWordsProblems(
-    { why, decide, then, fact, draft },
-    REPLY_LANES.includes(desk.cards[row]?.lane ?? ""),
-  );
-  if (problems.length > 0) {
-    return (
-      `Not shown: the brief is not in plain words. ${problems.join(". ")}. ` +
-      "Rewrite it for someone who has not opened the file: name each thing in product words (what a user sees or cannot do), " +
-      "say whether it is still true, end with the verb. Paths, code names, ids, hashes and status values go into the file, " +
-      "the close note or the PR. Then call desk_card again."
-    );
-  }
-  const at = await $.clock.now();
-  await update($, brief, () => ({
-    cardId: id,
-    why,
-    decide,
-    then,
-    fact,
-    draft: draft.slice(0, 1500),
-    options,
-    at,
-  }));
-  // options on the card make it workable: it may lead again
-  await update($, view, (d) => ({ ...d, cards: rankWorkable(d.cards, id) }));
-  await update($, picked, () => id);
-  await update($, working, () => id);
-  void $.ui
-    .open({ id: PANE, title: "Desk", columns: 72, rows: 40 })
-    .catch(() => undefined);
-  const keys = options
-    .map((option, i) => `${OPTION_KEYS[i]}: ${option.label}`)
-    .join(", ");
-
-  return (
-    `Card ${id} is on the desk pane with ${options.length} options (${keys}). ` +
-    `Stop here and wait: the user's pick arrives as their next message, "Re desk card ${id}: <option>".`
-  );
-}
-
-// A press answers as the user. The brief leaves the pane at once, so a second press cannot send twice.
-async function choose(
-  $: EngineInterface,
-  current: DeskBrief,
-  option: DeskOption,
-) {
-  pendingAnswer = current.cardId;
-  await update($, brief, (b) => (b?.cardId === current.cardId ? null : b));
-  await update($, picks, (p) => ({ ...p, [current.cardId]: option.label }));
-  await $.prompt.submit({
-    text:
-      `Re desk card ${current.cardId}: ${option.label} (${option.verb}). ` +
-      "Execute it now per the lane recipe, then record it with desk_close.",
-    asUser: true,
-  });
-}
-
-// desk_close: the caption rule, then desk-close.py, then the restated count.
-async function closeCard($: EngineInterface, input: Raw): Promise<string> {
-  const id = text(input.card_id).trim();
-  const verb = text(input.verb).trim();
-  if (!VERBS.includes(verb)) {
-    return `Not closed: the verb must be one of ${VERBS.join(", ")}.`;
-  }
-  const desk = await read($, view);
-  // A member of a batch or of the ageing sweep is no card of its own, but CARDS.md closes members one by one
-  // (2026-11-18: eight drops of sweep:ageing were refused here, and the Bash guard refused desk-close.py).
-  const card =
-    desk.cards.find((one) => one.id === id) ??
-    // A view stored before this field existed has cards without it.
-    desk.cards.find((one) => (one.memberIds ?? []).includes(id));
-  if (!card) {
-    return `Not closed: no card ${id} is on the desk, and no card there has it as a member. The cards are: ${desk.cards.map((one) => one.id).join(", ") || "none"}.`;
-  }
-  const isMember = card.id !== id;
-  const ref = id.split(":")[1] ?? "";
-  const caption = text(input.caption).trim();
-  const trigger = text(input.trigger).trim();
-  if (
-    /^(loop|gap):/.test(id) &&
-    verb !== "defer" &&
-    caption === "" &&
-    !(await read($, captioned)).includes(ref)
-  ) {
-    return `Not closed: ${id} is a loop card and needs its new caption (under 50 chars) in this same call. A caption written after the close reopens the card.`;
-  }
-  if (
-    verb === "defer" &&
-    /^(|later|später|soon|tomorrow|next week)$/i.test(trigger)
-  ) {
-    return "Not deferred: a defer needs a trigger (deployed:<env>:<pr>, a date, 'customer replies'). 'later' is never a trigger.";
-  }
-  const home = (await $.env.get("HOME")) ?? "";
-  const script = `${home}/orbit-scratch/desk/desk-close.py`;
-  const pick = (await read($, picks))[id];
-  const pickArgs = pick === undefined ? [] : ["--pick", pick];
-  const argv =
-    verb === "defer"
-      ? [
-          "python3",
-          script,
-          id,
-          "defer",
-          trigger,
-          text(input.act).trim() || (isMember ? "" : card.act),
-          ...pickArgs,
-        ]
-      : [
-          "python3",
-          script,
-          id,
-          verb,
-          text(input.note).trim(),
-          ...(caption !== "" ? ["--caption", caption] : []),
-          ...pickArgs,
-        ];
-  const ran = await $.process.run(argv, { timeoutMs: 30_000 });
-  if (ran.exitCode !== 0) {
-    return `Not closed: desk-close.py exited ${ran.exitCode}: ${(ran.stderr || ran.stdout).trim().slice(-400)}`;
-  }
-  await update($, picks, ({ [id]: _gone, ...rest }) => rest);
-  isClosedThisTurn = true;
-  if (answeredCard === id) {
-    answeredCard = null;
-  }
-  await update($, brief, (b) => (b?.cardId === id ? null : b));
-  await update($, working, (one) => (one === id ? null : one));
-  await update($, picked, () => "");
-  await refresh($, true);
-  // The ranking moves with a close (a batch reopens, a parked card fires); the pane shows it when the run lands.
-  void gather($, "now");
-  const fresh = await read($, view);
-  const upcoming = fresh.cards.find((one) => one.verb === null);
-  const tail = upcoming
-    ? `Top of the desk: ${upcoming.id} (${upcoming.lane} ${upcoming.ref}, ${upcoming.mins} min). ` +
-      "Stop here: the user starts the next card (w on the pane, or by saying so)."
-    : "The desk is empty.";
-
-  return `Card ${id} closed (${verb}). Closed today: ${fresh.closedToday}. ${tail}`;
-}
-
-// One small model call per reply: the line under the card that says where it stands now.
-async function summarize($: EngineInterface, card: DeskCard, answer: string) {
-  const res = await $.model.complete({
-    model: SUMMARY_MODEL,
-    effort: "low",
-    maxTokens: 60,
-    timeoutMs: 20_000,
-    system:
-      "You keep a one-line status for a card on a work desk. Answer with the line only: under 90 characters, " +
-      "present tense, what was done and what still waits on whom. No quotes, no preamble.",
-    prompt:
-      `Card ${card.id} (${card.lane} ${card.ref}). Act: ${card.act}\n` +
-      `Status before: ${card.status || "none"}\n\nThe assistant's reply this turn:\n${answer.slice(-3000)}`,
-  });
-  if (!res.isAnswered) {
-    return;
-  }
-  const line = res.text.trim().split("\n")[0]?.slice(0, 120) ?? "";
-  if (line !== "") {
-    await update($, summaries, (all) => ({ ...all, [card.id]: line }));
-  }
-}
 
 export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
@@ -1812,7 +383,7 @@ export const register: Register = (on) => {
       const replied = await next(e);
       if (replied.deny === undefined && replied.isError !== true) {
         await update($, hasReplyPass, () => false);
-        isSentThisTurn = true;
+        turn.isSentThisTurn = true;
       }
       return replied;
     }
@@ -1820,7 +391,7 @@ export const register: Register = (on) => {
     if (SEND_TOOLS.includes(tool)) {
       const sent = await next(e);
       if (sent.deny === undefined && sent.isError !== true) {
-        isSentThisTurn = true;
+        turn.isSentThisTurn = true;
       }
 
       return sent;
@@ -1847,7 +418,7 @@ export const register: Register = (on) => {
     }
 
     if (LUNA_SEND.test(command)) {
-      isSentThisTurn = true;
+      turn.isSentThisTurn = true;
     }
 
     const caption = CAPTION.exec(command);
@@ -1879,11 +450,11 @@ export const register: Register = (on) => {
     if (!(await atHome($))) {
       return next(e);
     }
-    isSentThisTurn = false;
-    isClosedThisTurn = false;
-    if (pendingAnswer !== null) {
-      answeredCard = pendingAnswer;
-      pendingAnswer = null;
+    turn.isSentThisTurn = false;
+    turn.isClosedThisTurn = false;
+    if (turn.pendingAnswer !== null) {
+      turn.answeredCard = turn.pendingAnswer;
+      turn.pendingAnswer = null;
     }
     await update($, isBusy, () => true);
     startTicker($);
@@ -1965,8 +536,8 @@ export const register: Register = (on) => {
     const reply = e.last_assistant_message ?? "";
     const isWorking = (await read($, working)) !== null;
     if (
-      (isWorking || answeredCard !== null) &&
-      !isSentThisTurn &&
+      (isWorking || turn.answeredCard !== null) &&
+      !turn.isSentThisTurn &&
       SENT_CLAIM.test(reply)
     ) {
       return {
@@ -1976,14 +547,14 @@ export const register: Register = (on) => {
           "Send it now, or state plainly that nothing was sent.",
       };
     }
-    if (answeredCard !== null && !isClosedThisTurn) {
+    if (turn.answeredCard !== null && !turn.isClosedThisTurn) {
       const desk = await read($, view);
-      const card = desk.cards.find((one) => one.id === answeredCard);
+      const card = desk.cards.find((one) => one.id === turn.answeredCard);
       if (card && card.verb === null) {
         return {
           ...r,
           block:
-            `desk: the user answered card ${answeredCard}, but it has no verb yet. ` +
+            `desk: the user answered card ${turn.answeredCard}, but it has no verb yet. ` +
             "Call desk_close with the verb (and the caption for a loop card), or say in one line why the card stays open.",
         };
       }
@@ -1999,11 +570,10 @@ export const register: Register = (on) => {
     }
     // every end counts (answer, abort, error): the desk is free for the next card
     await update($, isBusy, () => false);
-    ticker?.cancel();
-    ticker = null;
+    stopTicker();
     await showStatus($);
-    const worked = answeredCard;
-    answeredCard = null;
+    const worked = turn.answeredCard;
+    turn.answeredCard = null;
     if (e.reason !== "answer" || e.answer.trim() === "") {
       return r;
     }

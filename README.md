@@ -49,6 +49,23 @@ The brief's model has no tools, so it does not get to decide what leads. `script
 
 With `"autoValidate": true` in `config.json`, a new support thread whose triage brief nobody checked is validated in the background before the card asks anything. `python3 scripts/test_prepare.py` checks the rules without a model.
 
+## The mod's layout: one core, the pane on top
+
+The desk's behaviour lives in a core that draws nothing, so a second surface (a phone page) can run the same desk.
+
+| File | What it holds |
+| --- | --- |
+| `mod/hooks/core/pure.ts` | Constants, the two tool contracts, and the rules that turn the gather's files into the view. No engine. |
+| `mod/hooks/core/desk.ts` | Every action with state: refresh, gather, prepare, pick, close, the live feed. It takes the engine interface `$`. |
+| `mod/hooks/register.tsx` | The terminal pane: hooks, keys, the theme and the drawing. It calls the core. |
+
+Rules for a change:
+
+- New behaviour goes into the core. The pane draws and calls.
+- A function in the core that takes `$` is a function declaration, never an arrow in a `const`. The engine refuses the second form outside the hooks file.
+- Each file declares the atoms it reads or writes, with the same `plugin` and `key` as the core. The engine does not accept an imported atom.
+- The core never calls back into the pane with `$`. What the pane adds (its theme) goes through `surface.onConfig` and `look`.
+
 ## Plain words on the pane
 
 Every card has a fixed shape. WHY says what put it on the desk, since when, and who waits. DECIDE is the one question. THEN says what the recommended pick sets in motion and what is at stake if nothing happens. The pane shows the three as labelled lines above the fact and the draft, and `desk_card` refuses a card that lacks one. Prepared briefs carry them too.
