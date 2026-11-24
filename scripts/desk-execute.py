@@ -418,7 +418,7 @@ UNATTENDED_VERDICT = {
     'properties': {
         **VERDICT['properties'],
         'done': {'type': 'boolean', 'description': 'true only when the validation was recorded (validation-note.py printed "recorded:") and the reply below is drafted or deliberately empty'},
-        'verdict': {'type': 'string', 'enum': ['confirmed', 'partially-confirmed', 'refuted', 'stale', 'none'], 'description': "the validation's verdict on the Hermes brief, as given to validation-note.py; none when nothing was recorded"},
+        'verdict': {'type': 'string', 'enum': ['confirmed', 'partially-confirmed', 'refuted', 'stale', 'already-shipped', 'none'], 'description': "the validation's verdict on the Hermes brief, as given to validation-note.py; none when nothing was recorded"},
         'readiness': {'type': 'string', 'description': 'the readiness you judge the thread at (ready-for-agent, ready-for-human, needs-info, wontfix); the note says it, nothing writes it'},
         'draft': {'type': 'string', 'description': 'the customer reply to send as Luna, or empty when no reply is the move (a teammate holds the thread, nothing true to tell the customer yet)'},
         'checks': {'type': 'array', 'items': {'type': 'string'}, 'description': 'each claim in the draft with the evidence that backs it (a note row, an entity read, a code line)'},
@@ -482,8 +482,9 @@ The desk has already claimed the thread for you (triage_owner=local) and release
 2. Validate the load-bearing claims by the /triage rules below, in about six minutes of work: CONFIRMED, REFUTED or
    UNVERIFIED, each with your own evidence. Sample the rest.
 3. Record ONE validation on the thread's ticket record (its Notion page, next to the pass in {pass_file}) with:
-   python3 {HERE}/validation-note.py {thread} --file <your note file> --verdict <confirmed|partially-confirmed|refuted|stale> --readiness <ready-for-agent|ready-for-human|needs-info|wontfix>
-   (a fix that already shipped is --verdict stale, and the note's verdict line says already shipped and names the PR).
+   python3 {HERE}/validation-note.py {thread} --file <your note file> --verdict <confirmed|partially-confirmed|refuted|stale|already-shipped> --readiness <ready-for-agent|ready-for-human|needs-info|wontfix>
+   (a fix that already shipped is --verdict already-shipped, and the note names the PR; stale is for a brief that a
+   newer state of the thread has overtaken).
    Write the note file under {DECISIONS}/runs/ first. The note's first line is exactly:
    {deskplain.UNATTENDED_LINE}
    then an empty line, then the note in the "## Local triage validation (Claude)" format of step 10a, with these changes:

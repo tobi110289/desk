@@ -5,7 +5,7 @@ validation of OrBot's pass on the thread's ticket record (its Notion page), next
 2026-11-09: the tool the unattended validation (desk-execute.py, option "Validate and draft (unattended)") writes its
 note with; the headless run has no MCP. 2026-11-15 (orbot #984): the note is no longer a Plain note. It goes through
 the one writer, agent-loop jev/plain.py record_validation (POST ticket-validation over ssh), whole, with no part split.
---verdict: confirmed | partially-confirmed | refuted | stale. --readiness: ready-for-agent | ready-for-human | needs-info
+--verdict: confirmed | partially-confirmed | refuted | stale | already-shipped. --readiness: ready-for-agent | ready-for-human | needs-info
 | wontfix; agent-ready is ready-for-agent. The judged pass is the one the executor wrote to the run's pass file (the
 record's `passSection`); without a decision record, give --pass.
 
