@@ -96,6 +96,9 @@ REPO = CFG.get('repo', '')
 BOT_REPO = CFG.get('botRepo', '')
 A2A_HUB = CFG.get('a2aHub', '')
 SEND_HOST = CFG.get('sendHost', '')
+# The ssh host where the one desk lives (gather, prepare, picks, the phone server). Empty: the desk is on this machine.
+# On the machine that holds the desk the key stays empty.
+DESK_HOST = CFG.get('deskHost', '')
 SEND_ENV_FILE = CFG.get('sendEnvFile', '')
 ASK_PATTERN = CFG.get('askPattern') or r'human gates|policy|prioritis'
 PEOPLE = CFG.get('people') or []

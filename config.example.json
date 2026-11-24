@@ -11,6 +11,7 @@
  "notionTasks": "collection://00000000-0000-0000-0000-000000000000",
  "notionUser": "00000000-0000-0000-0000-000000000000",
  "sendHost": "your-ssh-host-alias",
+ "deskHost": "",
  "sendEnvFile": "/srv/your-adapter/.env",
  "liveEvents": false,
  "autoValidate": false,
