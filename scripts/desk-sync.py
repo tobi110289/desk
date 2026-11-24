@@ -2,6 +2,10 @@
 """desk-sync.py: keep the loop state the same on this machine and on the machine that holds the desk.
 
   desk-sync.py loop            merge state.json and state-archive.json with the desk host (config.json deskHost)
+  desk-sync.py feeds [--dry-run]  copy what only this machine produces to the desk host: the sweep cache, the loop
+                               helpers, the Hermes log, the sweep reports, the local tickets, the AWS login state,
+                               the Notion tickets
+  desk-sync.py all             both
 
 Two machines write the loop state. The agent loop writes it here (phase, workspace, task). The desk writes it on the
 desk host (a caption after a close, a revived entry). Neither side stamps every write, so a "newest wins" copy would
@@ -25,7 +29,8 @@ import deskconfig  # noqa: E402
 FILES = ('state.json', 'state-archive.json')
 DESK_WINS = ('status', 'note')
 # the loop folder on the desk host, from its home folder (ssh starts there); config.json deskHostLoop moves it
-REMOTE_LOOP = deskconfig.CFG.get('deskHostLoop') or 'orbit-scratch/agent-loop'
+REMOTE_SCRATCH = deskconfig.CFG.get('deskHostScratch') or 'orbit-scratch'
+REMOTE_LOOP = deskconfig.CFG.get('deskHostLoop') or f'{REMOTE_SCRATCH}/agent-loop'
 GONE = object()   # a missing entry or field, so "removed" is a change like any other
 
 
@@ -124,9 +129,42 @@ def sync_loop(host):
     return ', '.join(changed) or 'in sync'
 
 
+# What only this machine produces and the gather on the desk host reads. One direction, nothing is deleted there.
+# The paths are under the scratch root, in rsync's filter form; the first rule that matches a path decides.
+FEEDS = [
+    '- __pycache__/', '- *.bak*', '- *.pyc',
+    '+ /agent-loop/', '+ /agent-loop/sweep-cache.json', '+ /agent-loop/jev/', '- /agent-loop/jev/logs/', '+ /agent-loop/jev/**', '- /agent-loop/*',
+    '+ /hermes-feedback/', '+ /hermes-feedback/LOG.md', '- /hermes-feedback/*',
+    '+ /sentry-sweeps/', '+ /sentry-sweeps/*.md', '- /sentry-sweeps/*',
+    '+ /desk/', '+ /desk/notion-tickets.json', '+ /desk/cache/', '+ /desk/cache/sso-state.json', '- /desk/cache/*', '- /desk/*',
+    '+ /*/', '+ /*/issues/', '+ /*/issues/*.md', '- /*/issues/*', '- /*/*',
+    '- /*',
+]
+
+
+def feed_argv(scratch, host, dry=False):
+    rules = [arg for rule in FEEDS for arg in ('-f', rule)]
+    return ['rsync', '-az', '--prune-empty-dirs', '--itemize-changes', *(['--dry-run'] if dry else []), *rules,
+            f'{scratch}/', f'{host}:{REMOTE_SCRATCH}/']
+
+
+def sync_feeds(host, dry=False):
+    ran = subprocess.run(feed_argv(deskconfig.need(deskconfig.SCRATCH), host, dry), capture_output=True, text=True, timeout=300)
+    if ran.returncode != 0:
+        sys.exit(f'desk-sync: rsync to {host} failed: {ran.stderr.strip()[:300]}')
+    sent = [line.split(' ', 1)[1] for line in ran.stdout.splitlines() if line[:1] in '<>' ]
+    return sent
+
+
 if __name__ == '__main__':
-    if sys.argv[1:2] != ['loop']:
+    what = sys.argv[1:2]
+    if what not in (['loop'], ['feeds'], ['all']):
         sys.exit(__doc__)
     if not deskconfig.DESK_HOST:
         sys.exit("desk-sync: config key 'deskHost' is empty; the desk is on this machine")
-    print('loop state:', sync_loop(deskconfig.DESK_HOST))
+    if what != ['feeds']:
+        print('loop state:', sync_loop(deskconfig.DESK_HOST))
+    if what != ['loop']:
+        dry = '--dry-run' in sys.argv
+        sent = sync_feeds(deskconfig.DESK_HOST, dry)
+        print(f"feeds: {len(sent)} files {'would go' if dry else 'sent'}" + (': ' + ', '.join(sent[:8]) + (' …' if len(sent) > 8 else '') if sent else ''))
