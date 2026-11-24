@@ -26,6 +26,7 @@ Read-only towards every source except desk.json / cards.json.
 """
 import json, re, sys, os, subprocess, datetime, glob, zoneinfo
 import deskconfig, deskhold
+deskconfig.forward(__file__)
 # every folder comes from the resolver (deskconfig.py); the gather needs the desk folder and the loop helpers
 HOME=deskconfig.HOME
 LOOP=deskconfig.LOOP

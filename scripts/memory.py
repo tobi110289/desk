@@ -23,6 +23,7 @@ import json, os, re, sys, subprocess, datetime, hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import deskconfig  # noqa: E402
+deskconfig.forward(__file__)
 ORBOT = deskconfig.ORBOT_DIR
 SM = f'{ORBOT}/support-memory'
 DESK = deskconfig.DESK

@@ -5,6 +5,7 @@ captions[ref] = {status, at} so desk.py can age an agent-owned caption from the 
 (2026-09-17: seven freshly sent lines came straight back as liveness cards because `updated` was 8 days old)."""
 import json,os,sys,tempfile,datetime
 import deskconfig
+deskconfig.forward(__file__)
 ref,status=sys.argv[1],sys.argv[2]; note=sys.argv[3] if len(sys.argv)>3 else ''
 now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 def save(p,obj):

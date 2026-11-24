@@ -41,6 +41,8 @@ export const config = {
   repo: "",
   notionTasks: "",
   notionUser: "",
+  /** The ssh host that holds the desk; "" when the desk is on this machine. */
+  deskHost: "",
 };
 
 export const plainThread = (id: string) =>

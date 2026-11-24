@@ -8,6 +8,7 @@ import datetime, json, os, re, sys, zoneinfo
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import deskconfig  # noqa: E402
+deskconfig.forward(__file__)
 DESK = deskconfig.need(deskconfig.DESK)
 LOOP = deskconfig.LOOP
 OUT = f'{DESK}/plain-stats.json'

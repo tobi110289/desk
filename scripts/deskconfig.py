@@ -34,6 +34,15 @@ HOME = os.path.expanduser('~')
 SCRATCH = _path('DESK_SCRATCH', '~/orbit-scratch')
 DESK = _path('DESK_DIR', os.path.join(SCRATCH, 'desk'))
 CONFIG = _path('DESK_CONFIG', os.path.join(DESK, 'config.json'))
+# <desk>/.env holds what belongs to this machine alone (a key, a folder variable), one NAME=value per line. It fills
+# only variables the caller did not set, and it is read before the folders below, so it may move them.
+try:
+    for _line in open(os.path.join(DESK, '.env')):
+        _name, _eq, _value = _line.strip().partition('=')
+        if _eq and _name.isidentifier() and not _line.startswith('#'):
+            os.environ.setdefault(_name, _value)
+except OSError:
+    pass
 LOOP = _path('DESK_LOOP_DIR', os.path.join(SCRATCH, 'agent-loop'))
 JEV = _path('DESK_JEV_DIR', os.path.join(LOOP, 'jev'))
 ORBIT_DIR = _path('DESK_ORBIT_REPO', '~/orbit')
@@ -99,6 +108,27 @@ SEND_HOST = CFG.get('sendHost', '')
 # The ssh host where the one desk lives (gather, prepare, picks, the phone server). Empty: the desk is on this machine.
 # On the machine that holds the desk the key stays empty.
 DESK_HOST = CFG.get('deskHost', '')
+
+
+def forward(script):
+    """Call at the top of a script that changes the desk. With config.json deskHost set, the desk lives on that host:
+    the script runs there with the same arguments, its output and exit code come back, and the local copy of the desk
+    folder is pulled. On the desk host itself (deskHost empty) this does nothing. A script that another one imports
+    is never forwarded: only the script the person or the pane started.
+
+    The scratch root has the same path on both machines (README, "One desk on a host"), so a path in an argument or
+    in a desk file means the same file on both."""
+    import shlex, subprocess
+    if not DESK_HOST or os.environ.get('DESK_FORWARDED') or os.path.realpath(sys.argv[0]) != os.path.realpath(script):
+        return
+    env = ' '.join(f'{k}={shlex.quote(v)}' for k, v in os.environ.items()
+                   if k in ('DESK_PLAIN_DRY', 'DESK_DECISION', 'DESK_PREPARE', 'DESK_BACKGROUND'))
+    cmd = (f'cd {shlex.quote(DESK)} && DESK_FORWARDED=1 DESK_SCRATCH={shlex.quote(SCRATCH)} {env} '
+           f'python3 {shlex.quote(os.path.join(DESK, os.path.basename(script)))} {shlex.join(sys.argv[1:])}')
+    ran = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', DESK_HOST, cmd])
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'desk-sync.py'), 'pull'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sys.exit(ran.returncode)
 
 
 def box_argv(cmd):

@@ -5,7 +5,9 @@
   desk-sync.py feeds [--dry-run]  copy what only this machine produces to the desk host: the sweep cache, the loop
                                helpers, the Hermes log, the sweep reports, the local tickets, the AWS login state,
                                the Notion tickets
-  desk-sync.py all             both
+  desk-sync.py pull            copy the desk folder from the desk host to this machine: cards, briefs, decisions, holds
+  desk-sync.py tick            what the pane runs every few seconds: pull, and once a minute loop and feeds
+  desk-sync.py all             loop and feeds
 
 Two machines write the loop state. The agent loop writes it here (phase, workspace, task). The desk writes it on the
 desk host (a caption after a close, a revived entry). Neither side stamps every write, so a "newest wins" copy would
@@ -29,7 +31,8 @@ import deskconfig  # noqa: E402
 FILES = ('state.json', 'state-archive.json')
 DESK_WINS = ('status', 'note')
 # the loop folder on the desk host, from its home folder (ssh starts there); config.json deskHostLoop moves it
-REMOTE_SCRATCH = deskconfig.CFG.get('deskHostScratch') or 'orbit-scratch'
+# the scratch root has the same path on the desk host (README, "One desk on a host")
+REMOTE_SCRATCH = deskconfig.CFG.get('deskHostScratch') or deskconfig.SCRATCH
 REMOTE_LOOP = deskconfig.CFG.get('deskHostLoop') or f'{REMOTE_SCRATCH}/agent-loop'
 GONE = object()   # a missing entry or field, so "removed" is a change like any other
 
@@ -156,8 +159,42 @@ def sync_feeds(host, dry=False):
     return sent
 
 
+# The desk folder belongs to the desk host. These files in it belong to this machine and are never pulled over:
+# the scripts (links into the repo), the config, the key file, what the pane and the session write here.
+KEEP_LOCAL = ['*.py', '*.pyc', '__pycache__/', 'config.json', '.env', '.auto', '.events', '.desk.lock', '.sync-*',
+              'notion-tickets.json', 'cache/sso-state.json', '*.bak*', '*.pre-repo', '*.tmp']
+
+
+def pull_argv(desk, host):
+    rules = [arg for name in KEEP_LOCAL for arg in ('--exclude', name)]
+    # --delete: a brief or a decision that left the desk host leaves this copy too; excluded files are never deleted
+    return ['rsync', '-az', '--delete', *rules, f'{host}:{REMOTE_SCRATCH}/desk/', f'{desk}/']
+
+
+def pull(host):
+    ran = subprocess.run(pull_argv(deskconfig.need(deskconfig.DESK), host), capture_output=True, text=True, timeout=120)
+    if ran.returncode != 0:
+        sys.exit(f'desk-sync: pull from {host} failed: {ran.stderr.strip()[:300]}')
+
+
+def tick(host):
+    """The pane's beat. The pull is cheap and runs every time; the loop state and the feeds go once a minute."""
+    import time
+    pull(host)
+    stamp = f'{deskconfig.DESK}/.sync-tick'
+    try: age = time.time() - os.path.getmtime(stamp)
+    except OSError: age = 1e9
+    if age < 60:
+        return
+    open(stamp, 'w').write('')
+    sync_loop(host); sync_feeds(host)
+
+
 if __name__ == '__main__':
     what = sys.argv[1:2]
+    if what in (['pull'], ['tick']) and deskconfig.DESK_HOST:
+        (pull if what == ['pull'] else tick)(deskconfig.DESK_HOST)
+        sys.exit(0)
     if what not in (['loop'], ['feeds'], ['all']):
         sys.exit(__doc__)
     if not deskconfig.DESK_HOST:

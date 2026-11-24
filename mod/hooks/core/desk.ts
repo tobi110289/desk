@@ -295,9 +295,33 @@ export async function loadConfig($: EngineInterface) {
   }
 }
 
+// The desk lives on another host (config.json deskHost): desk-sync.py brings its files here and takes the loop state
+// and the feeds there. One run at a time, at most every SYNC_MS; the files it writes show on the next poll.
+export const SYNC_MS = 10_000;
+export let syncRun: Promise<void> | null = null;
+export let lastSync = 0;
+export function syncDesk($: EngineInterface, home: string, time: number) {
+  if (config.deskHost === "" || syncRun !== null || time - lastSync < SYNC_MS) {
+    return;
+  }
+  lastSync = time;
+  syncRun = $.process
+    .run(["python3", `${home}/orbit-scratch/desk/desk-sync.py`, "tick"], {
+      timeoutMs: 3 * 60_000,
+    })
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .finally(() => {
+      syncRun = null;
+    });
+}
+
 export async function refresh($: EngineInterface, isForced = false) {
   await loadConfig($);
   const home = (await $.env.get("HOME")) ?? "";
+  syncDesk($, home, await $.clock.now());
   const cardsPath = `${home}/orbit-scratch/desk/cards.json`;
   const deskPath = `${home}/orbit-scratch/desk/desk.json`;
   const time = await $.clock.now();

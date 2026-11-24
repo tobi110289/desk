@@ -29,6 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import deskconfig  # noqa: E402
+deskconfig.forward(__file__)
 DESK = deskconfig.DESK
 PATH = f'{DESK}/harvest.json'
 

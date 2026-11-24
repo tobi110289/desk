@@ -11,6 +11,7 @@ Tobias 2026-10-09: work that has no Plain thread, no PR and no Notion ticket (a 
 belongs on the desk. A task is one card, `task:<slug>`, until it gets a verb."""
 import json,sys,os,re,datetime
 import deskconfig
+deskconfig.forward(__file__)
 P=f'{deskconfig.DESK}/tasks.json'
 def load():
     try: return json.load(open(P))

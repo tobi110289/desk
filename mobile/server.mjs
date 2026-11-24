@@ -149,6 +149,7 @@ export function makeEngine({ home, runProcess }) {
 /** One desk: a copy of the core with its engine, kept current by a beat. */
 export async function startDesk({
   home = os.homedir(),
+  gatherAlways = false,
   runProcess = run,
 } = {}) {
   const core = await import(
@@ -162,6 +163,7 @@ export async function startDesk({
     seenAt: 0,
     lock: Promise.resolve(),
     timer: null,
+    gatherAlways,
   };
   await core.refresh($, true);
   desk.timer = setInterval(
@@ -181,7 +183,7 @@ export function stopDesk(desk) {
 export async function beat(desk) {
   const { core, $ } = desk;
   await core.refresh($);
-  if (Date.now() - desk.seenAt < WATCHED_MS) {
+  if (desk.gatherAlways || Date.now() - desk.seenAt < WATCHED_MS) {
     void core.gather($, "due");
   }
 }
@@ -360,7 +362,12 @@ async function main() {
   const config = loadConfig(arg("--config") ?? path.join(HERE, "config.json"));
   const port = Number(arg("--port") ?? config.port ?? 47600);
   // --home points the desk at another home folder (a made-up desk for a look at the page).
-  const desk = await startDesk({ home: arg("--home") ?? os.homedir() });
+  // "gather": "always" in the config: this server is the desk's only gatherer (the desk host), so it gathers
+  // whenever the desk is due, with or without a phone on the page. "home" does what --home does.
+  const desk = await startDesk({
+    home: arg("--home") ?? config.home ?? os.homedir(),
+    gatherAlways: config.gather === "always",
+  });
   const handle = makeHandler(desk, config);
   http
     .createServer((req, res) => {

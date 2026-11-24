@@ -141,7 +141,17 @@ tailscale serve --bg 47600                          # puts it on your tailnet ov
 - The server gathers only while a phone had the page open in the last two minutes, and only when the desk is due. The marker file of the gather keeps the pane and the server from running one at the same time.
 - A new button is one entry in `ACTIONS` that makes one core call. Behaviour never goes into the server or the page.
 
-## Run on Linux
+## One desk on a host
+
+The desk can live on a machine that is always on, so the phone works while the laptop sleeps. One machine then holds the desk folder and runs the gather, the prepare pass and the picks. The laptop is a second surface.
+
+- `config.json` on the laptop names the host: `"deskHost": "<ssh alias>"`. On the host the key stays empty, and `"sendHost"` is `"local"` when the host is also the send host.
+- The scratch root has the same path on both machines (on the host, a link at the laptop's path). A path in an argument or in a desk file then means the same file on both.
+- A script that changes the desk calls `deskconfig.forward(__file__)` first. On the laptop it runs itself on the host over ssh and pulls the desk folder afterwards. On the host the call does nothing.
+- `desk-sync.py tick` runs from the pane every ten seconds: it pulls the host's desk folder, and once a minute it merges the loop state and pushes the laptop's feeds. `desk-sync.py` lists what belongs to which machine.
+- The loop state has two writers (the agent loop on the laptop, the desk on the host). The sync merges it field by field against the copy of the last sync.
+- `<desk>/.env` holds what belongs to one machine alone: a key, a folder variable.
+- The phone server on the host gets `"gather": "always"` and `"home"` in `mobile/config.json`.
 
 ```sh
 python3 scripts/check-linux.py            # here, on a Linux machine

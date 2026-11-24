@@ -6,6 +6,7 @@ import json,re,sys,html,os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import deskconfig
+deskconfig.forward(__file__)
 from deskconfig import PLAIN_THREAD
 LOOP=deskconfig.need(deskconfig.LOOP)
 # Data files live beside the symlink in the desk data dir, never beside the script in the repo (a run through the real

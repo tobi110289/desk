@@ -48,6 +48,8 @@ LEARNED_RULE = "Queue a line only when it is ONE lasting fact about the tenant o
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
+import deskconfig  # noqa: E402
+deskconfig.forward(__file__)
 import deskanchor  # noqa: E402
 import deskclass  # noqa: E402
 import deskplain  # noqa: E402

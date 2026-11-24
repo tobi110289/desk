@@ -6,6 +6,7 @@ string. The card's key and since come from cards.json, so this script holds no c
 the verb into the card in cards.json, so the pane shows it at once without a logic copy of its own."""
 import re, json, sys, os, datetime
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__))); import deskhold, deskthread, deskconfig
+deskconfig.forward(__file__)
 P=os.path.join(deskconfig.need(deskconfig.DESK),'desk.json'); CARDS=os.path.join(os.path.dirname(P),'cards.json')
 import fcntl
 _lock=open(os.path.join(os.path.dirname(P),'.desk.lock'),'w'); fcntl.flock(_lock,fcntl.LOCK_EX)   # desk.py checks desk.json under the same lock before it writes

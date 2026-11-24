@@ -59,6 +59,45 @@ def test_the_first_sync_takes_this_machine_as_the_start():
     assert sync.merge_doc({'threads': {}}, doc, doc) == doc
 
 
+def _run_forwarding_script(args, extra_env=None):
+    """A script that calls deskconfig.forward(), started with a config that names a desk host and a stand-in `ssh` on
+    PATH that records its arguments and exits 7. Returns (exit code, what ssh got, the script's own output)."""
+    import json, subprocess, sys, tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(f'{tmp}/bin'); os.makedirs(f'{tmp}/desk')
+        open(f'{tmp}/bin/ssh', 'w').write('#!/bin/sh\nprintf "%s\\n" "$@" >> "$SSH_LOG"\nexit 7\n'); os.chmod(f'{tmp}/bin/ssh', 0o755)
+        json.dump({'deskHost': 'the-desk-host'}, open(f'{tmp}/config.json', 'w'))
+        script = f'{tmp}/desk/change.py'
+        open(script, 'w').write(f'import sys\nsys.path.insert(0, {HERE!r})\nimport deskconfig\ndeskconfig.forward(__file__)\nprint("ran here")\n')
+        env = {**os.environ, 'PATH': f'{tmp}/bin:' + os.environ['PATH'], 'SSH_LOG': f'{tmp}/ssh.log', 'DESK_DIR': f'{tmp}/desk',
+               'DESK_SCRATCH': tmp, 'DESK_CONFIG': f'{tmp}/config.json', **(extra_env or {})}
+        env.pop('DESK_FORWARDED', None) if not extra_env else None
+        ran = subprocess.run([sys.executable, script, *args], env=env, capture_output=True, text=True)
+        log = open(f'{tmp}/ssh.log').read() if os.path.exists(f'{tmp}/ssh.log') else ''
+        return ran.returncode, log.replace(tmp, '<tmp>'), ran.stdout
+
+
+def test_a_changing_script_runs_on_the_desk_host_with_its_arguments_and_its_exit_code():
+    code, ssh, out = _run_forwarding_script(['loop:T-1', 'Send it now'])
+    assert code == 7 and 'ran here' not in out, (code, out)
+    assert 'the-desk-host' in ssh.splitlines()
+    assert "python3 <tmp>/desk/change.py loop:T-1 'Send it now'" in ssh, ssh
+    assert 'DESK_SCRATCH=<tmp>' in ssh
+
+
+def test_on_the_desk_host_the_script_runs_in_place():
+    code, ssh, out = _run_forwarding_script(['x'], {'DESK_FORWARDED': '1'})
+    assert code == 0 and 'ran here' in out and ssh == '', (code, out, ssh)
+
+
+def test_the_pull_never_touches_what_belongs_to_this_machine():
+    argv = sync.pull_argv('/desk', 'h')
+    kept = [argv[i + 1] for i, a in enumerate(argv) if a == '--exclude']
+    for name in ('*.py', 'config.json', '.env', '.auto', 'notion-tickets.json', 'cache/sso-state.json'):
+        assert name in kept, name
+    assert argv[-2].endswith('/desk/') and argv[-1] == '/desk/'
+
+
 if __name__ == '__main__':
     failed = 0
     for name, fn in sorted(globals().items()):
