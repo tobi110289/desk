@@ -1,7 +1,7 @@
 // The phone server on a made-up desk in a temp folder. No real script runs: the process runner is a stub that
 // records each call and plays desk-decide.py.
 //
-//   node --test mobile/test/
+//   node --test mobile/test/server.test.mjs
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
