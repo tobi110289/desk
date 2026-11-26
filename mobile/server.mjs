@@ -228,6 +228,16 @@ export const ACTIONS = {
     void core.gather($, "now");
     return { ok: true };
   },
+  // A card past the top of the list has no brief until somebody opens it: the page asks for one.
+  prepare: async ({ core, $ }, body) => {
+    const view = await read($, core.view);
+    const card = view.cards.find((one) => one.id === body.cardId);
+    if (card === undefined || card.verb !== null || card.prepared !== null) {
+      return { ok: false, error: "This card needs no brief." };
+    }
+    core.askPrepare($, card.id, Date.now());
+    return { ok: true };
+  },
   pick: async ({ core, $ }, body) => {
     const view = await read($, core.view);
     const card = view.cards.find((one) => one.id === body.cardId);

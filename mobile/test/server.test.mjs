@@ -168,6 +168,20 @@ test("an option the card does not carry is refused and nothing runs", async () =
   end();
 });
 
+test("opening a card without a brief asks the desk to write one, for that card alone", async () => {
+  const { desk, ran, end } = await world();
+  const asked = await act(desk, { action: "prepare", cardId: "loop:T-1" });
+  const hasOne = await act(desk, { action: "prepare", cardId: "loop:T-2" });
+  await settle();
+  assert.equal(asked.ok, true);
+  assert.equal(hasOne.ok, false);
+  assert.deepEqual(
+    ran("desk-prepare.py").filter((call) => call.length > 1),
+    [["desk-prepare.py", "loop:T-1"]],
+  );
+  end();
+});
+
 test("a pick that needs a session waits for the laptop and runs nothing in the background", async () => {
   const { desk, ran, end } = await world({ decideClass: "session" });
   const result = await act(desk, {

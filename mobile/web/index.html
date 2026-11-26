@@ -269,6 +269,18 @@
         }
       }
 
+      // A card without a brief: ask the desk to write one, at most every 30 seconds per card. Quiet: no busy state.
+      const asked = {};
+      function askBrief(id) {
+        if (Date.now() - (asked[id] || 0) < 30000) return;
+        asked[id] = Date.now();
+        fetch("/api/act", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-desk": "1" },
+          body: JSON.stringify({ action: "prepare", cardId: id }),
+        }).catch(() => undefined);
+      }
+
       function drawList() {
         const open = state.cards.filter((card) => card.verb === null);
         const closed = state.cards.filter((card) => card.verb !== null);
@@ -326,8 +338,16 @@
           if (brief.openChecks.length > 0)
             add("Open checks", brief.openChecks.join("\n"));
         } else {
-          add("State", card.health || "No brief yet.");
+          const isOpen = card.verb === null && !pickText(card);
+          add(
+            "State",
+            card.health ||
+              (isOpen
+                ? "The desk writes the brief for this card now. The options come in about a minute."
+                : "No brief."),
+          );
           add("Status", card.status);
+          if (isOpen) askBrief(card.id);
         }
         const links = el("div", "links");
         for (const link of card.links || []) {
