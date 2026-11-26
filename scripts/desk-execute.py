@@ -474,6 +474,9 @@ def unattended_prompt(rec, brief, card, rehearse, pass_file):
     ctx = _read(brief.get('context') or '', 60000)
     memory = re.search(r'(?ms)^## Support memory block.*?(?=^## |\Z)', ctx)
     prod = 'STAGE=production pnpm -s -C ' + ORBIT   # the one shape the production guard lets through
+    # A desk host with a read-only role cannot start `sst shell`: config.json prodQuery names its reader there
+    # (prod-query.py, the same key resolver with the table names from the config).
+    prod_query = deskconfig.CFG.get('prodQuery') or f'{prod} dynamo:query'
     parts = [f"""You validate ONE support thread ({ref}) for the person who runs a support desk, unattended, and draft the reply.
 {'The desk started this check by itself, before it asks the person,' if rec.get('via') == 'auto' else f'The person picked "{deskplain.VALIDATE}" on their pane'} and nobody is watching. You run headless with Bash, Read, Glob and Grep,
 no MCP servers, in the Orbit checkout ({ORBIT}). No one answers questions.
@@ -515,7 +518,7 @@ Hard rules (they override everything below):
 - Code: read it at the branch of the reported stage without touching the working tree: `git -C {ORBIT} fetch -q origin`,
   then `git -C {ORBIT} show origin/production:<path>` and `git -C {ORBIT} grep -n <pattern> origin/production -- <dir>`.
 - DynamoDB: keyed reads only, through the dynamo-query wrapper; never a scan, never `aws dynamodb` by hand. The stage is an
-  environment variable, never a flag: `{prod} dynamo:query <Entity> --id=… --tenant=… --format=json`
+  environment variable, never a flag: `{prod_query} <Entity> --id=… --tenant=… --format=json`
   (staging: `STAGE=staging pnpm -s dynamo:query …`). `--env=` is not a flag of that script. When a guard hook rejects the
   call it prints the one path it accepts after `pnpm -C`: re-run with that literal path. `--keys-only` debugs a key shape.
   An AWS login error means the session expired: say so in the note and in `result`; do not retry for minutes.
