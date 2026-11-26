@@ -289,9 +289,15 @@ def run_script(path, rec, brief, card, dry, live=None, rehearse=False):
         settled = settle_thread(rec, brief, thread, live)
         close(rec, 'do', f'nothing owed (pane pick): {fact}', env=env, sent=True)
         finish(path, rec, 'done', f'closed, nothing owed; {settled}' if settled else 'closed, nothing owed', brief, card); return
+    if label == 'Keep with a new status':
+        caption = ' '.join((brief.get('draft') or '').split())[:49]
+        close(rec, 'do', f'kept with a new status (pane pick): {caption}', caption=caption, env=env)
+        finish(path, rec, 'done', f'kept: {caption}', brief, card); return
     if label.startswith('Drop'):
         # a loop entry's card is held by its caption: the drop writes one, so the next gather finds the card closed
         caption = f'line dropped {hhmm()}, nothing to send'[:49] if label == 'Drop the line' and rec['cardId'].startswith(('loop:', 'gap:')) else None
+        if label == 'Drop the entry' and rec['cardId'].startswith(('loop:', 'gap:')):
+            caption = f'done; dropped from the desk {hhmm()}'   # a status that starts with "done" ends the entry (desk-close.py)
         close(rec, 'drop', f'dropped from the pane: {fact or label}', caption=caption, env=env)
         finish(path, rec, 'done', 'dropped', brief, card); return
     if label in deskclass.DEFER:

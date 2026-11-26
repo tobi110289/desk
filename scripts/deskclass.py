@@ -13,7 +13,9 @@ SEND = {'Send it', 'Reply with a status'}
 # closed, so a card dropped twice came back twice. A staged line is a suggestion in an idle prompt: there is nothing to
 # clear. The drop closes the card.
 SCRIPT = SEND | {'I sent it already', 'Nobody to tell (mark done)', 'Drop', 'Drop (unpin)', 'Drop (accepted risk, recorded)',
-                 'Close the loop (nothing owed)', 'Drop the line'}
+                 'Close the loop (nothing owed)', 'Drop the line',
+                 # 2026-11-26: single STALE cards. Both write the entry's status line and close the card.
+                 'Keep with a new status', 'Drop the entry'}
 DEFER = {'Defer', 'Defer until a trigger', 'Defer until the deploy lands'}
 MODEL = {'Hand to a worker', 'Hand to a worker (hotfix)', 'Hand the rework to its agent', 'Hand it to agents', 'Hand to a worker / ticket',
          'Go (agent runs it now)', 'Close the PR',
@@ -40,6 +42,8 @@ def classify(brief, label):
     if label in SCRIPT:
         if label in SEND and not (brief.get('replyReady') and (brief.get('draft') or '').strip()):
             return 'session'   # a send without a checked draft is composed in the session
+        if label == 'Keep with a new status' and not (brief.get('draft') or '').strip():
+            return 'session'   # no status line proposed: the person writes it
         if label == 'Close the loop (nothing owed)' and not brief.get('resolved'):
             return 'session'   # closing a promise that is not shown resolved needs a note the brief did not write
         return 'script'

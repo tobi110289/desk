@@ -61,6 +61,16 @@ def test_menu_holds_only_what_can_be_right():
     assert 'Hand the rework to its agent' not in dp.menu_of({'id': 'gh:1', 'lane': 'REVIEW'}, dp.facts_of({'lane': 'REVIEW'}, ''))
 
 
+def test_a_stale_entry_can_be_kept_or_dropped_without_a_session():
+    import deskclass
+    stale = {'id': 'loop:T-9', 'ref': 'T-9', 'lane': 'STALE', 'status': 'worker silent'}
+    b = brief(stale, answer(['Drop the entry', 'Keep with a new status', 'Defer'], draft='waits on the review'), '')
+    assert [o['label'] for o in b['options']][:2] == ['Drop the entry', 'Keep with a new status']
+    assert deskclass.classify(b, 'Drop the entry') == 'script' and deskclass.classify(b, 'Keep with a new status') == 'script'
+    # no status line proposed: the person writes it
+    assert deskclass.classify({**b, 'draft': ''}, 'Keep with a new status') == 'session'
+
+
 def test_a_checked_draft_leads_with_the_send():
     so = answer(['Hand to a worker', 'Send it', 'Defer'], draft='Hallo', replyReady=True)
     b = brief(FAST, so, material(validated=True))

@@ -60,8 +60,9 @@ SKILL = f'{deskconfig.SKILLS}/desk'
 SCRATCH_FILE = re.compile('(' + re.escape(deskconfig.show(deskconfig.SCRATCH)) + '|' + re.escape(deskconfig.SCRATCH) + r')(/[^\s"`]+\.md)')
 LOCK_S = 5 * 60
 MODEL = os.environ.get('DESK_PREPARE_MODEL', 'sonnet')
-# lanes whose recipe has a prepare step that scripts can feed; SEND/STALE/TICKET are batches, SWEEP runs and sweep tickets take the session over
-LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST', 'REVIEW', 'RUN', 'INBOX', 'TASK', 'SWEEP', 'SEND', 'TICKET'}   # SEND, TICKET: single since 2026-11-03
+# lanes whose recipe has a prepare step that scripts can feed; SWEEP runs and sweep tickets take the session over
+# SEND, TICKET: single since 2026-11-03. STALE: single cards since 2026-11-26 (the phone desk showed 7 of 13 cards with nothing to pick)
+LANES = {'REPLY', 'NOTIFY', 'PROMISE', 'FAST', 'REVIEW', 'RUN', 'INBOX', 'TASK', 'SWEEP', 'SEND', 'TICKET', 'STALE'}
 SKIP_ID = re.compile(r'^(batch:|sweep:|sweep-ticket:|prh:|memory:)')
 # the fixed option sets per lane (CARDS.md lanes table); the model picks the order, never the set
 OPTIONS = {
@@ -76,6 +77,8 @@ OPTIONS = {
     'SWEEP': ['Answer', 'Defer', 'Drop (accepted risk, recorded)'],
     # 2026-11-03: a worker's own line, a picker or a sign-off is its own card; the draft is the line to type
     'SEND': ['Send as staged', 'Edit then send', 'Drop the line', 'Defer'],
+    # 2026-11-26: a loop entry nobody moves. The draft is the status line the entry gets when it stays.
+    'STALE': ['Keep with a new status', 'Drop the entry', 'Defer'],
 }
 # 2026-11-10: the release-notes card (desk.py source 8) is a RUN card with its own set (CARDS.md lanes table)
 RELEASE_NOTES_OPTIONS = ['Write the notes now', 'Defer until the deploy lands', 'Drop']
@@ -694,6 +697,10 @@ def prompt(card, ctx, f):
         lane_rules = '\n- `draft` is the recommended move and its one-line reason. Set `replyReady` false and `threadAfter` "leave".'
     elif lane == 'RUN':
         lane_rules = '\n- `draft` is the exact command or action. Set `replyReady` false and `threadAfter` "leave".'
+    elif lane == 'STALE':
+        lane_rules = ('\n- `draft` is the new status line this entry gets when it stays: one line under 50 characters that says who moves next and on what. No other text.'
+                      '\n- When the material shows the work is finished or given up (reply sent and nothing owed, PR merged or closed, the entry retired), rank "Drop the entry" first and say in `fact` what settles it.'
+                      '\n- Set `replyReady` false and `threadAfter` "leave".')
     else:
         lane_rules = '\n- `draft` on a task or batch card is at most three numbered lines: each names the thing in product words, says whether it is still true, and ends with the verb. Set `replyReady` false and `threadAfter` "leave".'
     lane_rules += routing
