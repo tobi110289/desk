@@ -613,11 +613,20 @@ my_prs=_my_prs()
 # read through superset before ranking (jev/desk_screens.py, ~5 s for 24 rows; DESK_SCREENS=0 skips it) and the screen
 # decides the card, whatever the caption says: a picker or a staged line is a SEND member, an idle worker whose PR
 # waits on HORST's changes gets a prefilled SEND line, a merged PR retires, a dead worker is a RUN card, a working one hides.
+SCREEN_FEED_S=30*60   # on a desk host: the oldest terminal reading from the laptop the gather still trusts
 _screens={}
 if os.environ.get('DESK_SCREENS','1')!='0':
     try:
         import sys as _sys3, os as _os3; _sys3.path.insert(0,JEV); import desk_screens as _ds
-        _screens=_ds.cached(900) or _ds.screen(state)   # the tick's screen cache when fresh
+        import shutil as _sh3
+        if _sh3.which('superset'):
+            _screens=_ds.cached(900) or _ds.screen(state)   # the tick's screen cache when fresh
+        else:
+            # A desk host has no terminal reader. The laptop reads the screens and sends them (desk-sync.py feeds).
+            # A reading here would call every worker "gone", so an old feed means no reading: the captions decide.
+            _fed=_ds.cached(SCREEN_FEED_S)
+            _screens=_fed or {}
+            if _fed is None: failed_sources.append(('screens',f'no terminal reading from the laptop in the last {SCREEN_FEED_S//60} min; worker cards follow the captions'))
     except Exception as _e:
         failed_sources.append(('screens',str(_e)[:160]))
 def _pr_facts(pr):

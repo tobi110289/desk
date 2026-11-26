@@ -4,7 +4,7 @@
   desk-sync.py loop            merge state.json and state-archive.json with the desk host (config.json deskHost)
   desk-sync.py feeds [--dry-run]  copy what only this machine produces to the desk host: the sweep cache, the loop
                                helpers, the Hermes log, the sweep reports, the local tickets, the AWS login state,
-                               the Notion tickets
+                               the Notion tickets, the reading of the worker terminals
   desk-sync.py pull            copy the desk folder from the desk host to this machine: cards, briefs, decisions, holds
   desk-sync.py tick            what the pane runs every few seconds: pull, and once a minute loop and feeds
   desk-sync.py all             loop and feeds
@@ -139,7 +139,7 @@ FEEDS = [
     '+ /agent-loop/', '+ /agent-loop/sweep-cache.json', '+ /agent-loop/jev/', '- /agent-loop/jev/logs/', '+ /agent-loop/jev/**', '- /agent-loop/*',
     '+ /hermes-feedback/', '+ /hermes-feedback/LOG.md', '- /hermes-feedback/*',
     '+ /sentry-sweeps/', '+ /sentry-sweeps/*.md', '- /sentry-sweeps/*',
-    '+ /desk/', '+ /desk/notion-tickets.json', '+ /desk/cache/', '+ /desk/cache/sso-state.json', '- /desk/cache/*', '- /desk/*',
+    '+ /desk/', '+ /desk/notion-tickets.json', '+ /desk/screens.json', '+ /desk/cache/', '+ /desk/cache/sso-state.json', '- /desk/cache/*', '- /desk/*',
     '+ /*/', '+ /*/issues/', '+ /*/issues/*.md', '- /*/issues/*', '- /*/*',
     '- /*',
 ]
@@ -151,7 +151,25 @@ def feed_argv(scratch, host, dry=False):
             f'{scratch}/', f'{host}:{REMOTE_SCRATCH}/']
 
 
+def read_screens(max_age_s=300):
+    """The worker terminals are read on this machine: the reader (superset) is here, the desk host has none. The
+    reading goes to the desk host as a feed (screens.json), and its gather takes the worker cards from it."""
+    import shutil
+    if not shutil.which('superset'):
+        return
+    try:
+        sys.path.insert(0, deskconfig.need(deskconfig.JEV, stop=False))
+        import desk_screens
+        if desk_screens.cached(max_age_s) is None:
+            with open(f'{deskconfig.LOOP}/state.json') as f:
+                desk_screens.screen(json.load(f)['threads'])
+    except Exception as e:   # no reading is a line on the desk host's next gather, never a failed sync
+        print(f'desk-sync: worker terminals not read: {str(e)[:160]}', file=sys.stderr)
+
+
 def sync_feeds(host, dry=False):
+    if not dry:
+        read_screens()
     ran = subprocess.run(feed_argv(deskconfig.need(deskconfig.SCRATCH), host, dry), capture_output=True, text=True, timeout=300)
     if ran.returncode != 0:
         sys.exit(f'desk-sync: rsync to {host} failed: {ran.stderr.strip()[:300]}')
@@ -162,7 +180,7 @@ def sync_feeds(host, dry=False):
 # The desk folder belongs to the desk host. These files in it belong to this machine and are never pulled over:
 # the scripts (links into the repo), the config, the key file, what the pane and the session write here.
 KEEP_LOCAL = ['*.py', '*.pyc', '__pycache__/', 'config.json', '.env', '.auto', '.events', '.desk.lock', '.sync-*',
-              'notion-tickets.json', 'cache/sso-state.json', '*.bak*', '*.pre-repo', '*.tmp']
+              'notion-tickets.json', 'screens.json', 'cache/sso-state.json', '*.bak*', '*.pre-repo', '*.tmp']
 
 
 def pull_argv(desk, host):
