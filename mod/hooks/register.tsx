@@ -670,6 +670,7 @@ export const register: Register = (on) => {
         <Text>
           working <Text color={laneColor(card.lane)}>{card.lane}</Text>{" "}
           <Text bold>{card.ref}</Text>
+          {card.no > 0 && <Text dimColor> D-{card.no}</Text>}
         </Text>
         <Text dimColor>
           {waiting} waiting · closed today {desk.closedToday}
@@ -880,6 +881,7 @@ export const register: Register = (on) => {
                   <Text bold color={laneColor(card.lane)}>
                     {card.lane}
                   </Text>{" "}
+                  {card.no > 0 && <Text dimColor>D-{card.no} </Text>}
                   {card.lane !== "TASK" && <Text bold>{card.ref} </Text>}
                   <Text bold>{titleOf(card, stats?.titles[card.ref])}</Text>
                 </Text>

@@ -22,6 +22,8 @@ export type PreparedBrief = {
 
 export type DeskCard = {
   id: string;
+  /** The desk's own short number, shown as D-<no>: given once per card id by the gather; 0 on a card from an older gather. */
+  no: number;
   ref: string;
   lane: string;
   mins: number;

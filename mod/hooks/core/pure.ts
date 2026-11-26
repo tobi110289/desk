@@ -354,6 +354,7 @@ export const toView = (
         ),
         pickLine: pickLine(picks.find((d) => d.cardId === id) ?? null),
         id,
+        no: typeof card.no === "number" ? card.no : 0,
         ref: text(card.ref),
         lane: text(card.lane),
         mins: typeof card.mins === "number" ? card.mins : 0,

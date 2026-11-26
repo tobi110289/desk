@@ -29,6 +29,10 @@ const PANE = "desk";
 // The page asks every few seconds while it is open; a desk nobody looked at for this long does not gather.
 const WATCHED_MS = 2 * 60_000;
 const BEAT_MS = 5_000;
+// A message to Claude: the script cuts its run at 9 minutes.
+const CHAT_MS = 10 * 60_000;
+const CHAT_MAX = 4000;
+const CHAT_SHOWN = 30;
 const TYPES = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -161,6 +165,7 @@ export async function startDesk({
     $,
     home,
     seenAt: 0,
+    chatRuns: 0,
     lock: Promise.resolve(),
     timer: null,
     gatherAlways,
@@ -186,6 +191,33 @@ export async function beat(desk) {
   if (desk.gatherAlways || Date.now() - desk.seenAt < WATCHED_MS) {
     void core.gather($, "due");
   }
+}
+
+const deskDir = (desk) => path.join(desk.home, "orbit-scratch", "desk");
+
+/** The newest lines of the conversation with Claude (chat.jsonl, written by desk-chat.py). */
+export async function readChat(desk) {
+  const raw = await fs
+    .readFile(path.join(deskDir(desk), "chat.jsonl"), "utf8")
+    .catch(() => "");
+  const rows = [];
+  for (const line of raw.split("\n").slice(-CHAT_SHOWN - 1)) {
+    try {
+      const row = JSON.parse(line);
+      rows.push({
+        at: String(row.at ?? ""),
+        from: String(row.from ?? ""),
+        text: String(row.text ?? ""),
+        card: typeof row.card === "string" ? row.card : "",
+        no: typeof row.no === "number" ? row.no : 0,
+        id: String(row.id ?? ""),
+        re: String(row.re ?? ""),
+      });
+    } catch {
+      // an empty or half-written line
+    }
+  }
+  return rows.slice(-CHAT_SHOWN);
 }
 
 /** What the page draws. The view is the core's; nothing here ranks or filters a card. */
@@ -215,6 +247,8 @@ export async function buildState(desk) {
             newToday: stats.newToday,
           },
     notes: $.notes,
+    chat: await readChat(desk),
+    chatRuns: desk.chatRuns,
   };
 }
 
@@ -226,6 +260,30 @@ export const ACTIONS = {
   },
   gather: async ({ core, $ }) => {
     void core.gather($, "now");
+    return { ok: true };
+  },
+  // A typed message goes to Claude on this host (desk-chat.py). The answer lands in chat.jsonl; the page shows it.
+  say: async (desk, body) => {
+    const text = String(body.text ?? "").trim();
+    if (text === "") {
+      return { ok: false, error: "The message is empty." };
+    }
+    if (text.length > CHAT_MAX) {
+      return { ok: false, error: `The message is over ${CHAT_MAX} characters.` };
+    }
+    const view = await read(desk.$, desk.core.view);
+    const card = view.cards.find((one) => one.id === body.cardId);
+    const argv = ["python3", path.join(deskDir(desk), "desk-chat.py"), text];
+    if (card !== undefined) {
+      argv.push("--card", card.id);
+    }
+    desk.chatRuns += 1;
+    void desk.$.process
+      .run(argv, { timeoutMs: CHAT_MS })
+      .catch(() => undefined)
+      .then(() => {
+        desk.chatRuns -= 1;
+      });
     return { ok: true };
   },
   // A card past the top of the list has no brief until somebody opens it: the page asks for one.

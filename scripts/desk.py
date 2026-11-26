@@ -1722,6 +1722,13 @@ if memory:
 for c in cards:
     desk['cards'][c['id']]={**desk['cards'].get(c['id'],{}),'seen':c['seen'],'lastSeen':today,'firstSeen':desk['cards'].get(c['id'],{}).get('firstSeen') or today,'lane':c['lane'],'act':c['act'],'ref':c['ref'],'status':c.get('status'),'key':c.get('key'),'since':c.get('since')}   # firstSeen 2026-11-09: latency was a lower bound without it
     if c.get('deferred'): desk.setdefault('holds',{}).setdefault(c['key'],{})['defer']=c['deferred']
+# 2026-11-26: every card gets the desk's own short number once (D-<no>), kept per card id for as long as desk.json
+# knows the card. The person names a card by it on the phone, in a message and in a later session (desk-id.py).
+_numbers=desk.setdefault('numbers',{'next':1,'ids':{}})
+for c in cards:
+    if c['id'] not in _numbers['ids']:
+        _numbers['ids'][c['id']]=_numbers['next']; _numbers['next']+=1
+    c['no']=_numbers['ids'][c['id']]
 # 2026-10-22: a top or bottom id that matched no live card for seven days is stale (five sweep decisions from 18 Sep sat in top)
 def _stale(cid):
     ls=desk['cards'].get(cid,{}).get('lastSeen')

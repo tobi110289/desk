@@ -46,7 +46,7 @@
           system-ui,
           sans-serif;
         padding: env(safe-area-inset-top) 16px
-          calc(env(safe-area-inset-bottom) + 24px);
+          calc(env(safe-area-inset-bottom) + 96px);
       }
       header {
         display: flex;
@@ -159,6 +159,54 @@
       a {
         color: inherit;
       }
+      #chat {
+        margin-top: 18px;
+      }
+      .msg {
+        border-radius: 12px;
+        padding: 10px 12px;
+        margin: 0 0 8px;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+        border: 1px solid var(--line);
+        background: var(--card);
+      }
+      .msg.you {
+        margin-left: 36px;
+        background: transparent;
+      }
+      .msg.desk {
+        color: var(--warn);
+      }
+      .msg .who {
+        display: block;
+        font-size: 12px;
+        color: var(--soft);
+        white-space: normal;
+      }
+      #say {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
+        padding: 10px 16px calc(env(safe-area-inset-bottom) + 10px);
+        background: var(--bg);
+        border-top: 1px solid var(--line);
+      }
+      #say textarea {
+        flex: 1;
+        font: inherit;
+        color: inherit;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        resize: none;
+        max-height: 40vh;
+      }
       .links {
         display: flex;
         flex-wrap: wrap;
@@ -177,6 +225,16 @@
     <div id="meta"></div>
     <div id="error" role="alert"></div>
     <main id="main"></main>
+    <div id="chat"></div>
+    <form id="say">
+      <textarea
+        id="text"
+        rows="1"
+        placeholder="Write to Claude"
+        aria-label="Message to Claude"
+      ></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
     <script>
       "use strict";
       const POLL_MS = 4000;
@@ -186,6 +244,10 @@
       const errorBox = document.getElementById("error");
       const back = document.getElementById("back");
       const gatherButton = document.getElementById("gather");
+      const chatBox = document.getElementById("chat");
+      const sayForm = document.getElementById("say");
+      const textBox = document.getElementById("text");
+      const sendButton = document.getElementById("send");
       let state = null;
       // The open card is in the address (#<card id>), so the back gesture of the phone closes it and a link opens it.
       let openId = decodeURIComponent(location.hash.slice(1));
@@ -281,6 +343,37 @@
         }).catch(() => undefined);
       }
 
+      const numberOf = (card) => (card.no > 0 ? `D-${card.no}` : "");
+      const clock = (iso) => {
+        const at = new Date(iso);
+        return Number.isNaN(at.getTime())
+          ? ""
+          : at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      };
+
+      // The conversation with Claude. On a card: the messages typed on that card. On the list: all of them.
+      function drawChat(card) {
+        const rows = (state.chat || []).filter(
+          (row) => !card || row.card === card.id,
+        );
+        chatBox.replaceChildren();
+        if (rows.length === 0 && !card) return;
+        if (rows.length > 0) chatBox.append(el("div", "label", "Claude"));
+        for (const row of rows.slice(card ? -12 : -8)) {
+          const msg = el("div", `msg ${row.from}`);
+          const who = row.from === "you" ? "You" : row.from === "claude" ? "Claude" : "Desk";
+          const tag = !card && row.no > 0 ? ` · D-${row.no}` : "";
+          msg.append(el("span", "who", `${who} · ${clock(row.at)}${tag}`), row.text);
+          chatBox.append(msg);
+        }
+        const answered = new Set(rows.map((row) => row.re));
+        if (rows.some((row) => row.from === "you" && !answered.has(row.id)) && state.chatRuns > 0)
+          chatBox.append(el("div", "msg desk", "Claude works on it. The answer shows here."));
+        textBox.placeholder = card
+          ? `Write to Claude about ${numberOf(card) || card.ref}`
+          : "Write to Claude";
+      }
+
       function drawList() {
         const open = state.cards.filter((card) => card.verb === null);
         const closed = state.cards.filter((card) => card.verb !== null);
@@ -288,6 +381,7 @@
           const row = el("button", card.verb === null ? "row" : "row closed");
           const top = el("div", "top");
           top.append(
+            el("span", "", numberOf(card)),
             el("span", card.impact === "P0" ? "p0" : "", card.impact || ""),
             el("span", "", card.lane),
             el("span", "", card.ref),
@@ -326,7 +420,7 @@
         };
         add(
           "Card",
-          `${card.lane} ${card.ref}${card.impact ? ` · ${card.impact}` : ""}\n${card.act}`,
+          `${numberOf(card)} ${card.lane} ${card.ref}${card.impact ? ` · ${card.impact}` : ""}\n${card.act}`.trim(),
         );
         const brief = card.prepared;
         if (brief) {
@@ -410,7 +504,8 @@
         const card = state.cards.find((one) => one.id === openId);
         if (openId && !card) openId = "";
         // A poll that changed nothing does not rebuild the page: a button keeps its armed state and its focus.
-        const key = `${state.version}|${openId}|${state.isGathering}`;
+        const lastChat = (state.chat || []).at(-1);
+        const key = `${state.version}|${openId}|${state.isGathering}|${(state.chat || []).length}|${lastChat ? lastChat.at : ""}|${state.chatRuns}`;
         if (!isForced && key === drawn) {
           return;
         }
@@ -433,7 +528,25 @@
         main.replaceChildren();
         if (card) drawCard(card);
         else drawList();
+        drawChat(card);
       }
+
+      textBox.addEventListener("input", () => {
+        textBox.style.height = "auto";
+        textBox.style.height = `${textBox.scrollHeight}px`;
+      });
+      sayForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const text = textBox.value.trim();
+        if (text === "" || sendButton.disabled) return;
+        sendButton.disabled = true;
+        const result = await send({ action: "say", text, cardId: openId || undefined });
+        sendButton.disabled = false;
+        if (result.ok) {
+          textBox.value = "";
+          textBox.style.height = "auto";
+        }
+      });
 
       back.addEventListener("click", () => {
         history.replaceState(null, "", location.pathname);

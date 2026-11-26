@@ -182,6 +182,40 @@ test("opening a card without a brief asks the desk to write one, for that card a
   end();
 });
 
+test("a typed message goes to Claude once, with the card it was typed on, and the page gets the answer", async () => {
+  const { desk, dir, ran, end } = await world();
+  const empty = await act(desk, { action: "say", text: "   " });
+  const sent = await act(desk, {
+    action: "say",
+    text: "Why is this one still open?",
+    cardId: "loop:T-2",
+  });
+  const general = await act(desk, { action: "say", text: "What is next?", cardId: "loop:T-3" });
+  await settle();
+  assert.equal(empty.ok, false);
+  assert.equal(sent.ok, true);
+  assert.equal(general.ok, true);
+  assert.deepEqual(ran("desk-chat.py"), [
+    ["desk-chat.py", "Why is this one still open?", "--card", "loop:T-2"],
+    ["desk-chat.py", "What is next?"],
+  ]);
+  await fs.writeFile(
+    path.join(dir, "chat.jsonl"),
+    `${JSON.stringify({ at: "2026-01-01T10:00:00Z", from: "you", text: "Why is this one still open?", id: "a1", card: "loop:T-2", no: 7 })}\n` +
+      `${JSON.stringify({ at: "2026-01-01T10:00:20Z", from: "claude", text: "It waits for your send.", re: "a1", card: "loop:T-2", no: 7 })}\n`,
+  );
+  const state = await buildState(desk);
+  assert.deepEqual(
+    state.chat.map((row) => [row.from, row.text, row.no]),
+    [
+      ["you", "Why is this one still open?", 7],
+      ["claude", "It waits for your send.", 7],
+    ],
+  );
+  assert.equal(state.chatRuns, 0);
+  end();
+});
+
 test("a pick that needs a session waits for the laptop and runs nothing in the background", async () => {
   const { desk, ran, end } = await world({ decideClass: "session" });
   const result = await act(desk, {
