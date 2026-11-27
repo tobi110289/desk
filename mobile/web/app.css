@@ -28,12 +28,6 @@
     --stop: #e0666c;
   }
 }
-/* As an app on the home screen, iOS reports a dynamic height that is too short. */
-@media (display-mode: standalone) {
-  :root {
-    --vh: 100vh;
-  }
-}
 * {
   box-sizing: border-box;
   -webkit-tap-highlight-color: transparent;
@@ -241,6 +235,23 @@ section.brief {
 .draft {
   border-left: 3px solid var(--line);
   padding-left: 10px;
+}
+.checks {
+  margin: 2px 0 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+.checks li + li {
+  margin-top: 6px;
+}
+.note {
+  margin-top: 10px;
+  border: 1px solid var(--warn);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.note .label {
+  color: var(--warn);
 }
 .links {
   display: flex;

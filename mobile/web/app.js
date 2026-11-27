@@ -294,6 +294,15 @@ function pickText(card) {
   return `${one.state}: ${one.option}. ${one.result || ""}`;
 }
 
+// A pick that ran and did not do its work: the card shows why and offers its options again.
+function failedPick(card) {
+  if ([pending, sending].some((one) => one && one.cardId === card.id))
+    return null;
+  if ((state.recording || {})[card.id]) return null;
+  const one = decisionOf(card.id);
+  return one && !["queued", "running", "done"].includes(one.state) ? one : null;
+}
+
 // What a swipe to the right does on a card: its first option, when the card has a brief, no pick, and the option
 // sends nothing to a customer. Otherwise the swipe opens the card.
 function swipeOption(card) {
@@ -694,10 +703,7 @@ function drawCard(card) {
     if (!text) return;
     box.append(el("div", "label", label), el("div", className, text));
   };
-  add(
-    "Card",
-    `${numberOf(card)} ${card.lane} ${card.ref}${card.impact ? ` · ${card.impact}` : ""}\n${card.act}`.trim(),
-  );
+  add("Card", card.act);
   const brief = card.prepared;
   const picked = pickText(card);
   if (brief) {
@@ -706,8 +712,11 @@ function drawCard(card) {
     add("Then", brief.then);
     add("Fact", brief.fact);
     add("Draft", brief.draft, "text draft");
-    if (brief.openChecks.length > 0)
-      add("Open checks", brief.openChecks.join("\n"));
+    if (brief.openChecks.length > 0) {
+      const list = el("ul", "checks");
+      for (const check of brief.openChecks) list.append(el("li", "", check));
+      box.append(el("div", "label", "Open checks"), list);
+    }
   } else {
     const isOpen = card.verb === null && !picked;
     add(
@@ -732,7 +741,23 @@ function drawCard(card) {
   if (links.children.length > 0) box.append(links);
   scrollBox.append(box);
 
-  if (picked) scrollBox.append(el("p", "said", picked));
+  const failed = failedPick(card);
+  if (failed) {
+    const note = el("section", "note");
+    note.append(
+      el("div", "label", `Not done · ${failed.option}`),
+      el(
+        "div",
+        "text",
+        String(failed.result || "The desk gave no reason.").replace(
+          /^not done:\s*/i,
+          "",
+        ),
+      ),
+    );
+    scrollBox.append(note);
+  }
+  if (picked && !failed) scrollBox.append(el("p", "said", picked));
   else if (card.verb !== null)
     scrollBox.append(el("p", "said", `Closed today: ${card.verb}.`));
   else if (brief)
@@ -806,13 +831,7 @@ function drawDock(card) {
   } else {
     keys.append(
       keyButton("‹ Back", goList),
-      el(
-        "span",
-        "grow",
-        card
-          ? `${numberOf(card)} ${card.lane} ${card.ref}`.trim()
-          : "The conversation with Claude",
-      ),
+      el("span", "grow", card ? "" : "The conversation with Claude"),
     );
   }
   $("searchbar").hidden =
@@ -877,13 +896,18 @@ function draw(isForced = false) {
       : page.kind === "chat"
         ? "Claude"
         : `${numberOf(card)} ${card.ref}`.trim();
-  const parts = [
-    `gathered ${ago(state.generatedAt)}`,
-    `${state.closedToday} closed today`,
-  ];
-  if (state.parked) parts.push(`${state.parked} parked`);
-  if (state.plain) parts.push(`${state.plain.waitingOnUs} wait on us`);
-  if (state.scope) parts.push(state.scope);
+  const parts = card
+    ? [card.lane, card.impact].filter(Boolean)
+    : [
+        `gathered ${ago(state.generatedAt)}`,
+        `${state.closedToday} closed today`,
+      ];
+  // A card page names the card; the counts of the desk belong to the list.
+  if (!card) {
+    if (state.parked) parts.push(`${state.parked} parked`);
+    if (state.plain) parts.push(`${state.plain.waitingOnUs} wait on us`);
+    if (state.scope) parts.push(state.scope);
+  }
   $("meta").textContent = loadError || parts.join(" · ");
   $("meta").className = loadError ? "bad" : "";
 
@@ -1011,20 +1035,23 @@ scrollBox.addEventListener("click", (event) => {
 function fitKeyboard() {
   const view = window.visualViewport;
   if (!view) return;
-  const full = Math.max(
-    window.innerHeight,
-    document.documentElement.clientHeight,
-  );
+  // The page takes the height the window reports: as a home-screen app, the CSS units name a height that is not
+  // the one on the screen.
+  const full = window.innerHeight;
   const isUp = full - view.height > 120;
-  if (isUp)
-    document.documentElement.style.setProperty("--vh", `${view.height}px`);
-  else document.documentElement.style.removeProperty("--vh");
+  document.documentElement.style.setProperty(
+    "--vh",
+    `${isUp ? view.height : full}px`,
+  );
   document.documentElement.classList.toggle("kb", isUp);
   if (isUp) {
     window.scrollTo(0, 0);
     if (page.kind !== "list") scrollBox.scrollTop = scrollBox.scrollHeight;
   }
 }
+window.addEventListener("resize", fitKeyboard);
+window.addEventListener("pageshow", fitKeyboard);
+fitKeyboard();
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", fitKeyboard);
   window.visualViewport.addEventListener("scroll", fitKeyboard);
