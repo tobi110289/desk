@@ -136,7 +136,7 @@ tailscale serve --bg 47600                          # puts it on your tailnet ov
 
 - It needs Node 23.6 or newer. `mobile/loader.mjs` lets Node load the core's TypeScript as it is, and maps `claude-code` to `mobile/engine.mjs` (the state library for a Node process).
 - Access: Tailscale Serve names the caller in a header, and the server admits only a login in `allow`. A request with no such header comes from the machine itself and is refused unless the config says `"local": true`.
-- What the phone does: read the desk, start a gather, pick an option. A pick the scripts run by themselves starts at once. A pick that needs a Claude session stays recorded and waits for the pane.
+- What the phone does: read the desk, start a gather, search the cards, pick an option (one tap, with five seconds for Undo; an option that sends to a customer takes two taps), and write to Claude on the desk host, with a picture or by dictation. A swipe to the right on a row takes the card's first option; a swipe to the left opens the card with the message field. The page installs on the home screen as an app. A pick the scripts run by themselves starts at once. A pick that needs a Claude session stays recorded and waits for the pane.
 - What it does not do: start a session, close a card by hand, edit a draft.
 - The server gathers only while a phone had the page open in the last two minutes, and only when the desk is due. The marker file of the gather keeps the pane and the server from running one at the same time.
 - A new button is one entry in `ACTIONS` that makes one core call. Behaviour never goes into the server or the page.
