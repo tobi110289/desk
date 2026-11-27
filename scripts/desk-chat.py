@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""desk-chat.py "<message>" [--card <card id>]  — one message from the person to Claude on the desk host, and the answer.
+"""desk-chat.py "<message>" [--card <card id>] [--picture <file>] [--key <name>]  — one message from the person to Claude on the desk host, and the answer.
 
 The phone desk has a text field. A message typed there (on the list, or on a card) comes here. The script writes the
 message to chat.jsonl, runs one headless Claude run in the desk folder, and writes the answer to the same file. The page
 shows the file. Messages of one sitting share a Claude session (resumed by id), so "and the second one?" works; after
 SITTING_H hours without a message the next one starts a new session.
+
+--picture names a picture file on this host that comes with the message (the phone page uploads it to shots/); the run
+opens it with its Read tool. --key is the page's own name for the message; the row carries it, so the page can tell
+which of its messages the conversation already holds.
 
 One run at a time: a second message waits for the first (a file lock), so the answers come in the order of the questions.
 
@@ -91,7 +95,9 @@ def safe(cid):
     return re.sub(r'[^A-Za-z0-9._-]', '_', cid)
 
 
-def message_for(text, card):
+def message_for(text, card, picture=None):
+    if picture:
+        text = f"{text}\n\n(A picture comes with this message: {picture} . Open it with the Read tool before you answer.)"
     if not card:
         return text
     keep = {k: card.get(k) for k in ('id', 'no', 'ref', 'lane', 'impact', 'status', 'act', 'note', 'pr', 'thread', 'waits', 'age')}
@@ -100,13 +106,13 @@ def message_for(text, card):
             f"Its brief, when one exists: briefs/{safe(card['id'])}.json)")
 
 
-def ask(text, card, session_id):
+def ask(text, card, session_id, picture=None):
     argv = ['claude', '-p', '--model', MODEL, '--tools', 'Bash,Read,Glob,Grep', '--permission-mode', 'bypassPermissions',
             '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'json',
             '--append-system-prompt', RULES]
     if session_id:
         argv += ['--resume', session_id]
-    argv += [message_for(text, card)]
+    argv += [message_for(text, card, picture)]
     env = {k: v for k, v in os.environ.items() if k != 'CLAUDE_CODE_PLUGIN_DIRS'}
     env['DESK_CHAT'] = '1'
     r = subprocess.run(argv, capture_output=True, text=True, timeout=TIMEOUT_S, env=env, cwd=DESK)
@@ -123,12 +129,20 @@ def main(argv):
     if not argv or argv[0] in ('-h', '--help'):
         print(__doc__); return 2
     text = argv[0].strip()[:MAX_TEXT]
-    cid = argv[argv.index('--card') + 1] if '--card' in argv[1:] and len(argv) > argv.index('--card') + 1 else None
+    def flag(name):
+        return argv[argv.index(name) + 1] if name in argv[1:] and len(argv) > argv.index(name) + 1 else None
+    cid, picture, key = flag('--card'), flag('--picture'), flag('--key')
+    if picture and not os.path.isfile(picture):
+        picture = None
     if not text:
         print('empty message', file=sys.stderr); return 2
     card = card_of(cid) if cid else None
     mid = uuid.uuid4().hex[:10]
     row = {'at': now_iso(), 'from': 'you', 'text': text, 'id': mid}
+    if key:
+        row['key'] = key[:80]
+    if picture:
+        row['picture'] = os.path.basename(picture)
     if card:
         row.update({'card': card['id'], 'no': card.get('no') or 0, 'ref': card.get('ref') or ''})
     append(row)
@@ -138,11 +152,11 @@ def main(argv):
         session_id = sitting()
         try:
             try:
-                answer, session_id, cost = ask(text, card, session_id)
+                answer, session_id, cost = ask(text, card, session_id, picture)
             except RuntimeError:
                 if not session_id:
                     raise
-                answer, session_id, cost = ask(text, card, None)   # the session is gone: start a new sitting
+                answer, session_id, cost = ask(text, card, None, picture)   # the session is gone: start a new sitting
         except subprocess.TimeoutExpired:
             append({'at': now_iso(), 'from': 'desk', 're': mid, 'text': f'Claude did not finish in {TIMEOUT_S // 60} minutes. Ask again, or ask for less.', **tag}); return 1
         except Exception as e:

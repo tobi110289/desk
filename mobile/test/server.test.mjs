@@ -13,9 +13,11 @@ import {
   act,
   buildState,
   isAllowed,
+  keepPicture,
   makeHandler,
   startDesk,
   stopDesk,
+  taggedState,
 } from "../server.mjs";
 
 async function world({ decideExit = 0, decideClass = "script" } = {}) {
@@ -213,6 +215,56 @@ test("a typed message goes to Claude once, with the card it was typed on, and th
     ],
   );
   assert.equal(state.chatRuns, 0);
+  end();
+});
+
+test("a poll that names the state it has gets no second copy, until the desk changes", async () => {
+  const { desk, end } = await world();
+  const first = await taggedState(desk);
+  const again = await taggedState(desk, first.tag);
+  await act(desk, { action: "pick", cardId: "loop:T-2", option: "Drop" });
+  const after = await taggedState(desk, first.tag);
+  assert.equal(first.cards.length, 2);
+  assert.deepEqual(again, { same: true });
+  assert.equal(after.same, undefined);
+  assert.notEqual(after.tag, first.tag);
+  end();
+});
+
+test("a picture goes with its message; a file that is no picture, or a made-up name, does not", async () => {
+  const { desk, dir, ran, end } = await world();
+  const png = Buffer.concat([
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    Buffer.alloc(16),
+  ]);
+  const kept = await keepPicture(desk, png);
+  const refused = await keepPicture(desk, Buffer.from("#!/bin/sh\nexit 0\n"));
+  const sent = await act(desk, {
+    action: "say",
+    text: "",
+    picture: kept.name,
+    key: "k1",
+  });
+  const madeUp = await act(desk, {
+    action: "say",
+    text: "Look",
+    picture: "../desk.json",
+  });
+  await settle();
+  assert.equal(kept.ok, true);
+  assert.equal(refused.ok, false);
+  assert.equal(sent.ok, true);
+  assert.equal(madeUp.ok, false);
+  assert.deepEqual(ran("desk-chat.py"), [
+    [
+      "desk-chat.py",
+      "See the picture.",
+      "--picture",
+      path.join(dir, "shots", kept.name),
+      "--key",
+      "k1",
+    ],
+  ]);
   end();
 });
 

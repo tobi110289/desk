@@ -4,570 +4,97 @@
     <meta charset="utf-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, viewport-fit=cover"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1"
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="theme-color" content="#f6f5f1" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Desk" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta
+      name="theme-color"
+      content="#f6f5f1"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#15140f"
+      media="(prefers-color-scheme: dark)"
+    />
+    <meta name="robots" content="noindex" />
     <title>Desk</title>
-    <style>
-      :root {
-        --bg: #f6f5f1;
-        --card: #ffffff;
-        --ink: #1c1b18;
-        --soft: #6b6860;
-        --line: #e2dfd6;
-        --go: #1f6f4a;
-        --go-ink: #ffffff;
-        --warn: #a5521a;
-        --stop: #a3262d;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #15140f;
-          --card: #1f1e18;
-          --ink: #ece9df;
-          --soft: #9a968a;
-          --line: #33312a;
-          --go: #3f9b6e;
-          --go-ink: #0d130f;
-          --warn: #d98b4c;
-          --stop: #e0666c;
-        }
-      }
-      * {
-        box-sizing: border-box;
-      }
-      body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--ink);
-        font:
-          16px/1.45 -apple-system,
-          system-ui,
-          sans-serif;
-        padding: env(safe-area-inset-top) 16px
-          calc(env(safe-area-inset-bottom) + 96px);
-      }
-      header {
-        display: flex;
-        align-items: baseline;
-        gap: 12px;
-        padding: 14px 0 6px;
-      }
-      h1 {
-        font-size: 22px;
-        margin: 0;
-        flex: 1;
-      }
-      #meta {
-        color: var(--soft);
-        font-size: 13px;
-        padding-bottom: 10px;
-        min-height: 30px;
-      }
-      button {
-        font: inherit;
-        color: inherit;
-        border-radius: 10px;
-        border: 1px solid var(--line);
-        background: var(--card);
-        padding: 10px 14px;
-      }
-      button:disabled {
-        opacity: 0.5;
-      }
-      .row {
-        display: block;
-        width: 100%;
-        text-align: left;
-        margin: 0 0 8px;
-        padding: 12px 14px;
-      }
-      .row .top {
-        display: flex;
-        gap: 8px;
-        font-size: 13px;
-        color: var(--soft);
-      }
-      .row .act {
-        font-weight: 600;
-        margin-top: 2px;
-        overflow-wrap: anywhere;
-      }
-      .row .line {
-        font-size: 13px;
-        color: var(--soft);
-        margin-top: 4px;
-        overflow-wrap: anywhere;
-      }
-      .p0 {
-        color: var(--stop);
-        font-weight: 700;
-      }
-      .closed {
-        opacity: 0.55;
-      }
-      .warn {
-        color: var(--warn);
-      }
-      section.brief {
-        background: var(--card);
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        padding: 14px;
-        margin-bottom: 12px;
-      }
-      .label {
-        font-size: 12px;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-        color: var(--soft);
-        margin: 12px 0 2px;
-      }
-      .label:first-child {
-        margin-top: 0;
-      }
-      .text {
-        overflow-wrap: anywhere;
-        white-space: pre-wrap;
-      }
-      .draft {
-        border-left: 3px solid var(--line);
-        padding-left: 10px;
-      }
-      .option {
-        display: block;
-        width: 100%;
-        margin-top: 8px;
-        padding: 14px;
-        font-weight: 600;
-      }
-      .option.lead {
-        background: var(--go);
-        color: var(--go-ink);
-        border-color: var(--go);
-      }
-      .option.armed {
-        outline: 3px solid var(--warn);
-      }
-      #error {
-        color: var(--stop);
-        min-height: 22px;
-        margin: 8px 0;
-        overflow-wrap: anywhere;
-      }
-      a {
-        color: inherit;
-      }
-      #chat {
-        margin-top: 18px;
-      }
-      .msg {
-        border-radius: 12px;
-        padding: 10px 12px;
-        margin: 0 0 8px;
-        overflow-wrap: anywhere;
-        white-space: pre-wrap;
-        border: 1px solid var(--line);
-        background: var(--card);
-      }
-      .msg.you {
-        margin-left: 36px;
-        background: transparent;
-      }
-      .msg.desk {
-        color: var(--warn);
-      }
-      .msg .who {
-        display: block;
-        font-size: 12px;
-        color: var(--soft);
-        white-space: normal;
-      }
-      #say {
-        position: fixed;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        display: flex;
-        gap: 8px;
-        align-items: flex-end;
-        padding: 10px 16px calc(env(safe-area-inset-bottom) + 10px);
-        background: var(--bg);
-        border-top: 1px solid var(--line);
-      }
-      #say textarea {
-        flex: 1;
-        font: inherit;
-        color: inherit;
-        background: var(--card);
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 10px 12px;
-        resize: none;
-        max-height: 40vh;
-      }
-      .links {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-top: 10px;
-        font-size: 14px;
-      }
-    </style>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <header>
-      <h1 id="title">Desk</h1>
-      <button id="back" hidden>Back</button>
-      <button id="gather">Gather</button>
-    </header>
-    <div id="meta"></div>
-    <div id="error" role="alert"></div>
-    <main id="main"></main>
-    <div id="chat"></div>
-    <form id="say">
-      <textarea
-        id="text"
-        rows="1"
-        placeholder="Write to Claude"
-        aria-label="Message to Claude"
-      ></textarea>
-      <button id="send" type="submit">Send</button>
-    </form>
-    <script>
-      "use strict";
-      const POLL_MS = 4000;
-      const ARM_MS = 4000;
-      const main = document.getElementById("main");
-      const meta = document.getElementById("meta");
-      const errorBox = document.getElementById("error");
-      const back = document.getElementById("back");
-      const gatherButton = document.getElementById("gather");
-      const chatBox = document.getElementById("chat");
-      const sayForm = document.getElementById("say");
-      const textBox = document.getElementById("text");
-      const sendButton = document.getElementById("send");
-      let state = null;
-      // The open card is in the address (#<card id>), so the back gesture of the phone closes it and a link opens it.
-      let openId = decodeURIComponent(location.hash.slice(1));
-      let armed = "";
-      let armTimer = 0;
-      let isBusy = false;
-      let drawn = "";
-
-      const el = (tag, className, text) => {
-        const node = document.createElement(tag);
-        if (className) node.className = className;
-        if (text !== undefined) node.textContent = text;
-        return node;
-      };
-      const ago = (iso) => {
-        const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
-        if (Number.isNaN(mins)) return "never";
-        return mins < 1
-          ? "just now"
-          : mins < 60
-            ? `${mins} min ago`
-            : `${Math.round(mins / 60)} h ago`;
-      };
-      const decisionOf = (id) =>
-        (state.decisions || []).find((one) => one.cardId === id);
-      const pickText = (card) => {
-        const recording = (state.recording || {})[card.id];
-        if (recording) return `Recording: ${recording}`;
-        const one = decisionOf(card.id);
-        if (!one) return "";
-        if (one.state === "queued" && one.kind === "session")
-          return `Picked "${one.option}". It waits for a session on the laptop.`;
-        if (one.state === "queued" || one.state === "running")
-          return `Picked "${one.option}". It runs in the background.`;
-        if (one.state === "done")
-          return `Done: ${one.option}. ${one.result || ""}`;
-        return `${one.state}: ${one.option}. ${one.result || ""}`;
-      };
-
-      async function load() {
-        try {
-          const res = await fetch("/api/state", { cache: "no-store" });
-          if (!res.ok)
-            throw new Error(
-              res.status === 403
-                ? "This login is not allowed on the desk."
-                : `The desk answered ${res.status}.`,
-            );
-          state = await res.json();
-          if (errorBox.dataset.kind === "load") setError("");
-          draw();
-        } catch (error) {
-          setError(error.message || "The desk does not answer.", "load");
-        }
-      }
-
-      function setError(text, kind = "act") {
-        errorBox.textContent = text;
-        errorBox.dataset.kind = text ? kind : "";
-      }
-
-      async function send(body) {
-        isBusy = true;
-        draw(true);
-        try {
-          const res = await fetch("/api/act", {
-            method: "POST",
-            headers: { "content-type": "application/json", "x-desk": "1" },
-            body: JSON.stringify(body),
-          });
-          const result = await res.json();
-          setError(result.ok ? "" : result.error || "The desk refused this.");
-          return result;
-        } catch {
-          setError("The desk does not answer. Nothing was recorded.");
-          return { ok: false };
-        } finally {
-          isBusy = false;
-          await load();
-          draw(true);
-        }
-      }
-
-      // A card without a brief: ask the desk to write one, at most every 30 seconds per card. Quiet: no busy state.
-      const asked = {};
-      function askBrief(id) {
-        if (Date.now() - (asked[id] || 0) < 30000) return;
-        asked[id] = Date.now();
-        fetch("/api/act", {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-desk": "1" },
-          body: JSON.stringify({ action: "prepare", cardId: id }),
-        }).catch(() => undefined);
-      }
-
-      const numberOf = (card) => (card.no > 0 ? `D-${card.no}` : "");
-      const clock = (iso) => {
-        const at = new Date(iso);
-        return Number.isNaN(at.getTime())
-          ? ""
-          : at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      };
-
-      // The conversation with Claude. On a card: the messages typed on that card. On the list: all of them.
-      function drawChat(card) {
-        const rows = (state.chat || []).filter(
-          (row) => !card || row.card === card.id,
-        );
-        chatBox.replaceChildren();
-        if (rows.length === 0 && !card) return;
-        if (rows.length > 0) chatBox.append(el("div", "label", "Claude"));
-        for (const row of rows.slice(card ? -12 : -8)) {
-          const msg = el("div", `msg ${row.from}`);
-          const who = row.from === "you" ? "You" : row.from === "claude" ? "Claude" : "Desk";
-          const tag = !card && row.no > 0 ? ` · D-${row.no}` : "";
-          msg.append(el("span", "who", `${who} · ${clock(row.at)}${tag}`), row.text);
-          chatBox.append(msg);
-        }
-        const answered = new Set(rows.map((row) => row.re));
-        if (rows.some((row) => row.from === "you" && !answered.has(row.id)) && state.chatRuns > 0)
-          chatBox.append(el("div", "msg desk", "Claude works on it. The answer shows here."));
-        textBox.placeholder = card
-          ? `Write to Claude about ${numberOf(card) || card.ref}`
-          : "Write to Claude";
-      }
-
-      function drawList() {
-        const open = state.cards.filter((card) => card.verb === null);
-        const closed = state.cards.filter((card) => card.verb !== null);
-        for (const card of [...open, ...closed]) {
-          const row = el("button", card.verb === null ? "row" : "row closed");
-          const top = el("div", "top");
-          top.append(
-            el("span", "", numberOf(card)),
-            el("span", card.impact === "P0" ? "p0" : "", card.impact || ""),
-            el("span", "", card.lane),
-            el("span", "", card.ref),
-          );
-          top.append(
-            el("span", "", card.verb === null ? `${card.mins} min` : card.verb),
-          );
-          row.append(top, el("div", "act", card.act));
-          const line = pickText(card) || card.health;
-          if (line)
-            row.append(
-              el(
-                "div",
-                card.health && !pickText(card) ? "line warn" : "line",
-                line,
-              ),
-            );
-          row.addEventListener("click", () => {
-            location.hash = encodeURIComponent(card.id);
-            openId = card.id;
-            armed = "";
-            setError("");
-            draw(true);
-          });
-          main.append(row);
-        }
-        if (state.cards.length === 0)
-          main.append(el("p", "", "The desk is empty."));
-      }
-
-      function drawCard(card) {
-        const box = el("section", "brief");
-        const add = (label, text, className = "text") => {
-          if (!text) return;
-          box.append(el("div", "label", label), el("div", className, text));
-        };
-        add(
-          "Card",
-          `${numberOf(card)} ${card.lane} ${card.ref}${card.impact ? ` · ${card.impact}` : ""}\n${card.act}`.trim(),
-        );
-        const brief = card.prepared;
-        if (brief) {
-          add("Why", brief.why);
-          add("Decide", brief.decide);
-          add("Then", brief.then);
-          add("Fact", brief.fact);
-          add("Draft", brief.draft, "text draft");
-          if (brief.openChecks.length > 0)
-            add("Open checks", brief.openChecks.join("\n"));
-        } else {
-          const isOpen = card.verb === null && !pickText(card);
-          add(
-            "State",
-            card.health ||
-              (isOpen
-                ? "The desk writes the brief for this card now. The options come in about a minute."
-                : "No brief."),
-          );
-          add("Status", card.status);
-          if (isOpen) askBrief(card.id);
-        }
-        const links = el("div", "links");
-        for (const link of card.links || []) {
-          if (!/^https:\/\//.test(link.href)) continue;
-          const a = el("a", "", link.label);
-          a.href = link.href;
-          a.rel = "noopener";
-          a.target = "_blank";
-          links.append(a);
-        }
-        if (links.children.length > 0) box.append(links);
-        main.append(box);
-
-        const picked = pickText(card);
-        if (picked) {
-          main.append(el("p", "", picked));
-          return;
-        }
-        if (card.verb !== null) {
-          main.append(el("p", "", `Closed today: ${card.verb}.`));
-          return;
-        }
-        if (!brief) return;
-        brief.options.forEach((option, index) => {
-          const key = `${card.id}|${option.label}`;
-          const button = el(
-            "button",
-            index === 0 ? "option lead" : "option",
-            armed === key ? `Tap again: ${option.label}` : option.label,
-          );
-          if (armed === key) button.classList.add("armed");
-          button.disabled = isBusy;
-          button.addEventListener("click", async () => {
-            // Two taps for every pick: the first arms the button, the second records it.
-            if (armed !== key) {
-              armed = key;
-              clearTimeout(armTimer);
-              armTimer = setTimeout(() => {
-                armed = "";
-                draw(true);
-              }, ARM_MS);
-              draw(true);
-              return;
-            }
-            armed = "";
-            clearTimeout(armTimer);
-            await send({
-              action: "pick",
-              cardId: card.id,
-              option: option.label,
-            });
-          });
-          main.append(button);
-        });
-      }
-
-      function draw(isForced = false) {
-        if (state === null) return;
-        const open = state.cards.filter((card) => card.verb === null).length;
-        const card = state.cards.find((one) => one.id === openId);
-        if (openId && !card) openId = "";
-        // A poll that changed nothing does not rebuild the page: a button keeps its armed state and its focus.
-        const lastChat = (state.chat || []).at(-1);
-        const key = `${state.version}|${openId}|${state.isGathering}|${(state.chat || []).length}|${lastChat ? lastChat.at : ""}|${state.chatRuns}`;
-        if (!isForced && key === drawn) {
-          return;
-        }
-        drawn = key;
-        document.getElementById("title").textContent = card
-          ? card.ref
-          : `Desk · ${open}`;
-        back.hidden = !card;
-        gatherButton.hidden = Boolean(card);
-        gatherButton.disabled = state.isGathering || isBusy;
-        gatherButton.textContent = state.isGathering ? "Gathering" : "Gather";
-        const parts = [
-          `gathered ${ago(state.generatedAt)}`,
-          `${state.closedToday} closed today`,
-        ];
-        if (state.parked) parts.push(`${state.parked} parked`);
-        if (state.plain) parts.push(`${state.plain.waitingOnUs} wait on us`);
-        if (state.scope) parts.push(state.scope);
-        meta.textContent = parts.join(" · ");
-        main.replaceChildren();
-        if (card) drawCard(card);
-        else drawList();
-        drawChat(card);
-      }
-
-      textBox.addEventListener("input", () => {
-        textBox.style.height = "auto";
-        textBox.style.height = `${textBox.scrollHeight}px`;
-      });
-      sayForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const text = textBox.value.trim();
-        if (text === "" || sendButton.disabled) return;
-        sendButton.disabled = true;
-        const result = await send({ action: "say", text, cardId: openId || undefined });
-        sendButton.disabled = false;
-        if (result.ok) {
-          textBox.value = "";
-          textBox.style.height = "auto";
-        }
-      });
-
-      back.addEventListener("click", () => {
-        history.replaceState(null, "", location.pathname);
-        openId = "";
-        armed = "";
-        setError("");
-        draw(true);
-      });
-      window.addEventListener("hashchange", () => {
-        openId = decodeURIComponent(location.hash.slice(1));
-        armed = "";
-        draw(true);
-      });
-      gatherButton.addEventListener("click", () => send({ action: "gather" }));
-      document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) load();
-      });
-      setInterval(() => {
-        if (!document.hidden && !isBusy) load();
-      }, POLL_MS);
-      load();
-    </script>
+    <div id="app">
+      <header id="top">
+        <h1 id="title">Desk</h1>
+        <div id="meta"></div>
+      </header>
+      <main id="scroll"></main>
+      <footer id="dock">
+        <div id="busy" aria-hidden="true"></div>
+        <div id="toast" role="status" hidden></div>
+        <button id="strip" type="button" hidden></button>
+        <div id="searchbar" hidden>
+          <input
+            id="search"
+            type="search"
+            placeholder="Search cards"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            enterkeyhint="search"
+            aria-label="Search cards"
+          />
+          <button id="search-end" type="button">Cancel</button>
+        </div>
+        <nav id="keys" aria-label="Actions"></nav>
+        <div id="attach" hidden></div>
+        <form id="say">
+          <button id="pic" type="button" class="key" aria-label="Add a picture">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3.5" y="5.5" width="17" height="13" rx="2.5" />
+              <circle cx="9" cy="10.5" r="1.6" />
+              <path d="m5 17 4.5-4 3.5 3 2.5-2 3.5 3" />
+            </svg>
+          </button>
+          <textarea
+            id="text"
+            rows="1"
+            placeholder="Write to Claude"
+            aria-label="Message to Claude"
+            enterkeyhint="enter"
+          ></textarea>
+          <button
+            id="mic"
+            type="button"
+            class="key"
+            aria-label="Dictate"
+            hidden
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3.5" width="6" height="11" rx="3" />
+              <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5" />
+            </svg>
+          </button>
+          <button
+            id="send"
+            type="submit"
+            class="key go"
+            aria-label="Send"
+            disabled
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 19V5.5M6 11l6-6 6 6" />
+            </svg>
+          </button>
+          <input id="file" type="file" accept="image/*" hidden />
+        </form>
+      </footer>
+    </div>
+    <script src="/app.js"></script>
   </body>
 </html>

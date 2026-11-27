@@ -13,6 +13,7 @@
 import "./loader.mjs";
 
 import { execFile } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -33,12 +34,16 @@ const BEAT_MS = 5_000;
 const CHAT_MS = 10 * 60_000;
 const CHAT_MAX = 4000;
 const CHAT_SHOWN = 30;
+// A picture that goes with a message: the page scales it down first, so a real one stays far under this.
+const PICTURE_MAX = 6 * 1024 * 1024;
+const NAME = /^[A-Za-z0-9._-]{1,80}$/;
 const TYPES = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".svg": "image/svg+xml",
   ".webmanifest": "application/manifest+json",
+  ".png": "image/png",
 };
 
 /** Runs a command the way $.process.run does: never throws on a non-zero exit, kills at the time limit. */
@@ -212,6 +217,8 @@ export async function readChat(desk) {
         no: typeof row.no === "number" ? row.no : 0,
         id: String(row.id ?? ""),
         re: String(row.re ?? ""),
+        key: String(row.key ?? ""),
+        hasPicture: typeof row.picture === "string" && row.picture !== "",
       });
     } catch {
       // an empty or half-written line
@@ -252,6 +259,47 @@ export async function buildState(desk) {
   };
 }
 
+/** The state with a tag of its content: a poll that names the tag it has gets `{ same: true }` back. */
+export async function taggedState(desk, known = "") {
+  const state = await buildState(desk);
+  const tag = createHash("sha1")
+    .update(JSON.stringify({ ...state, now: 0 }))
+    .digest("hex")
+    .slice(0, 16);
+  return known !== "" && known === tag ? { same: true } : { ...state, tag };
+}
+
+/** The kind of a picture by its first bytes; "" for anything that is no JPEG, PNG or WebP. */
+function pictureKind(data) {
+  if (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return "jpg";
+  }
+  if (data.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) {
+    return "png";
+  }
+  if (
+    data.subarray(0, 4).toString("latin1") === "RIFF" &&
+    data.subarray(8, 12).toString("latin1") === "WEBP"
+  ) {
+    return "webp";
+  }
+  return "";
+}
+
+/** Keeps a picture from the phone in the desk folder (shots/), for the message that names it. */
+export async function keepPicture(desk, data) {
+  const kind = pictureKind(data);
+  if (kind === "") {
+    return { ok: false, error: "This file is no picture the desk can read." };
+  }
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15);
+  const name = `${stamp}-${randomBytes(3).toString("hex")}.${kind}`;
+  const dir = path.join(deskDir(desk), "shots");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, name), data, { mode: 0o600 });
+  return { ok: true, name };
+}
+
 /** Each button of the page is one core call. The card and the option come from the core's view, never from the page. */
 export const ACTIONS = {
   refresh: async ({ core, $ }) => {
@@ -264,7 +312,23 @@ export const ACTIONS = {
   },
   // A typed message goes to Claude on this host (desk-chat.py). The answer lands in chat.jsonl; the page shows it.
   say: async (desk, body) => {
-    const text = String(body.text ?? "").trim();
+    // A picture the page put in shots/ a moment ago (keepPicture) goes with the message by its file name.
+    let picture = "";
+    if (typeof body.picture === "string" && body.picture !== "") {
+      const file = path.join(deskDir(desk), "shots", body.picture);
+      const isKept =
+        NAME.test(body.picture) &&
+        (await fs.stat(file).then(
+          (stat) => stat.isFile(),
+          () => false,
+        ));
+      if (!isKept) {
+        return { ok: false, error: "The picture did not reach the desk." };
+      }
+      picture = file;
+    }
+    const text =
+      String(body.text ?? "").trim() || (picture ? "See the picture." : "");
     if (text === "") {
       return { ok: false, error: "The message is empty." };
     }
@@ -276,6 +340,13 @@ export const ACTIONS = {
     const argv = ["python3", path.join(deskDir(desk), "desk-chat.py"), text];
     if (card !== undefined) {
       argv.push("--card", card.id);
+    }
+    if (picture !== "") {
+      argv.push("--picture", picture);
+    }
+    // The page's own name for the message: the page shows it as "on its way" until the conversation carries it.
+    if (typeof body.key === "string" && NAME.test(body.key)) {
+      argv.push("--key", body.key);
     }
     desk.chatRuns += 1;
     void desk.$.process
@@ -368,7 +439,7 @@ function send(res, status, body, type = "application/json") {
   res.end(data);
 }
 
-async function readBody(req, limit = 64 * 1024) {
+async function readBytes(req, limit) {
   const parts = [];
   let size = 0;
   for await (const part of req) {
@@ -378,8 +449,11 @@ async function readBody(req, limit = 64 * 1024) {
     }
     parts.push(part);
   }
-  return Buffer.concat(parts).toString("utf8");
+  return Buffer.concat(parts);
 }
+
+const readBody = async (req, limit = 64 * 1024) =>
+  (await readBytes(req, limit)).toString("utf8");
 
 export function makeHandler(desk, config) {
   return async function handle(req, res) {
@@ -389,7 +463,21 @@ export function makeHandler(desk, config) {
     const url = new URL(req.url ?? "/", "http://desk");
     if (req.method === "GET" && url.pathname === "/api/state") {
       desk.seenAt = Date.now();
-      return send(res, 200, await buildState(desk));
+      return send(
+        res,
+        200,
+        await taggedState(desk, url.searchParams.get("tag") ?? ""),
+      );
+    }
+    if (req.method === "POST" && url.pathname === "/api/upload") {
+      if (req.headers["x-desk"] !== "1") {
+        return send(res, 400, { error: "missing header" });
+      }
+      const data = await readBytes(req, PICTURE_MAX).catch(() => null);
+      if (data === null) {
+        return send(res, 413, { ok: false, error: "The picture is too large." });
+      }
+      return send(res, 200, await keepPicture(desk, data));
     }
     if (req.method === "POST" && url.pathname === "/api/act") {
       // A page of another site cannot set this header without a preflight, and the server answers none.
